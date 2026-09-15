@@ -38,6 +38,8 @@ class SchedulerEngineConfig:
     stale_running_after_seconds: int = 60 * 60
     max_dispatches_per_tick: int = 16
     max_attempts: int = 2
+    retry_backoff_seconds: int = 1
+    max_retry_backoff_seconds: int = 5 * 60
     initial_lease_seconds: int = 60 * 60
     heartbeat_interval_seconds: int = 60
 
@@ -49,6 +51,8 @@ class SchedulerEngineConfig:
             "stale_running_after_seconds",
             "max_dispatches_per_tick",
             "max_attempts",
+            "retry_backoff_seconds",
+            "max_retry_backoff_seconds",
             "initial_lease_seconds",
             "heartbeat_interval_seconds",
         ):
@@ -57,6 +61,8 @@ class SchedulerEngineConfig:
                 raise ValueError(f"{field_name} must be a positive integer")
         if self.heartbeat_interval_seconds >= self.initial_lease_seconds:
             raise ValueError("heartbeat_interval_seconds must be less than initial_lease_seconds")
+        if self.retry_backoff_seconds > self.max_retry_backoff_seconds:
+            raise ValueError("retry_backoff_seconds must not exceed max_retry_backoff_seconds")
 
 
 class SchedulerEngine:
@@ -84,6 +90,7 @@ class SchedulerEngine:
             now=current,
             stale_after_seconds=self.config.stale_running_after_seconds,
             max_attempts=self.config.max_attempts,
+            retry_backoff_seconds=self._retry_backoff_seconds(attempt=1),
         )
         resumed_dependencies = self.store.resume_waiting_dependencies(now=current)
         counters: Counter[str] = Counter()
@@ -225,11 +232,9 @@ class SchedulerEngine:
                         now=current,
                         parent_receipt_id=occurrence.parent_receipt_id,
                     )
-                    self.store.transition_occurrence(
+                    self.store.mark_running_waiting_dependency(
                         occurrence.occurrence_id,
-                        expected_states={"running"},
-                        new_state="waiting_dependency",
-                        reason="WAITING_DEPENDENCY",
+                        dependency_id=dependency,
                         now=current,
                     )
                     counters["waiting_dependency"] += 1
@@ -335,13 +340,19 @@ class SchedulerEngine:
             )
             return "done"
         if dispatch.status == "waiting_dependency":
-            proposal = dict(occurrence.proposal)
-            proposal["wait_for"] = dispatch.waiting_dependency
-            self.store.transition_occurrence(
+            dependency = dispatch.waiting_dependency
+            if not isinstance(dependency, str) or not dependency:
+                self.store.transition_occurrence(
+                    occurrence.occurrence_id,
+                    expected_states={"running"},
+                    new_state="needs_operator",
+                    reason="WAITING_DEPENDENCY_MISSING_ID",
+                    now=now,
+                )
+                return "needs_operator"
+            self.store.mark_running_waiting_dependency(
                 occurrence.occurrence_id,
-                expected_states={"running"},
-                new_state="waiting_dependency",
-                reason="WAITING_DEPENDENCY",
+                dependency_id=dependency,
                 now=now,
             )
             return "waiting_dependency"
@@ -364,11 +375,10 @@ class SchedulerEngine:
             )
             return "needs_operator"
         if dispatch.retryable and occurrence.attempt < self.config.max_attempts:
-            self.store.transition_occurrence(
+            self.store.defer_running_retry(
                 occurrence.occurrence_id,
-                expected_states={"running"},
-                new_state="pending",
                 reason="DISPATCH_RETRY",
+                retry_after_at=now + self._retry_backoff_seconds(attempt=occurrence.attempt),
                 now=now,
             )
             return "retried"
@@ -380,6 +390,13 @@ class SchedulerEngine:
             now=now,
         )
         return "needs_operator"
+
+    def _retry_backoff_seconds(self, *, attempt: int) -> int:
+        exponent = max(0, attempt - 1)
+        return min(
+            self.config.retry_backoff_seconds * (2 ** exponent),
+            self.config.max_retry_backoff_seconds,
+        )
 
     def _create_followup(
         self,

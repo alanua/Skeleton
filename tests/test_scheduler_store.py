@@ -121,6 +121,38 @@ def test_atomic_claim_sets_attempt_and_prevents_duplicate_worker(tmp_path) -> No
     assert duplicate is None
 
 
+def test_retry_after_blocks_claim_until_due(tmp_path) -> None:
+    store = SchedulerStore(tmp_path / "scheduler.sqlite3")
+    store.initialize()
+    schedule, _ = store.register(_spec(), now=1)
+    occurrence_id = stable_occurrence_id(schedule.spec.schedule_id, schedule.version, 100)
+    proposal = build_execution_proposal(schedule, occurrence_id=occurrence_id, scheduled_for=100)
+    store.create_occurrence(
+        occurrence_id=occurrence_id,
+        schedule=schedule,
+        scheduled_for=100,
+        state="pending",
+        reason="DISPATCH_REQUIRED",
+        proposal=proposal,
+        now=100,
+    )
+    first = store.claim_next_pending(now=101)
+    assert first is not None
+
+    store.defer_running_retry(
+        occurrence_id,
+        reason="DISPATCH_RETRY",
+        retry_after_at=120,
+        now=110,
+    )
+
+    assert store.claim_next_pending(now=119) is None
+    second = store.claim_next_pending(now=120)
+    assert second is not None
+    assert second.attempt == 2
+    assert second.retry_after_at is None
+
+
 def test_transition_conflict_fails_closed(tmp_path) -> None:
     store = SchedulerStore(tmp_path / "scheduler.sqlite3")
     store.initialize()

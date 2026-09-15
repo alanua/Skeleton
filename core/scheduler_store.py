@@ -88,6 +88,10 @@ class SchedulerStore:
                     claim_owner TEXT,
                     lease_expires_at INTEGER,
                     heartbeat_at INTEGER,
+                    retry_after_at INTEGER,
+                    wait_dependency_id TEXT,
+                    wait_dependency_state TEXT,
+                    wait_dependency_updated_at INTEGER,
                     UNIQUE(schedule_id, schedule_version, scheduled_for),
                     FOREIGN KEY(schedule_id, schedule_version)
                         REFERENCES schedule_versions(schedule_id, version)
@@ -111,13 +115,24 @@ class SchedulerStore:
                     ON occurrences(schedule_id, state, scheduled_for);
                 CREATE INDEX IF NOT EXISTS idx_occurrences_updated
                     ON occurrences(state, updated_at);
-                CREATE INDEX IF NOT EXISTS idx_occurrences_pending
-                    ON occurrences(state, scheduled_for, occurrence_id);
                 CREATE INDEX IF NOT EXISTS idx_dispatch_receipts_occurrence
                     ON dispatch_receipts(occurrence_id, attempt);
                 """
             )
             self._ensure_occurrence_columns(connection)
+            connection.execute("DROP INDEX IF EXISTS idx_occurrences_pending")
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_occurrences_pending
+                    ON occurrences(state, retry_after_at, scheduled_for, occurrence_id)
+                """
+            )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_occurrences_waiting_dependency
+                    ON occurrences(state, wait_dependency_id, wait_dependency_state)
+                """
+            )
             connection.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_occurrences_running_lease
@@ -314,8 +329,8 @@ class SchedulerStore:
             raise SchedulerValidationError("INVALID_LEASE_SECONDS", "lease_seconds must be positive")
         lease_expires_at = now + lease_seconds
         with self._transaction() as connection:
-            where = "state = 'pending'"
-            params: list[object] = []
+            where = "state = 'pending' AND (retry_after_at IS NULL OR retry_after_at <= ?)"
+            params: list[object] = [now]
             if exclude_occurrence_ids:
                 placeholders = ",".join("?" for _ in exclude_occurrence_ids)
                 where += f" AND occurrence_id NOT IN ({placeholders})"
@@ -345,7 +360,11 @@ class SchedulerStore:
                        idempotency_key = ?,
                        claim_owner = ?,
                        lease_expires_at = ?,
-                       heartbeat_at = ?
+                       heartbeat_at = ?,
+                       retry_after_at = NULL,
+                       wait_dependency_id = NULL,
+                       wait_dependency_state = NULL,
+                       wait_dependency_updated_at = NULL
                  WHERE occurrence_id = ? AND state = 'pending' AND attempt = ?
                 """,
                 (
@@ -428,12 +447,18 @@ class SchedulerStore:
                        started_at = CASE WHEN ? IS NOT NULL THEN ? ELSE started_at END,
                        claim_owner = CASE WHEN ? = 'running' THEN claim_owner ELSE NULL END,
                        lease_expires_at = CASE WHEN ? = 'running' THEN lease_expires_at ELSE NULL END,
-                       heartbeat_at = CASE WHEN ? = 'running' THEN heartbeat_at ELSE NULL END
+                       heartbeat_at = CASE WHEN ? = 'running' THEN heartbeat_at ELSE NULL END,
+                       retry_after_at = CASE WHEN ? = 'pending' THEN retry_after_at ELSE NULL END,
+                       wait_dependency_id = CASE WHEN ? = 'waiting_dependency' THEN wait_dependency_id ELSE NULL END,
+                       wait_dependency_state = CASE WHEN ? = 'waiting_dependency' THEN wait_dependency_state ELSE NULL END,
+                       wait_dependency_updated_at = CASE WHEN ? = 'waiting_dependency' THEN wait_dependency_updated_at ELSE NULL END
                  WHERE occurrence_id = ? AND state IN ({placeholders})
                 """,
                 [
                     new_state, reason, now, started_at, started_at,
-                    new_state, new_state, new_state, occurrence_id,
+                    new_state, new_state, new_state,
+                    new_state, new_state, new_state, new_state,
+                    occurrence_id,
                     *sorted(expected_states),
                 ],
             )
@@ -445,8 +470,123 @@ class SchedulerStore:
             assert row is not None
             return self._occurrence_from_row(row)
 
+    def defer_running_retry(
+        self,
+        occurrence_id: str,
+        *,
+        reason: str,
+        retry_after_at: int,
+        now: int,
+    ) -> OccurrenceRecord:
+        _reason(reason)
+        _timestamp(retry_after_at, "retry_after_at")
+        _timestamp(now, "now")
+        if retry_after_at < now:
+            raise SchedulerValidationError(
+                "INVALID_RETRY_AFTER", "retry_after_at must be at or after now"
+            )
+        with self._transaction() as connection:
+            result = connection.execute(
+                """
+                UPDATE occurrences
+                   SET state = 'pending',
+                       reason = ?,
+                       updated_at = ?,
+                       claim_owner = NULL,
+                       lease_expires_at = NULL,
+                       heartbeat_at = NULL,
+                       retry_after_at = ?,
+                       wait_dependency_id = NULL,
+                       wait_dependency_state = NULL,
+                       wait_dependency_updated_at = NULL
+                 WHERE occurrence_id = ? AND state = 'running'
+                """,
+                (reason, now, retry_after_at, occurrence_id),
+            )
+            if result.rowcount != 1:
+                raise SchedulerStoreError("OCCURRENCE_STATE_CONFLICT")
+            row = connection.execute(
+                "SELECT * FROM occurrences WHERE occurrence_id = ?", (occurrence_id,)
+            ).fetchone()
+            assert row is not None
+            return self._occurrence_from_row(row)
+
+    def mark_running_waiting_dependency(
+        self,
+        occurrence_id: str,
+        *,
+        dependency_id: str,
+        now: int,
+    ) -> OccurrenceRecord:
+        _owner(dependency_id)
+        _timestamp(now, "now")
+        with self._transaction() as connection:
+            dependency_row = connection.execute(
+                "SELECT state, updated_at FROM occurrences WHERE occurrence_id = ?",
+                (dependency_id,),
+            ).fetchone()
+            dependency_state = (
+                "missing" if dependency_row is None else str(dependency_row["state"])
+            )
+            dependency_updated_at = (
+                None if dependency_row is None else int(dependency_row["updated_at"])
+            )
+            row = connection.execute(
+                "SELECT proposal_json FROM occurrences WHERE occurrence_id = ? AND state = 'running'",
+                (occurrence_id,),
+            ).fetchone()
+            if row is None:
+                raise SchedulerStoreError("OCCURRENCE_STATE_CONFLICT")
+            proposal = json.loads(str(row["proposal_json"]))
+            payload = proposal.get("payload")
+            if isinstance(payload, dict):
+                payload["wait_for"] = dependency_id
+            else:
+                proposal["payload"] = {"wait_for": dependency_id}
+            proposal_json = json.dumps(
+                thaw_json(proposal), ensure_ascii=True, allow_nan=False,
+                separators=(",", ":"), sort_keys=True,
+            )
+            result = connection.execute(
+                """
+                UPDATE occurrences
+                   SET state = 'waiting_dependency',
+                       reason = 'WAITING_DEPENDENCY',
+                       proposal_json = ?,
+                       updated_at = ?,
+                       claim_owner = NULL,
+                       lease_expires_at = NULL,
+                       heartbeat_at = NULL,
+                       retry_after_at = NULL,
+                       wait_dependency_id = ?,
+                       wait_dependency_state = ?,
+                       wait_dependency_updated_at = ?
+                 WHERE occurrence_id = ? AND state = 'running'
+                """,
+                (
+                    proposal_json,
+                    now,
+                    dependency_id,
+                    dependency_state,
+                    dependency_updated_at,
+                    occurrence_id,
+                ),
+            )
+            if result.rowcount != 1:
+                raise SchedulerStoreError("OCCURRENCE_STATE_CONFLICT")
+            updated = connection.execute(
+                "SELECT * FROM occurrences WHERE occurrence_id = ?", (occurrence_id,)
+            ).fetchone()
+            assert updated is not None
+            return self._occurrence_from_row(updated)
+
     def recover_stale_running(
-        self, *, now: int, stale_after_seconds: int, max_attempts: int = 2
+        self,
+        *,
+        now: int,
+        stale_after_seconds: int,
+        max_attempts: int = 2,
+        retry_backoff_seconds: int = 0,
     ) -> dict[str, int]:
         _timestamp(now, "now")
         if stale_after_seconds <= 0:
@@ -455,6 +595,10 @@ class SchedulerStore:
             )
         if max_attempts <= 0:
             raise SchedulerValidationError("INVALID_MAX_ATTEMPTS", "max_attempts must be positive")
+        if retry_backoff_seconds < 0:
+            raise SchedulerValidationError(
+                "INVALID_RETRY_BACKOFF", "retry_backoff_seconds must be non-negative"
+            )
         cutoff = max(0, now - stale_after_seconds)
         with self._transaction() as connection:
             rows = connection.execute(
@@ -510,6 +654,7 @@ class SchedulerStore:
                         needs_operator += update.rowcount
                         continue
                 if record.attempt < max_attempts:
+                    retry_after_at = now + retry_backoff_seconds
                     update = connection.execute(
                         """
                         UPDATE occurrences
@@ -517,10 +662,12 @@ class SchedulerStore:
                                reason = 'STALE_RUNNING_RETRY',
                                updated_at = ?,
                                claim_owner = NULL,
-                               lease_expires_at = NULL
+                               lease_expires_at = NULL,
+                               heartbeat_at = NULL,
+                               retry_after_at = ?
                          WHERE occurrence_id = ? AND state = 'running'
                         """,
-                        (now, record.occurrence_id),
+                        (now, retry_after_at, record.occurrence_id),
                     )
                     retried += update.rowcount
                 else:
@@ -530,9 +677,11 @@ class SchedulerStore:
                            SET state = 'needs_operator',
                                reason = 'STALE_RUNNING_RECOVERY_EXHAUSTED',
                                updated_at = ?,
-                               lease_expires_at = NULL
-                         WHERE occurrence_id = ? AND state = 'running'
-                        """,
+                                   lease_expires_at = NULL,
+                                   heartbeat_at = NULL,
+                                   retry_after_at = NULL
+                             WHERE occurrence_id = ? AND state = 'running'
+                            """,
                         (now, record.occurrence_id),
                     )
                     needs_operator += update.rowcount
@@ -551,22 +700,38 @@ class SchedulerStore:
             for row in rows:
                 record = self._occurrence_from_row(row)
                 payload = record.proposal.get("payload")
-                dependency = payload.get("wait_for") if isinstance(payload, Mapping) else None
+                dependency = record.wait_dependency_id
+                if dependency is None and isinstance(payload, Mapping):
+                    dependency = payload.get("wait_for")
                 if not isinstance(dependency, str):
                     continue
                 dependency_row = connection.execute(
-                    "SELECT state FROM occurrences WHERE occurrence_id = ?",
+                    "SELECT state, updated_at FROM occurrences WHERE occurrence_id = ?",
                     (dependency,),
                 ).fetchone()
-                if dependency_row is None or str(dependency_row[0]) != "done":
+                if dependency_row is None:
+                    continue
+                dependency_state = str(dependency_row["state"])
+                dependency_updated_at = int(dependency_row["updated_at"])
+                changed = (
+                    record.wait_dependency_state is None
+                    or record.wait_dependency_state != dependency_state
+                    or record.wait_dependency_updated_at != dependency_updated_at
+                )
+                if dependency_state != "done" or not changed:
                     continue
                 result = connection.execute(
                     """
                     UPDATE occurrences
-                       SET state = 'pending', reason = 'DEPENDENCY_SATISFIED', updated_at = ?
+                       SET state = 'pending',
+                           reason = 'DEPENDENCY_SATISFIED',
+                           updated_at = ?,
+                           retry_after_at = NULL,
+                           wait_dependency_state = ?,
+                           wait_dependency_updated_at = ?
                      WHERE occurrence_id = ? AND state = 'waiting_dependency'
                     """,
-                    (now, record.occurrence_id),
+                    (now, dependency_state, dependency_updated_at, record.occurrence_id),
                 )
                 resumed += result.rowcount
             return resumed
@@ -785,6 +950,27 @@ class SchedulerStore:
                 if "parent_receipt_id" not in row.keys() or row["parent_receipt_id"] is None
                 else str(row["parent_receipt_id"])
             ),
+            retry_after_at=(
+                None
+                if "retry_after_at" not in row.keys() or row["retry_after_at"] is None
+                else int(row["retry_after_at"])
+            ),
+            wait_dependency_id=(
+                None
+                if "wait_dependency_id" not in row.keys() or row["wait_dependency_id"] is None
+                else str(row["wait_dependency_id"])
+            ),
+            wait_dependency_state=(
+                None
+                if "wait_dependency_state" not in row.keys() or row["wait_dependency_state"] is None
+                else str(row["wait_dependency_state"])
+            ),
+            wait_dependency_updated_at=(
+                None
+                if "wait_dependency_updated_at" not in row.keys()
+                or row["wait_dependency_updated_at"] is None
+                else int(row["wait_dependency_updated_at"])
+            ),
         )
 
     @staticmethod
@@ -801,6 +987,10 @@ class SchedulerStore:
             "claim_owner": "ALTER TABLE occurrences ADD COLUMN claim_owner TEXT",
             "lease_expires_at": "ALTER TABLE occurrences ADD COLUMN lease_expires_at INTEGER",
             "heartbeat_at": "ALTER TABLE occurrences ADD COLUMN heartbeat_at INTEGER",
+            "retry_after_at": "ALTER TABLE occurrences ADD COLUMN retry_after_at INTEGER",
+            "wait_dependency_id": "ALTER TABLE occurrences ADD COLUMN wait_dependency_id TEXT",
+            "wait_dependency_state": "ALTER TABLE occurrences ADD COLUMN wait_dependency_state TEXT",
+            "wait_dependency_updated_at": "ALTER TABLE occurrences ADD COLUMN wait_dependency_updated_at INTEGER",
         }
         for column, statement in migrations.items():
             if column not in columns:
