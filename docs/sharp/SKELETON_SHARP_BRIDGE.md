@@ -10,6 +10,12 @@ Only `D55CF6352EB08E_V1.01.zip` is an accepted base. The verifier in
 A same-marketing-model image is not interchangeable: in particular the known
 `C55CF6352EB480` / `LC550DUY-SHA1` V1.02 image is rejected.
 
+The exact operator-supplied D55 package has now been recovered privately and
+verified against both canonical hashes. Its `MSLIB` payload starts at image
+offset `0x00aa2000`, has allocation `0x02d14000`, and SHA-256
+`18058425de9074b20caf017e8d31f17bffab69bce36044810447eda40f2830b7`.
+No OEM bytes are committed to this repository.
+
 ## Control architecture
 
 Normal stock LAN exposes DIAL and AwoX/DLNA but no verified generic Power,
@@ -21,10 +27,65 @@ Preferred path:
 
 `HTTP allowlist -> mstarloopback -> DFB_DEV_IOC_SEND_LOOPBACK_EVENT -> dfb_input_dispatch -> stock APM/tvmain`
 
-Before enabling this path in a derived image, the exact OEM `MSLIB` must be
-checked for the `mstarloopback` input driver (or an ABI-identical equivalent)
-and the exact DirectFB ioctl ABI. If either check fails, the build must stop;
-MSLIB must not be silently replaced.
+This path is now verified against the exact D55 V1.01 `MSLIB`, not only against
+related MStar source. The exact filesystem contains:
+
+- `/directfb-1.4-0/inputdrivers/libdirectfb_mstar_loopback_input.so`
+  - size `15476`
+  - SHA-256 `9bb7cd9926bbde4ff833a5c26a0475ee659973d00622d276fc396599d98083b2`
+  - virtual input device string `mstarloopback`
+- `/libdirectfb-1.4.so.0.2.0`
+  - size `854168`
+  - SHA-256 `edf8ac9a4d5cba2e0f43cf1cd91cfc03bebf6a9bf1e948f4b8ee3cd3e3f1ce9e`
+- DirectFB module version `1.4.2`
+- ELF ABI `MIPS32 little-endian, o32, mips32r2`
+
+### Exact D55 loopback ABI
+
+Machine-code inspection of the exact stripped D55 loopback driver confirms:
+
+- `DFB_DEV_IOC_SEND_LOOPBACK_EVENT` is compared against **`0x80044405`** on
+  this MIPS32 ABI. The common x86/asm-generic expectation `0x40044405` is wrong
+  for this firmware and must not be hardcoded.
+- the driver zero-initializes exactly **72 bytes** for the local
+  `DFBInputEvent` and copies exactly 72 bytes from `InputDeviceIoctlData.param`
+  before calling the stock input path;
+- therefore the active request prefix consumed by the driver is
+  `4-byte request + 72-byte DFBInputEvent = 76 bytes`;
+- the exact `libdirectfb` core allocates and copies **84 bytes** for the full
+  `InputDeviceIoctlData`, matching `int request` plus an 80-byte parameter area;
+- key press and key release remain a mandatory pair.
+
+The exact 32-bit event layout consumed by this driver is:
+
+| Offset | Field |
+| ---: | --- |
+| `0x00` | `clazz` |
+| `0x04` | `type` |
+| `0x08` | `device_id` |
+| `0x0c` | `flags` |
+| `0x10` | `timestamp` (two 32-bit values) |
+| `0x18` | `key_code` |
+| `0x1c` | `key_id` |
+| `0x20` | `key_symbol` |
+| `0x24` | `modifiers` |
+| `0x28` | `locks` |
+| `0x2c` | `button` |
+| `0x30` | `buttons` |
+| `0x34` | `axis` |
+| `0x38` | `axisabs` |
+| `0x3c` | `axisrel` |
+| `0x40` | `min` |
+| `0x44` | `max` |
+
+Total: **72 bytes**. There is no trailing `ex_device_id` in the event object
+copied by this exact binary.
+
+For key injection, use fixed mappings only, zero-initialize the event, set
+`type=1` for press or `type=2` for release, and set flags to `0x38`
+(`KEYCODE | KEYID | KEYSYMBOL`). The bridge should compile against the exact
+firmware-compatible DirectFB ABI rather than manually serializing a guessed
+foreign-platform structure.
 
 Recovered Sharp key symbols:
 
@@ -47,6 +108,10 @@ release pair. The HTTP caller must never be allowed to supply a raw key symbol.
 not used as the generic bridge. Matching MStar source shows that normal builds
 recognize only hardcoded DIAL test strings, while the generic parser is compiled
 out. Unknown datagrams are therefore not a safe arbitrary-key transport.
+
+`BigBang_Socket` is also not a key path. Available firmware evidence identifies
+it as application/process-launch IPC; key dispatch remains a separate DirectFB
+path.
 
 ## HTTP surface
 
@@ -112,9 +177,11 @@ only hashes, manifests, source/tooling and a reproducible patch description.
 
 A candidate `D55CF6352EB08E_V1.01-Skeleton-01.bin` is buildable only after:
 
-1. exact OEM ZIP/BIN hashes pass;
-2. exact partition/update script is recovered from that BIN;
-3. exact `mstarloopback`/DirectFB ABI is confirmed;
+1. exact OEM ZIP/BIN hashes pass — **verified**;
+2. exact partition/update script is recovered from that BIN — **verified for the
+   current partition offsets/allocation map; packaging integrity metadata still
+   needs full build-path validation**;
+3. exact `mstarloopback`/DirectFB ABI is confirmed — **verified**;
 4. exact APP SquashFS parameters and allocation are known;
 5. source/standby ABI decisions are explicit;
 6. unchanged payload hashes remain identical after repack;
