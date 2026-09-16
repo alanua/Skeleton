@@ -1,0 +1,82 @@
+schema: skeleton.sharp_firmware_manifest.v1
+classification: REVIEW
+public_safe: true
+model: LC-55CFE6352E
+product_code: D55CF6352EB08E
+vendor_version: V1.01
+software_env: 7.2.12.0.0.1
+build_code: CP152725
+board: BD_CVT_T_MS6308_711
+panel: LSC550HN02
+soc_family: MStar_MSD6308
+kernel: 3.1.10-mstar
+architecture: mips
+base_artifact:
+  zip_name: D55CF6352EB08E_V1.01.zip
+  zip_sha256: fe3e0c350b25cbbf0a0223bf613f40a21c83dc913e7591253e2a66696e508ca2
+  inner_name: allupgrade_6308rtbm.bin
+  inner_sha256: c1d01b0e76f022139278124ee158f8fe466a40310c0e53e43adc036d557924fd
+redistribution:
+  oem_blob_in_public_repo: false
+  derived_blob_in_public_repo: false
+  private_input_required: true
+lineage_gate:
+  reject_same_marketing_model_other_product_codes: true
+  explicitly_rejected:
+    - product_code: C55CF6352EB480
+      panel: LC550DUY-SHA1
+      version: V1.02
+partitions:
+  KL: uboot_uimage_kernel
+  RFS: ubifs
+  CONFIG: ubifs
+  customer: ubifs
+  customerbackup: ubifs
+  oad: ubifs
+  certificate: ubifs
+  MSLIB: squashfs_v4_zlib
+  APP: squashfs_v4_zlib
+  RTPM: raw
+control_research:
+  normal_lan:
+    dial: verified
+    awox_dlna: verified
+    generic_power_source_dpad_daemon: not_found
+  preferred_input_bridge:
+    mechanism: directfb_mstar_loopback
+    exact_oem_presence: pending_binary_verification
+    virtual_device: mstarloopback
+    ioctl: DFB_DEV_IOC_SEND_LOOPBACK_EVENT
+    event_contract: press_release_pair
+  rejected_input_bridge:
+    mechanism: mstar_networkir_socket
+    reason: hardcoded_dial_test_messages_not_generic_key_transport
+key_symbols:
+  left: 0xf000
+  right: 0xf001
+  up: 0xf002
+  down: 0xf003
+  power: 0xf00f
+  menu: 0xf012
+  back_exit: 0xf062
+  input_source: 0xf068
+  ok_select: 0x000d
+patch_policy:
+  preferred_changed_partition: APP
+  keep_unchanged_byte_identical:
+    - KL
+    - RFS
+    - MSLIB
+    - CONFIG
+    - customer
+  source_control: exact_abi_required
+  standby_control: exact_high_level_abi_or_fixed_loopback_power
+  power_on: wol_candidate_physical_verification_required
+  secure_verification_bypass: forbidden
+  debug_daemon_enablement: forbidden
+derived_target:
+  name: D55CF6352EB08E_V1.01-Skeleton-01.bin
+  state: not_built_private_oem_input_unavailable
+references:
+  parent_issue: 4171
+  build_issue: 4173
