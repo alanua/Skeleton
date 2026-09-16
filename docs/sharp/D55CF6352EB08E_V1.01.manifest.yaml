@@ -37,6 +37,51 @@ partitions:
   MSLIB: squashfs_v4_zlib
   APP: squashfs_v4_zlib
   RTPM: raw
+exact_mslib_verification:
+  image_offset: 0x00aa2000
+  image_length: 0x02d14000
+  sha256: 18058425de9074b20caf017e8d31f17bffab69bce36044810447eda40f2830b7
+  directfb_version: 1.4.2
+  architecture: mips32el_o32
+  loopback_driver:
+    path: /directfb-1.4-0/inputdrivers/libdirectfb_mstar_loopback_input.so
+    size: 15476
+    sha256: 9bb7cd9926bbde4ff833a5c26a0475ee659973d00622d276fc396599d98083b2
+    virtual_device: mstarloopback
+  directfb_core:
+    path: /libdirectfb-1.4.so.0.2.0
+    size: 854168
+    sha256: edf8ac9a4d5cba2e0f43cf1cd91cfc03bebf6a9bf1e948f4b8ee3cd3e3f1ce9e
+  ioctl_abi:
+    request_name: DFB_DEV_IOC_SEND_LOOPBACK_EVENT
+    request_value_mips32: 0x80044405
+    request_offset: 0
+    input_device_ioctl_data_size: 84
+    param_offset: 4
+    param_capacity: 80
+    dfb_input_event_size: 72
+    active_request_plus_event_bytes: 76
+    keypress_type: 1
+    keyrelease_type: 2
+    key_flags_keycode_keyid_keysymbol: 0x38
+    event_field_offsets_32bit:
+      clazz: 0
+      type: 4
+      device_id: 8
+      flags: 12
+      timestamp: 16
+      key_code: 24
+      key_id: 28
+      key_symbol: 32
+      modifiers: 36
+      locks: 40
+      button: 44
+      buttons: 48
+      axis: 52
+      axisabs: 56
+      axisrel: 60
+      min: 64
+      max: 68
 control_research:
   normal_lan:
     dial: verified
@@ -44,9 +89,11 @@ control_research:
     generic_power_source_dpad_daemon: not_found
   preferred_input_bridge:
     mechanism: directfb_mstar_loopback
-    exact_oem_presence: pending_binary_verification
+    exact_oem_presence: verified
+    exact_oem_abi: verified
     virtual_device: mstarloopback
     ioctl: DFB_DEV_IOC_SEND_LOOPBACK_EVENT
+    ioctl_value_mips32: 0x80044405
     event_contract: press_release_pair
   rejected_input_bridge:
     mechanism: mstar_networkir_socket
@@ -76,7 +123,7 @@ patch_policy:
   debug_daemon_enablement: forbidden
 derived_target:
   name: D55CF6352EB08E_V1.01-Skeleton-01.bin
-  state: not_built_private_oem_input_unavailable
+  state: exact_oem_input_and_loopback_abi_verified_build_not_yet_completed
 references:
   parent_issue: 4171
   build_issue: 4173
