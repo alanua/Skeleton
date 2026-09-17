@@ -1,0 +1,34 @@
+name: Bug report
+description: Report a reproducible Skeleton defect
+title: "[bug] "
+labels: []
+body:
+  - type: markdown
+    attributes:
+      value: "Do not include secrets, credentials, private keys, personal data, or sensitive device/network details."
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Affected component / path
+      description: Name the manifest, service, runner, runtime, app, device-control path, or documentation area involved.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction
+      description: Provide the smallest safe reproduction and relevant non-secret logs/evidence.
+    validations:
+      required: true
+  - type: textarea
+    id: verification
+    attributes:
+      label: Current verification
+      description: What state did you independently observe after the failure?
