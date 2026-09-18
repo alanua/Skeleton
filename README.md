@@ -38,6 +38,14 @@ This is not presented as broad external adoption. It is an actively maintained O
 
 See [Project impact and real-world use](docs/PROJECT_IMPACT.md) for concrete evidence and [Threat model](docs/THREAT_MODEL.md) for the security boundary.
 
+## Codex in the maintainer architecture
+
+Skeleton is model-neutral by design, but the current maintainer deployment uses Codex as the primary code-generation executor behind Runner. Codex is therefore not treated as an unbounded chat assistant or an optional demo integration: its output passes through task schemas, allowed-file/capability constraints, provider/runtime checks, protected merge boundaries, publication evidence and post-condition verification.
+
+A public example is [#4172](https://github.com/alanua/Skeleton/issues/4172), which specifies a primary-Codex-only health probe with no fallback provider, at most one provider request, read-only sandboxing, zero temporary git/codegen state, sanitized evidence and fail-closed outcomes before a blocked code-generation task may be retried.
+
+That relationship is intentional: Skeleton is the control and trust layer around an AI code executor that is already part of the maintainer's real engineering pipeline.
+
 ## Five-minute public tour
 
 This validates the public control-plane contracts without credentials, private topology, network access, or device access.
