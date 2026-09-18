@@ -16,6 +16,34 @@ The project uses AI tools such as Codex and other model providers for bounded en
 
 AI output is treated as a proposal or execution step inside the project control model, not as independent authority.
 
+## Bounded worker model
+
+Skeleton treats models and automation workers as scoped capabilities, not as interchangeable superusers. A worker may be allowed to inspect, review, prepare a patch, run tests, or execute one registered maintenance operation without inheriting unrelated authority.
+
+Typical boundaries include:
+
+- read/audit roles that cannot mutate repositories or runtimes;
+- issue-workspace coding roles that operate inside a bounded checkout;
+- review roles that can analyze diffs and test evidence without merge authority;
+- runtime-maintenance handlers that bypass normal coding agents and expose only fixed, allowlisted operations;
+- Home Edge execution paths that carry explicit node, user, lane, timeout, idempotency, approval, and verification requirements.
+
+Provider choice does not widen the role. Codex, another hosted model, or a local model receives only the authority declared for that route.
+
+## Authority ladder
+
+Skeleton resolves conflicts in this order:
+
+    human decision / repository policy
+            >
+    canonical private runtime state
+            >
+    derived indexes, projections, and summaries
+            >
+    model inference
+
+A model may identify a likely inconsistency, but it does not silently rewrite higher-authority state. Derived memory and graph/index layers are aids to retrieval, not independent sources of operational truth.
+
 ## Human control boundary
 
 The primary maintainer owns final decisions about merge, deployment, credentials, network changes, firmware, destructive actions, and physical-device operations. Security-sensitive actions use explicit approval and registered execution paths.

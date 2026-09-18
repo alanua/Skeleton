@@ -2,6 +2,8 @@
 
 Skeleton coordinates code, runtimes, infrastructure, and physical-device control paths. Security reports are therefore treated as maintainer-sensitive even when the affected component appears small.
 
+For the repository's explicit trust boundaries, authority model, high-value attack surfaces, and fail-closed expectations, see [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
+
 ## Supported code
 
 Security fixes target the current `main` branch and any explicitly documented supported release/runtime line. Historical prototypes, archived evidence, and stale deployment snapshots should not be assumed supported unless the repository says otherwise.
