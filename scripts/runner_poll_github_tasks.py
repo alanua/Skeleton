@@ -18184,11 +18184,14 @@ def home_edge_audit_persist_v1(body: str) -> str:
 def home_edge_01_debian_media_bootstrap_v1(body: str) -> str:
     task_id = HOME_EDGE_01_DEBIAN_MEDIA_BOOTSTRAP_V1
     try:
-        from core.home_edge.debian_media_bootstrap import (
-            execute_debian_media_bootstrap_task,
-            receipt_status_lines,
-            success_criteria_met,
+        from core.skeleton_media_bridge import load_media_module
+
+        media_bootstrap = load_media_module("home_edge.debian_media_bootstrap")
+        execute_debian_media_bootstrap_task = (
+            media_bootstrap.execute_debian_media_bootstrap_task
         )
+        receipt_status_lines = media_bootstrap.receipt_status_lines
+        success_criteria_met = media_bootstrap.success_criteria_met
 
         registered_sha = _read_exact_git_sha("main")
         github_sha = _read_exact_git_sha("origin/main")
@@ -18262,11 +18265,14 @@ def home_edge_01_post_migration_reconcile_v1(body: str) -> str:
 def home_edge_01_media_source_snapshot_v1(body: str) -> str:
     task_id = HOME_EDGE_01_MEDIA_SOURCE_SNAPSHOT_V1
     try:
-        from core.home_edge.media_source_snapshot import (
-            execute_media_source_snapshot_task,
-            receipt_status_lines,
-            success_criteria_met,
+        from core.skeleton_media_bridge import load_media_module
+
+        media_snapshot = load_media_module("home_edge.media_source_snapshot")
+        execute_media_source_snapshot_task = (
+            media_snapshot.execute_media_source_snapshot_task
         )
+        receipt_status_lines = media_snapshot.receipt_status_lines
+        success_criteria_met = media_snapshot.success_criteria_met
 
         registered_sha = _read_exact_git_sha("main")
         github_sha = _read_exact_git_sha("origin/main")

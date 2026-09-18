@@ -14,6 +14,8 @@ Some media source still exists in Skeleton because current Runner/runtime-mainte
 
 The compatibility copies must not be deleted until the remaining direct imports are replaced by an explicit cross-repository contract and both repositories pass CI.
 
+The first compatibility boundary is `core.skeleton_media_bridge`. Control-plane callers use that bridge instead of importing canonical media implementation directly. It prefers an installed `skeleton_media` package and falls back to the temporary local copies only while the production/runtime cutover is incomplete. If an installed external package is present but broken, the bridge fails closed rather than silently using stale local code.
+
 ## Production
 
 Repository extraction did not change the live Home Edge installation.
