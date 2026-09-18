@@ -100,3 +100,7 @@ docs/AUFMASS_SOURCE_PACK.md
 ```
 
 These documents define the public/private boundary for bounded private pilots and source-pack intake.
+
+## License
+
+Licensed under the [Apache License 2.0](LICENSE).
