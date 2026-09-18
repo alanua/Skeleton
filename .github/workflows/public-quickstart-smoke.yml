@@ -1,0 +1,39 @@
+name: Public quickstart smoke
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  public-quickstart-smoke:
+    name: Public quickstart smoke
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install public smoke dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest PyYAML
+
+      - name: Run public quickstart smoke tests
+        run: |
+          python -m pytest -q \
+            tests/test_project_tree.py \
+            tests/test_project_loader.py \
+            tests/test_project_manifests.py \
+            tests/test_boot_manifest.py

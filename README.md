@@ -1,8 +1,32 @@
 # Skeleton
 
-Skeleton is a model-neutral control and execution layer for reliable LLM-assisted work.
+**A model-neutral control plane for safe, auditable AI-assisted engineering and edge execution.**
 
-It turns an assistant session into a bounded engineering workflow: load declared context, select an explicit mode, route memory by trust/privacy class, execute through registered paths, and produce verifiable evidence of what changed.
+Skeleton turns an assistant session into a bounded engineering workflow: load declared context, route work to the right project, pass mutations through explicit approval/execution boundaries, and verify what actually changed.
+
+It is used by its primary maintainer for real cross-repository engineering and Home Edge operations. Public adoption is still early; the repository does not claim third-party deployment numbers it cannot substantiate.
+
+```text
+Human intent
+   -> project/context routing
+   -> AI or human worker
+   -> approval / risk gate
+   -> registered Runner / executor
+   -> repository, service, or edge action
+   -> independent verification
+   -> audit + rollback state
+```
+
+### At a glance
+
+- **Model-neutral:** Codex, ChatGPT, Gemini, local models, or human workers can sit behind the same control contracts.
+- **Bounded execution:** privileged work goes through registered identities, lanes, timeouts, and approval rules.
+- **Verifiable outcomes:** Skeleton distinguishes a command being sent from the intended state being independently verified.
+- **Cross-repository:** project routing and exact revision contracts keep canonical source ownership explicit.
+- **Real edge boundary:** the same patterns cover software repositories and Home Edge / physical-device workflows.
+- **Open source:** Apache-2.0, with public security, contribution, maintenance, and governance documentation.
+
+**New here?** Run the safe [5-minute quickstart](docs/QUICKSTART.md), then read [project impact](docs/PROJECT_IMPACT.md) and the [threat model](docs/THREAT_MODEL.md).
 
 ## Why Skeleton exists
 
@@ -55,6 +79,16 @@ Current entrypoint: BOOT_MANIFEST.yaml
 The project is under active development. Interfaces and registries may evolve while safety, auditability, and continuity rules are kept explicit.
 
 ## Start here
+
+For a no-credentials, no-deployment verification path, use [docs/QUICKSTART.md](docs/QUICKSTART.md).
+
+For reviewers evaluating the project:
+
+- [docs/PROJECT_IMPACT.md](docs/PROJECT_IMPACT.md) — current real-world use and maintainer workload
+- [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) — security boundaries and why agent-to-runtime execution needs explicit controls
+- [docs/AI_ASSISTED_MAINTENANCE.md](docs/AI_ASSISTED_MAINTENANCE.md) — human-controlled AI maintenance model
+
+Canonical control-plane entrypoints:
 
 - `BOOT_MANIFEST.yaml` — canonical boot/context entrypoint
 - `PROJECT_INDEX.yaml` / `PROJECT_TREE.yaml` — project structure
