@@ -69,3 +69,21 @@ This is also the main reason additional Codex/API capacity would be useful: the 
 The public repository intentionally excludes credentials, private keys, personal documents, private device registries, production databases, signing material, and private household topology.
 
 Public source describes the reusable control plane. Private runtime state stays behind explicit trust boundaries.
+
+## Issue queue semantics
+
+Skeleton's GitHub issue count is not intended to represent an end-user bug count. The repository also uses issues as machine-readable, bounded engineering work records for Runner tasks, validation gates, recovery work, cross-repository maintenance, and operator-reviewed follow-up. Open issues can therefore include queued or blocked maintenance work alongside conventional bugs and feature requests.
+
+That model is deliberate: work is kept inspectable in public-safe issue/PR history instead of being hidden inside an autonomous agent session. It also means raw issue count should not be interpreted as a measure of unresolved user-facing defects.
+
+## Companion ecosystem and maturity
+
+Skeleton coordinates several repositories with different maturity and licensing states. They should not all be described as equivalent open-source products:
+
+- `alanua/skeleton-media` — separate Apache-2.0 public media subsystem extracted from Skeleton Core.
+- `alanua/bauclock` — separate Apache-2.0 construction time-tracking and compliance-support application maintained with Skeleton-style bounded engineering workflows.
+- `alanua/Lavalamp` — public WLED/ESP32 cylinder-firmware companion used through Skeleton physical-device controls. Its repository currently has no selected license, so Skeleton does not describe it as an open-source release.
+- `alanua/Travel` — public-safe Travel domain architecture and reusable contracts. Its current public status remains bootstrap-level: live adapters are not implemented, private runtime is not connected, booking authority is none, and no repository license is currently selected.
+- `alanua/DIOS` — public-safe PRE-ALPHA drawing/CAD domain. A separate DIOS video-analysis runtime may reuse Skeleton execution and audit facilities, but DIOS is not Skeleton Core and its repository currently states that no open-source license has been selected.
+
+This distinction is part of the trust model: public source, open-source licensing, production maturity, and private runtime authority are separate claims and are documented separately.
