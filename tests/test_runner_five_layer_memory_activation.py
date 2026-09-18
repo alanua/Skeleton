@@ -14,7 +14,11 @@ from core.runner_five_layer_memory_activation import (
     VIDEO_RUNTIME_APPROVAL,
     execute_five_layer_memory_activation,
 )
-from core.video_understanding.models import VideoUnderstandingError
+class VideoUnderstandingError(RuntimeError):
+    def __init__(self, reason_code: str, message: str) -> None:
+        self.reason_code = reason_code
+        super().__init__(message)
+
 
 SHA = "a" * 40
 

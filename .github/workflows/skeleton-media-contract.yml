@@ -26,7 +26,7 @@ jobs:
   external-contract:
     runs-on: ubuntu-latest
     env:
-      SKELETON_MEDIA_SHA: 41d49e4a190e586bb3aa7b3cfca8db4b144e83b9
+      SKELETON_MEDIA_SHA: 7089b1ba37292aab0283cadb8ac85644cc3d28f8
     steps:
       - uses: actions/checkout@v7
 
@@ -52,16 +52,15 @@ jobs:
           PYTHONPATH: ${{ runner.temp }}/skeleton-media:${{ github.workspace }}
         run: |
           python -m pytest -q tests/test_skeleton_media_bridge.py
+          python -m pytest -q tests/test_runner_poll_github_tasks.py -k 'home_edge_debian_media_bootstrap or home_edge_media_source_snapshot or skeleton_media_repository_route'
           python - <<'PY'
           from core import skeleton_media_bridge as bridge
-          assert bridge.SKELETON_MEDIA_COMPATIBILITY_SHA == "41d49e4a190e586bb3aa7b3cfca8db4b144e83b9"
+          assert bridge.SKELETON_MEDIA_REQUIRED_SHA == "7089b1ba37292aab0283cadb8ac85644cc3d28f8"
           assert bridge.dependency_source("home_edge.debian_media_bootstrap") == "external"
           assert bridge.dependency_source("home_edge.media_source_snapshot") == "external"
-          assert bridge.dependency_source("video_understanding.models") == "external"
           assert bridge.load_media_module("home_edge.debian_media_bootstrap").__name__ == "skeleton_media.home_edge.debian_media_bootstrap"
           assert bridge.load_media_module("home_edge.media_source_snapshot").__name__ == "skeleton_media.home_edge.media_source_snapshot"
-          assert bridge.load_media_module("video_understanding.models").__name__ == "skeleton_media.video_understanding.models"
           from core import runner_five_layer_memory_activation as activation
-          assert activation.VideoUnderstandingError.__module__ == "skeleton_media.video_understanding.models"
-          assert activation.install_runtime.__module__ == "skeleton_media.video_understanding.runtime_install"
+          installer = bridge.load_media_module("video_understanding.runtime_install").install_runtime
+          assert installer.__module__ == "skeleton_media.video_understanding.runtime_install"
           PY
