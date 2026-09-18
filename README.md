@@ -48,9 +48,9 @@ cd Skeleton
 
 python3 -m venv .venv
 . .venv/bin/activate
-python -m pip install -e '.[dev]'
+python -m pip install pytest PyYAML jsonschema
 
-pytest -q \
+PYTHONPATH=. pytest -q \
   tests/test_action_gate.py \
   tests/test_audit_ledger.py \
   tests/test_project_tree.py \
