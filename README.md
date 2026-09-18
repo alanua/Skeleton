@@ -1,5 +1,8 @@
 # Skeleton
 
+[![Public quickstart smoke](https://github.com/alanua/Skeleton/actions/workflows/public-quickstart-smoke.yml/badge.svg?branch=main)](https://github.com/alanua/Skeleton/actions/workflows/public-quickstart-smoke.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+
 **A model-neutral control plane for safe, auditable AI-assisted engineering and edge execution.**
 
 Skeleton turns an assistant session into a bounded engineering workflow: load declared context, route work to the right project, pass mutations through explicit approval/execution boundaries, and verify what actually changed.
