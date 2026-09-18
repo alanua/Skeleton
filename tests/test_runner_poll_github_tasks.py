@@ -7056,12 +7056,26 @@ def test_runner_task_accepts_allowlisted_target_repository() -> None:
     assert runner.ALLOWED_TARGET_REPOSITORIES == frozenset(
         (
             "alanua/Skeleton",
+            "alanua/skeleton-media",
             "alanua/bauclock",
             "alanua/Lavalamp",
             "alanua/LumenFlow",
         )
     )
 
+
+def test_runner_task_accepts_skeleton_media_repository_route() -> None:
+    task, reason = runner.extract_runner_task(
+        "Target Repository: alanua/skeleton-media\\n\\n```task\\nDo media work\\n```"
+    )
+
+    assert reason is None
+    assert task == runner.RunnerTask(
+        content="Do media work",
+        target_project="skeleton_media",
+        target_repository="alanua/skeleton-media",
+        has_target_repository_metadata=True,
+    )
 
 def test_runner_task_resolves_target_repository_aliases_by_priority() -> None:
     task, reason = runner.extract_runner_task(
