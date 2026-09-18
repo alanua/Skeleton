@@ -2,6 +2,8 @@
 
 Skeleton coordinates code, runtimes, infrastructure, and physical-device control paths. Security reports are therefore treated as maintainer-sensitive even when the affected component appears small.
 
+For the repository's explicit trust boundaries, authority model, high-value attack surfaces, and fail-closed expectations, see [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
+
 ## Supported code
 
 Security fixes target the current `main` branch and any explicitly documented supported release/runtime line. Historical prototypes, archived evidence, and stale deployment snapshots should not be assumed supported unless the repository says otherwise.
@@ -12,10 +14,12 @@ Please do **not** publish exploit details, credentials, private topology, tokens
 
 Preferred route:
 
-1. Use GitHub private vulnerability reporting / Security Advisories for this repository when available.
-2. If that private route is unavailable, contact the primary maintainer `@alanua` through the GitHub profile and request a private reporting channel. A public issue may be used only to request contact, without vulnerability details.
+1. Use GitHub Private Vulnerability Reporting for this repository. It is enabled for Skeleton.
+2. If GitHub's private reporting route is unavailable, contact the primary maintainer `@alanua` through the GitHub profile and request a private reporting channel. A public issue may be used only to request contact, without vulnerability details.
 
 Include the affected component, impact, prerequisites, reproduction outline, and any suggested mitigation. Do not test against systems or devices you do not own or have permission to assess.
+
+Repository secret scanning and push protection are enabled as an additional guard against accidentally publishing supported secret formats. These controls complement, rather than replace, review and the public/private routing rules.
 
 ## Scope notes
 
