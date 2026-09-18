@@ -15,6 +15,35 @@ Examples include:
 - recovery-oriented maintenance with exact source revisions, rollback paths, idempotency and audit evidence;
 - public/private separation of runtime state, credentials, private topology and personal data.
 
+## Maintainer activity snapshot
+
+GitHub activity is unusually high because Skeleton uses issues and pull requests as durable maintenance/control records as well as ordinary development artifacts. These numbers are evidence of maintenance load, not a claim of community adoption.
+
+| Window ending 2026-09-18 | Issues opened | Opened issues now closed | PRs opened | Opened PRs now merged |
+| --- | ---: | ---: | ---: | ---: |
+| Last 30 days | 959 | 173 (18.0%) | 228 | 85 (37.3%) |
+| Last 90 days | 2,428 | 789 (32.5%) | 728 | 296 (40.7%) |
+
+The counts come from GitHub repository search on `alanua/Skeleton`. Many records are machine-assisted maintenance tasks, diagnostics and exact-state operations, so they should be read as a measurable maintainer-workload signal rather than as user/community growth.
+
+## Downstream production use: BauClock
+
+Skeleton also supports work on [alanua/bauclock](https://github.com/alanua/bauclock), an Apache-2.0 construction time-tracking and compliance-support system built around FastAPI and a Telegram bot.
+
+BauClock is not a synthetic demo. It is used in a real construction-team workflow with role-scoped access such as owner, Bauleiter and Objektbetreuer. Public repository work covers tenant/role isolation, auditable corrections, time records, compliance-support flows and regression tests, while production personal data remains outside public issues, prompts and fixtures.
+
+This is a useful downstream proof point for Skeleton: the control-plane work is exercised while maintaining software that has real operational users and privacy/access-control consequences.
+
+## Growing repository ecosystem
+
+The project is increasingly split by domain boundary rather than accumulating everything in one monorepo:
+
+- `alanua/Skeleton` — control plane, approvals, runners, audit, continuity and edge execution contracts;
+- `alanua/skeleton-media` — media-domain implementation extracted into its own Apache-2.0 repository;
+- `alanua/bauclock` — downstream application maintained using the same bounded engineering practices.
+
+The Skeleton Media extraction is especially useful evidence because it moved a live subsystem out of Core through explicit cross-repository contracts and fail-closed cutover steps rather than simply duplicating source.
+
 ## Concrete public evidence
 
 ### Skeleton Media extraction
