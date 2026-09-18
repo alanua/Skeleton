@@ -1,0 +1,22 @@
+schema: skeleton.project_state.v1
+project_id: skeleton_media
+status: REPOSITORY_EXTRACTED_CI_GREEN_RUNTIME_CUTOVER_PENDING
+state_role: handoff_not_canon_truth
+last_verified: '2026-09-18'
+evidence_source: alanua/skeleton-media main and GitHub Actions run 35326122876
+summary:
+  - Media-domain source was extracted from Skeleton main 1f3d2d8310c9b35b5be6402eee555e45634c0c2c into public repository alanua/skeleton-media.
+  - Extracted Git history was sanitized for private home paths and private topology before publication.
+  - Current skeleton-media main 41d49e4a190e586bb3aa7b3cfca8db4b144e83b9 passed 341 tests in GitHub Actions run 35326122876.
+  - Apache-2.0 is the repository license.
+  - Production Home Edge was not modified during extraction.
+  - Existing media implementation copies in Skeleton are temporary compatibility sources for control-plane/runtime integration and must not receive new media feature work.
+next_actions:
+  - Route new media implementation issues and PRs to alanua/skeleton-media.
+  - Replace remaining Skeleton-internal media imports with explicit cross-repository contracts in a separately validated cutover.
+  - Remove compatibility copies from Skeleton only after control-plane tests and Home Edge rollback/verification paths are green.
+  - Keep production deployment disabled in skeleton-media until a registered audited Home Edge operation performs the cutover.
+runtime:
+  production_cutover: not_performed
+  runtime_changed_by_extraction: false
+  approval_required_for_cutover: true
