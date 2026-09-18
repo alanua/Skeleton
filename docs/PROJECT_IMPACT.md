@@ -48,6 +48,23 @@ The repository documents human-controlled AI-assisted engineering in `docs/AI_AS
 
 AI tools are used for bounded tasks such as investigation, patch generation, regression tests, issue triage, review assistance, and recovery planning. Merge, deployment, credentials, firmware, destructive operations and other security-sensitive actions remain under maintainer control.
 
+## Representative fail-closed maintenance incident
+
+A useful public example is the Runner recovery chain around issues [#3591](https://github.com/alanua/Skeleton/issues/3591), [#3593](https://github.com/alanua/Skeleton/issues/3593), and [#3594](https://github.com/alanua/Skeleton/issues/3594).
+
+That incident is historical evidence, not a claim about the current Runner state. It shows how the project handles a serious execution-path failure:
+
+- preserved worktrees were treated as recoverable state rather than disposable scratch data;
+- a PermissionError was given a stable blocker signature instead of being retried blindly;
+- diagnostic work was constrained to a narrow allowlist and public-safe evidence schema;
+- false terminal/DONE states were explicitly treated as a correctness bug;
+- the foundation moratorium defined measurable exit gates, including crash/restart survival and durable publication evidence;
+- protected changes, deployment and runtime mutation remained separately operator-gated.
+
+More recent P0 work follows the same pattern. For example, issue [#4172](https://github.com/alanua/Skeleton/issues/4172) defines a primary-Codex-only health probe that must bypass fallback providers, make at most one provider request, use a read-only sandbox, avoid temporary git/codegen state, and fail closed on missing executable/auth/route evidence before retrying [#4170](https://github.com/alanua/Skeleton/issues/4170).
+
+The value of these examples is not that the system never fails. It is that failures are made observable, bounded, recoverable and reviewable instead of being hidden behind an agent's apparent success.
+
 ## Why the project can matter beyond one installation
 
 The reusable problem is not "home automation" or one private deployment. It is the authority boundary between an AI/coding agent and systems that can actually change state.
