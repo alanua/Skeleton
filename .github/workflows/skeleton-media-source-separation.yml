@@ -1,0 +1,51 @@
+name: Skeleton Media source separation
+
+on:
+  pull_request:
+    paths:
+      - "core/skeleton_media_bridge.py"
+      - "core/runner_five_layer_memory_activation.py"
+      - "scripts/runner_poll_github_tasks.py"
+      - "projects/skeleton_media/**"
+      - "tests/test_skeleton_media_bridge.py"
+      - "tests/test_runner_five_layer_memory_activation.py"
+      - ".github/workflows/skeleton-media-source-separation.yml"
+      - "core/video_understanding/**"
+      - "ops/skeleton_cast/**"
+  push:
+    branches: [main]
+    paths:
+      - "core/skeleton_media_bridge.py"
+      - "core/runner_five_layer_memory_activation.py"
+      - "scripts/runner_poll_github_tasks.py"
+      - "projects/skeleton_media/**"
+      - "tests/test_skeleton_media_bridge.py"
+      - "tests/test_runner_five_layer_memory_activation.py"
+      - ".github/workflows/skeleton-media-source-separation.yml"
+      - "core/video_understanding/**"
+      - "ops/skeleton_cast/**"
+  workflow_dispatch:
+
+jobs:
+  core-only:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install core validation dependencies
+        run: python -m pip install pytest PyYAML
+      - name: Verify core works without media package
+        run: |
+          python -m pytest -q             tests/test_skeleton_media_bridge.py             tests/test_runner_five_layer_memory_activation.py             tests/test_project_tree.py             tests/test_project_loader.py             tests/test_project_manifests.py             tests/test_boot_manifest.py
+      - name: Verify media implementation is absent
+        shell: bash
+        run: |
+          set -euo pipefail
+          test ! -e core/video_understanding
+          test ! -e ops/skeleton_cast
+          test ! -e core/home_edge/debian_media_bootstrap.py
+          test ! -e core/home_edge/media_source_snapshot.py
+          test ! -e core/home_edge/media_display_ownership.py
+          test ! -e core/home_edge/adaptive_remote.py

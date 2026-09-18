@@ -13,12 +13,7 @@ from core.private_memory_root_resolver import (
     resolve_private_memory_root,
 )
 from core.private_memory_stack import PrivateMemoryStack, PrivateMemoryStackError
-from core.skeleton_media_bridge import load_media_module
-
-_video_models = load_media_module("video_understanding.models")
-_video_runtime_install = load_media_module("video_understanding.runtime_install")
-VideoUnderstandingError = _video_models.VideoUnderstandingError
-install_runtime = _video_runtime_install.install_runtime
+from core.skeleton_media_bridge import SkeletonMediaDependencyError, load_media_module
 
 TASK_ID = "activate_five_layer_private_memory"
 OPERATOR_APPROVAL = "EXPLICIT_FINISH_WORKING_MEMORY_20260724"
@@ -196,11 +191,28 @@ def execute_five_layer_memory_activation(
                 "not_met",
             )
         status_lines.extend(memory_lines)
+        installer = runtime_installer
+        if installer is None:
+            try:
+                installer = load_media_module(
+                    "video_understanding.runtime_install"
+                ).install_runtime
+            except SkeletonMediaDependencyError:
+                return maintenance_report(
+                    "BLOCKED",
+                    TASK_ID,
+                    [
+                        *status_lines,
+                        "step=install_video_understanding status=failed",
+                        "reason=skeleton_media_dependency_unavailable",
+                    ],
+                    "not_met",
+                )
         video_lines, video_reason = _install_video_runtime(
             checkout,
             expected_sha=expected_sha,
             private_root=private_root,
-            installer=runtime_installer or install_runtime,
+            installer=installer,
         )
         if video_reason is not None:
             return maintenance_report(
@@ -308,9 +320,10 @@ def _install_video_runtime(
             enable=True,
             env=install_env,
         )
-    except VideoUnderstandingError as exc:
-        return [], _safe_reason(exc.reason_code)
-    except Exception:
+    except Exception as exc:
+        reason_code = getattr(exc, "reason_code", None)
+        if isinstance(reason_code, str) and reason_code:
+            return [], _safe_reason(reason_code)
         return [], "video_runtime_install_failed"
 
     public_dict = getattr(result, "public_dict", None)

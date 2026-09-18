@@ -8,13 +8,12 @@ Skeleton keeps the control plane: project routing, approvals, registered executo
 
 Skeleton Media owns media-domain implementation: Skeleton Cast, resolver/player/discovery, IPTV, media state, media clients, adaptive media remote, release monitoring and video-understanding code.
 
-## Compatibility phase
+## Source separation
 
-Some media source still exists in Skeleton because current Runner/runtime-maintenance code imports it directly. Those copies are compatibility-only. New media feature work must target `alanua/skeleton-media`.
-
-The compatibility copies must not be deleted until the remaining direct imports are replaced by an explicit cross-repository contract and both repositories pass CI.
-
-The first compatibility boundary is `core.skeleton_media_bridge`. Control-plane callers use that bridge instead of importing canonical media implementation directly. It prefers an installed `skeleton_media` package and falls back to the temporary local copies only while the production/runtime cutover is incomplete. If an installed external package is present but broken, the bridge fails closed rather than silently using stale local code.
+Skeleton Core no longer contains canonical media implementation copies.
+core.skeleton_media_bridge accepts only the external skeleton_media package
+and fails closed when it is unavailable. Media-specific tests, schemas,
+runtime scripts and implementation code live in alanua/skeleton-media.
 
 ## Production
 

@@ -17,9 +17,7 @@ import pytest
 from scripts import runner_poll_github_tasks as runner
 from scripts import telegram_callback_poller as callback_poller
 from core.secret_store import SecretReference
-from core.home_edge import debian_media_bootstrap as media_bootstrap
 from core.home_edge import esp_lab_activation
-from core.home_edge import media_source_snapshot
 from core.home_edge import post_migration_reconcile
 
 
@@ -76,7 +74,7 @@ def _media_bootstrap_receipt() -> dict[str, object]:
         "node_identity_status": "verified",
         "reboot_guard_status": "not_present",
         "reboot_performed": False,
-        "packages_required_count": len(media_bootstrap.FIXED_PACKAGES),
+        "packages_required_count": 20,
         "packages_preexisting_count": 20,
         "packages_added_count": 0,
         "package_status": "installed",
@@ -512,6 +510,9 @@ def _request_payload(urlopen: mock.MagicMock) -> dict[str, list[str]]:
 def test_home_edge_debian_media_bootstrap_is_allowlisted_and_dispatches_exact_receipt(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    media_bootstrap = pytest.importorskip(
+        "skeleton_media.home_edge.debian_media_bootstrap"
+    )
     captured: dict[str, object] = {}
 
     def fake_read_sha(ref: str) -> str:
@@ -554,6 +555,7 @@ def test_home_edge_debian_media_bootstrap_is_allowlisted_and_dispatches_exact_re
 def test_home_edge_debian_media_bootstrap_malformed_input_blocks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    pytest.importorskip("skeleton_media.home_edge.debian_media_bootstrap")
     monkeypatch.setattr(runner, "_read_exact_git_sha", lambda _ref: HEAD_SHA)
 
     report = runner.dispatch_runtime_maintenance_task(
@@ -629,6 +631,9 @@ def test_home_edge_post_migration_reconcile_malformed_input_blocks(
 def test_home_edge_media_source_snapshot_is_allowlisted_and_dispatches_sanitized_receipt(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    media_source_snapshot = pytest.importorskip(
+        "skeleton_media.home_edge.media_source_snapshot"
+    )
     captured: dict[str, object] = {}
 
     def fake_read_sha(ref: str) -> str:
@@ -1088,6 +1093,7 @@ def test_esp_lab_stage1_signer_install_success_receipt_is_public_safe() -> None:
 def test_home_edge_media_source_snapshot_malformed_input_blocks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    pytest.importorskip("skeleton_media.home_edge.media_source_snapshot")
     monkeypatch.setattr(runner, "_read_exact_git_sha", lambda _ref: HEAD_SHA)
 
     report = runner.dispatch_runtime_maintenance_task(
