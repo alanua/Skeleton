@@ -17,6 +17,21 @@ projects:
     worktree_name_prefix: skeleton
     description: Public Skeleton control and construction repository.
 
+  skeleton_media:
+    repo: alanua/skeleton-media
+    checkout_path: /home/agent/agent-dev/worktrees/skeleton-media/main
+    worktree_root: /home/agent/agent-dev/worktrees/skeleton-media
+    public: true
+    runner_enabled: true
+    execution_modes:
+      planning_only: false
+      codex_issue_worktree: true
+      live_cross_repo: false
+    requires_explicit_approval_for_mode_change: true
+    future_parallel_worktrees: true
+    runtime_approval_required: true
+    worktree_name_prefix: skeleton-media
+    description: Public Skeleton Media project; production Home Edge cutover remains approval-gated and audited.
   bauclock:
     repo: alanua/bauclock
     checkout_path: /home/agent/agent-dev/worktrees/bauclock/main
