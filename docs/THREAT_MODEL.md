@@ -1,6 +1,8 @@
 # Threat model
 
-Skeleton sits between probabilistic AI systems and deterministic systems that can mutate repositories, services, infrastructure and physical/edge state.
+Skeleton sits between probabilistic AI systems and deterministic systems that can mutate repositories, services, infrastructure and physical/edge state. In the maintainer deployment, those execution chains can reach real Home Edge services and devices, so a security failure can cross the repository boundary into application or physical-world state.
+
+That is the central reason for this threat model: AI-generated code or instructions are never treated as authority on their own, and higher-impact actions require explicit execution, approval, rollback and verification boundaries.
 
 This document describes the public threat model for that boundary.
 
