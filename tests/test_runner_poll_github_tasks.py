@@ -7066,7 +7066,7 @@ def test_runner_task_accepts_allowlisted_target_repository() -> None:
 
 def test_runner_task_accepts_skeleton_media_repository_route() -> None:
     task, reason = runner.extract_runner_task(
-        "Target Repository: alanua/skeleton-media\\n\\n```task\\nDo media work\\n```"
+        "Target Repository: alanua/skeleton-media\n\n```task\nDo media work\n```"
     )
 
     assert reason is None
