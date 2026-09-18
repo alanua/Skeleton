@@ -6,6 +6,10 @@ projects:
     repo: alanua/Skeleton
     entrypoint: projects/skeleton/PROJECT_MANIFEST.yaml
     means: Skeleton Core project
+  skeleton_media:
+    repo: alanua/skeleton-media
+    entrypoint: projects/skeleton_media/PROJECT_MANIFEST.yaml
+    means: public media subsystem for Skeleton Home Edge playback, discovery, clients and video understanding
 
   dios:
     repo: alanua/DIOS
