@@ -1,0 +1,11 @@
+schema: skeleton.project_manifest.v1
+project_id: skeleton_media
+name: Skeleton Media
+status: ACTIVE_SOFTWARE_PROJECT
+entrypoint: projects/skeleton_media/PROJECT_MANIFEST.yaml
+read_order:
+  - projects/skeleton_media/PROJECT_MANIFEST.yaml
+  - projects/skeleton_media/STATE.yaml
+source_repo: alanua/skeleton-media
+privacy_class: public_safe_code_private_runtime
+means: public media subsystem for Skeleton Home Edge playback, media discovery, IPTV, Android clients and video understanding

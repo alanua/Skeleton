@@ -28,7 +28,7 @@ Skeleton Core currently includes:
 - memory-routing and audit-ledger contracts;
 - Runner and runtime-maintenance infrastructure;
 - Home Edge / physical-device control patterns;
-- Android Home and media/control integration work;
+- generic Android/Home Edge control contracts, while media-domain implementation lives in `alanua/skeleton-media`;
 - public-safe Aufmass/CAD pipeline specifications and adapters;
 - CI/runtime workflows for bounded validation and recovery.
 
@@ -37,8 +37,9 @@ The repository is intentionally broader than a single application: it is the con
 ## Repository identity
 
 ```text
-alanua/Skeleton = Skeleton Core repository
-alanua/jeeves   = separate runtime/product repository and historical migration source
+alanua/Skeleton        = Skeleton Core repository
+alanua/skeleton-media = separate public media subsystem for Home Edge
+alanua/jeeves          = separate runtime/product repository and historical migration source
 ```
 
 Historical prototypes may be referenced as evidence, but are not canonical runtime authority.

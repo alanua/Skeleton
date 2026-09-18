@@ -132,6 +132,7 @@ def test_public_enabled_projects_are_codex_issue_worktree_projects() -> None:
 
     assert public_codex_issue_worktree_projects == {
         "skeleton",
+        "skeleton_media",
         "bauclock",
         "lavalamp",
         "lumenflow",
