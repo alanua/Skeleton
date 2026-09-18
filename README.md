@@ -1,8 +1,80 @@
 # Skeleton
 
-Skeleton is a model-neutral control and execution layer for reliable LLM-assisted work.
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
+[![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](pyproject.toml)
+[![Active development](https://img.shields.io/badge/status-active%20development-brightgreen.svg)](#current-status)
 
-It turns an assistant session into a bounded engineering workflow: load declared context, select an explicit mode, route memory by trust/privacy class, execute through registered paths, and produce verifiable evidence of what changed.
+Skeleton is a model-neutral control plane for safe, auditable AI-assisted engineering and edge execution.
+
+It is designed for the point where an LLM or coding agent stops being "just chat" and starts touching repositories, CI, services, private state, or real devices. Skeleton makes that boundary explicit: declared context, registered capabilities, approval gates, bounded executors, rollback, audit evidence, and independent post-condition verification.
+
+```mermaid
+flowchart LR
+    A[LLM / Codex / agent] --> B[Skeleton context + routing]
+    B --> C[ActionGate / approvals]
+    C --> D[Runner / registered executor]
+    D --> E[Repository, service, Home Edge]
+    E --> F[Independent verification]
+    F --> G[Audit receipt + durable continuity]
+```
+
+## What works today
+
+Skeleton is under active development, but it is already used by its primary maintainer for real engineering work across multiple connected public repositories and a live Home Edge environment.
+
+Current implemented areas include:
+
+- manifest-driven project boot and cross-repository routing;
+- model/provider-neutral agent and capability registries;
+- approval-oriented ActionGate and bounded execution paths;
+- Runner and runtime-maintenance infrastructure;
+- audit-ledger and post-condition verification contracts;
+- durable memory/privacy routing and recovery metadata;
+- Home Edge patterns for services and physical-device control;
+- generic Android/Home Edge control contracts;
+- cross-repository separation of the media subsystem into [alanua/skeleton-media](https://github.com/alanua/skeleton-media).
+
+This is not presented as broad external adoption. It is an actively maintained OSS control layer being exercised against real maintainer workflows, real runtime changes, and real recovery constraints.
+
+See [Project impact and real-world use](docs/PROJECT_IMPACT.md) for concrete evidence and [Threat model](docs/THREAT_MODEL.md) for the security boundary.
+
+## Codex in the maintainer architecture
+
+Skeleton is model-neutral by design, but the current maintainer deployment uses Codex as the primary code-generation executor behind Runner. Codex is therefore not treated as an unbounded chat assistant or an optional demo integration: its output passes through task schemas, allowed-file/capability constraints, provider/runtime checks, protected merge boundaries, publication evidence and post-condition verification.
+
+A public example is [#4172](https://github.com/alanua/Skeleton/issues/4172), which specifies a primary-Codex-only health probe with no fallback provider, at most one provider request, read-only sandboxing, zero temporary git/codegen state, sanitized evidence and fail-closed outcomes before a blocked code-generation task may be retried.
+
+That relationship is intentional: Skeleton is the control and trust layer around an AI code executor that is already part of the maintainer's real engineering pipeline.
+
+## Five-minute public tour
+
+This validates the public control-plane contracts without credentials, private topology, network access, or device access.
+
+```bash
+git clone https://github.com/alanua/Skeleton.git
+cd Skeleton
+
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install pytest PyYAML jsonschema
+
+PYTHONPATH=. pytest -q \
+  tests/test_action_gate.py \
+  tests/test_audit_ledger.py \
+  tests/test_project_tree.py \
+  tests/test_runner_gate.py
+```
+
+Then inspect the core declarations:
+
+- `BOOT_MANIFEST.yaml` — canonical context entrypoint;
+- `PROJECT_INDEX.yaml` / `PROJECT_TREE.yaml` — project and cross-repo routing;
+- `CAPABILITY_REGISTRY.yaml` — declared capabilities;
+- `EXECUTOR_REGISTRY.yaml` — registered execution paths;
+- `OPERATOR_RULES.yaml` — approval and mutation rules;
+- `docs/ACTION_GATE.md` — action-gating model;
+- `docs/AUDIT_LEDGER.md` — audit evidence model;
+- `docs/THREAT_MODEL.md` — trust boundaries and abuse cases.
 
 ## Why Skeleton exists
 
@@ -38,7 +110,7 @@ The repository is intentionally broader than a single application: it is the con
 
 ```text
 alanua/Skeleton        = Skeleton Core repository
-alanua/skeleton-media = separate public media subsystem for Home Edge
+alanua/skeleton-media  = separate public media subsystem for Home Edge
 alanua/jeeves          = separate runtime/product repository and historical migration source
 ```
 
@@ -54,18 +126,6 @@ Current entrypoint: BOOT_MANIFEST.yaml
 
 The project is under active development. Interfaces and registries may evolve while safety, auditability, and continuity rules are kept explicit.
 
-## Start here
-
-- `BOOT_MANIFEST.yaml` — canonical boot/context entrypoint
-- `PROJECT_INDEX.yaml` / `PROJECT_TREE.yaml` — project structure
-- `CAPABILITY_REGISTRY.yaml` — declared capabilities
-- `EXECUTOR_REGISTRY.yaml` — registered execution paths
-- `PROVIDER_ROUTING.yaml` — provider/model routing
-- `MEMORY_ROUTING.yaml` — memory trust/privacy routing
-- `OPERATOR_RULES.yaml` — operator and mutation rules
-- `docs/ACTION_GATE.md` — action-gating model
-- `docs/AUDIT_LEDGER.md` — audit evidence model
-
 ## Maintainer workflow
 
 Skeleton is maintained through issue triage, scoped branches/PRs, review, CI/runtime validation, exact-head verification, and bounded deployment/activation steps. AI tools may assist with research, implementation, tests, and review, but merges and security-sensitive actions remain maintainer-controlled.
@@ -76,12 +136,14 @@ See:
 - [SECURITY.md](SECURITY.md)
 - [MAINTAINERS.md](MAINTAINERS.md)
 - [docs/AI_ASSISTED_MAINTENANCE.md](docs/AI_ASSISTED_MAINTENANCE.md)
+- [docs/PROJECT_IMPACT.md](docs/PROJECT_IMPACT.md)
+- [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md)
 
 ## Security model
 
 Skeleton deliberately separates normal code changes from actions that can affect credentials, infrastructure, physical devices, networks, firmware, or user data. Such operations require the registered control path and the appropriate approval boundary.
 
-Do not publish secrets, private device topology, credentials, tokens, private keys, or sensitive runtime state in issues or pull requests. See [SECURITY.md](SECURITY.md).
+Do not publish secrets, private device topology, credentials, tokens, private keys, or sensitive runtime state in issues or pull requests. See [SECURITY.md](SECURITY.md) and [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
 
 ## Core rule
 
