@@ -13,8 +13,12 @@ from core.private_memory_root_resolver import (
     resolve_private_memory_root,
 )
 from core.private_memory_stack import PrivateMemoryStack, PrivateMemoryStackError
-from core.video_understanding.models import VideoUnderstandingError
-from core.video_understanding.runtime_install import install_runtime
+from core.skeleton_media_bridge import load_media_module
+
+_video_models = load_media_module("video_understanding.models")
+_video_runtime_install = load_media_module("video_understanding.runtime_install")
+VideoUnderstandingError = _video_models.VideoUnderstandingError
+install_runtime = _video_runtime_install.install_runtime
 
 TASK_ID = "activate_five_layer_private_memory"
 OPERATOR_APPROVAL = "EXPLICIT_FINISH_WORKING_MEMORY_20260724"
