@@ -70,6 +70,14 @@ repository readability, git head, Python/pytest availability, allowlisted write
 readiness, and codegen executor availability without performing workspace
 writes or runtime mutation.
 
+`runner_codex_primary_health_probe_v1` is the narrow PRIMARY-CODEX health
+probe. It requires exact maintenance-mode metadata, `Repository:
+alanua/Skeleton`, and the current `Expected Main SHA`. The probe is local and
+no-write: it verifies the exact runner checkout head and the primary `codex`
+CLI presence only. It never invokes `codex exec`, never makes a model/provider
+request, never selects a fallback provider, never mutates runtime state, and
+reports only public-safe status tokens.
+
 If a codegen task contract declares `existing_pr` or `update_existing_pr`, the
 continuation can bind only to that declared PR identity. A successful report
 that points at a different parallel PR is treated as a bounded

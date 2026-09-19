@@ -444,6 +444,7 @@ SKELETON_CONTROL_MCP_HETZNER_ACTIVATE_V1 = (
 RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_V1 = (
     "runner_controller_refresh_trust_anchor_bundle_v1"
 )
+RUNNER_CODEX_PRIMARY_HEALTH_PROBE_V1 = "runner_codex_primary_health_probe_v1"
 RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
     (
         MAIL_GMAIL_READONLY_CANARY_TASK_ID,
@@ -494,6 +495,7 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         "runner_controller_repair_codex_state_mount_v1",
         SKELETON_CONTROL_MCP_HETZNER_ACTIVATE_V1,
         RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_V1,
+        RUNNER_CODEX_PRIMARY_HEALTH_PROBE_V1,
         RUNNER_VNEXT_READONLY_PREFLIGHT_TASK_ID,
         RUNNER_VNEXT_EXTERNAL_ATTESTATION_TASK_ID,
         RUNNER_VNEXT_EXACT_GREEN_CANARY_TASK_ID,
@@ -779,9 +781,12 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "changed_file",
         "changed_file_count",
         "changed_files",
+        "codex_cli_status",
+        "codex_primary_health_status",
         "final_postcheck_receipt_hash",
         "failure_class",
         "failure_key",
+        "fallback_provider_selection",
         "private_artifact_hash_matches",
         "private_artifact_written",
         "changed_files_count",
@@ -840,6 +845,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "dependency_installed_by_operation",
         "device_canary",
         "exact_base_changed_files_count",
+        "exact_main_sha_match",
         "evidence_ref",
         "existing_pr_lookup",
         "existing_pr_head_sha",
@@ -915,6 +921,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "durable_handoff_status",
         "network_disabled",
         "network_provider_enabled",
+        "no_write_probe",
         "needs_operator_notification",
         "next_retry_at",
         "next_action",
@@ -935,6 +942,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "mpv_status",
         "ports_disabled",
         "ports_enabled",
+        "primary_only",
         "post_push_pr_metadata_source",
         "pr_number",
         "pr_metadata_source",
@@ -969,6 +977,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "project_id",
         "project_state_existing",
         "project_state_written",
+        "provider_request_executed",
         "pre_push_pr_changed_files_count",
         "pre_push_pr_file_count",
         "public_safe",
@@ -7435,6 +7444,113 @@ def private_memory_healthcheck(body: str = "") -> str:
     if connector_report.get("status") == "DONE":
         return _maintenance_report("DONE", task_id, status_lines, "met")
     status_lines.append("reason=private_memory_healthcheck_not_ready")
+    return _maintenance_report("BLOCKED", task_id, status_lines, "not_met")
+
+
+_RUNNER_CODEX_PRIMARY_HEALTH_INPUT_FIELDS = frozenset(
+    (
+        "Mode",
+        "Maintenance Task ID",
+        "Repository",
+        "Expected Main SHA",
+    )
+)
+
+
+def _runner_codex_primary_health_input(
+    body: str,
+) -> tuple[dict[str, str] | None, str | None]:
+    parsed: dict[str, str] = {}
+    metadata = (body or "").strip()
+    if not metadata:
+        return None, "codex_primary_health_required_input_missing"
+    for raw_line in metadata.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        match = re.fullmatch(
+            r"(?P<field>[A-Za-z][A-Za-z0-9 ]*):\s*(?P<value>\S(?:.*\S)?)",
+            line,
+        )
+        if match is None:
+            return None, "codex_primary_health_noncanonical_input"
+        field = match.group("field")
+        if field not in _RUNNER_CODEX_PRIMARY_HEALTH_INPUT_FIELDS:
+            return None, "codex_primary_health_unknown_input_field"
+        if field in parsed:
+            return None, "codex_primary_health_duplicate_input_field"
+        parsed[field] = match.group("value")
+    if set(parsed) != _RUNNER_CODEX_PRIMARY_HEALTH_INPUT_FIELDS:
+        return None, "codex_primary_health_required_input_missing"
+    if parsed["Mode"] != RUNTIME_MAINTENANCE_MODE:
+        return None, "codex_primary_health_mode_mismatch"
+    if parsed["Maintenance Task ID"] != RUNNER_CODEX_PRIMARY_HEALTH_PROBE_V1:
+        return None, "codex_primary_health_task_id_mismatch"
+    if parsed["Repository"] != REPO:
+        return None, "codex_primary_health_repository_mismatch"
+    if re.fullmatch(r"[0-9a-f]{40}", parsed["Expected Main SHA"]) is None:
+        return None, "codex_primary_health_expected_main_sha_invalid"
+    return parsed, None
+
+
+def runner_codex_primary_health_probe_v1(body: str = "") -> str:
+    task_id = RUNNER_CODEX_PRIMARY_HEALTH_PROBE_V1
+    parsed, reason = _runner_codex_primary_health_input(body)
+    if reason is not None or parsed is None:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [f"reason={reason or 'codex_primary_health_invalid_input'}"],
+            "not_met",
+        )
+
+    try:
+        current_sha = _read_exact_git_sha("HEAD")
+    except ValueError as exc:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [f"reason={exc}"],
+            "not_met",
+        )
+    if current_sha != parsed["Expected Main SHA"]:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [
+                "codex_primary_health_status=blocked",
+                "exact_main_sha_match=false",
+                "primary_only=true",
+                "no_write_probe=true",
+                "provider_request_executed=false",
+                "fallback_provider_selection=false",
+                "mutation_performed=false",
+                "network_provider_enabled=false",
+                "model_credentials_used=false",
+                "reason=codex_primary_health_expected_main_sha_mismatch",
+            ],
+            "not_met",
+        )
+
+    codex_available = shutil.which("codex") is not None
+    status_lines = [
+        f"repository={REPO}",
+        f"expected_main_sha={parsed['Expected Main SHA']}",
+        f"head_sha={current_sha}",
+        "exact_main_sha_match=true",
+        "primary_only=true",
+        "no_write_probe=true",
+        "provider_request_executed=false",
+        "fallback_provider_selection=false",
+        "mutation_performed=false",
+        "network_provider_enabled=false",
+        "model_credentials_used=false",
+        f"codex_cli_status={'present' if codex_available else 'missing'}",
+        f"codex_primary_health_status={'ready' if codex_available else 'blocked'}",
+    ]
+    if codex_available:
+        return _maintenance_report("DONE", task_id, status_lines, "met")
+    status_lines.append("reason=codex_cli_unavailable")
     return _maintenance_report("BLOCKED", task_id, status_lines, "not_met")
 
 
@@ -20815,6 +20931,8 @@ def dispatch_runtime_maintenance_task(
             return skeleton_control_mcp_hetzner_activate_v1(body)
         if task_id == RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_V1:
             return runner_controller_refresh_trust_anchor_bundle_v1(body)
+        if task_id == RUNNER_CODEX_PRIMARY_HEALTH_PROBE_V1:
+            return runner_codex_primary_health_probe_v1(body)
         if task_id == MAIL_GMAIL_PRIMARY_REGISTERED_ACTIVATION:
             return mail_gmail_primary_registered_activation_v1(body)
         if task_id == MAIL_GMAIL_READONLY_CANARY_TASK_ID:
