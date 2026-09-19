@@ -73,10 +73,13 @@ writes or runtime mutation.
 `runner_codex_primary_health_probe_v1` is the narrow PRIMARY-CODEX health
 probe. It requires exact maintenance-mode metadata, `Repository:
 alanua/Skeleton`, and the current `Expected Main SHA`. The probe is local and
-no-write: it verifies the exact runner checkout head and the primary `codex`
-CLI presence only. It never invokes `codex exec`, never makes a model/provider
-request, never selects a fallback provider, never mutates runtime state, and
-reports only public-safe status tokens.
+no-write: it verifies the exact runner checkout head, verifies the primary
+`codex` CLI presence, then invokes exactly one direct `codex exec` health
+request with `--sandbox read-only`, `--ephemeral`, `--ignore-user-config`, and
+`--ignore-rules`. The prompt forbids file inspection, shell/tool calls, writes,
+and runtime mutation, and accepts only an exact fixed PRIMARY-CODEX health-token
+reply as success evidence. It never selects a fallback provider and reports only
+public-safe status tokens, never the Codex transcript or local CLI path.
 
 If a codegen task contract declares `existing_pr` or `update_existing_pr`, the
 continuation can bind only to that declared PR identity. A successful report

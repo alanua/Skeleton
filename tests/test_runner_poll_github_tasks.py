@@ -713,6 +713,10 @@ def test_codex_primary_health_is_allowlisted_and_reports_no_write_primary_only(
 ) -> None:
     monkeypatch.setattr(runner, "_read_exact_git_sha", lambda ref: HEAD_SHA)
     monkeypatch.setattr(runner.shutil, "which", lambda executable: "/usr/bin/codex")
+    run_command = mock.Mock(
+        return_value=(0, f"{runner.RUNNER_CODEX_PRIMARY_HEALTH_PROBE_TOKEN}\n")
+    )
+    monkeypatch.setattr(runner, "run_command", run_command)
 
     with mock.patch.object(runner, "run_codex_task") as run_codex, mock.patch.object(
         runner, "select_openhands_secondary_route"
@@ -730,13 +734,42 @@ def test_codex_primary_health_is_allowlisted_and_reports_no_write_primary_only(
     assert "codex_cli_status=present" in report
     assert "primary_only=true" in report
     assert "no_write_probe=true" in report
-    assert "provider_request_executed=false" in report
+    assert "provider_request_executed=true" in report
     assert "fallback_provider_selection=false" in report
     assert "mutation_performed=false" in report
-    assert "network_provider_enabled=false" in report
-    assert "model_credentials_used=false" in report
+    assert "network_provider_enabled=true" in report
+    assert "model_credentials_used=true" in report
+    assert "exit_code=0" in report
     assert "success_criteria=met" in report
     assert "/usr/bin/codex" not in report
+    assert runner.RUNNER_CODEX_PRIMARY_HEALTH_PROBE_TOKEN not in report
+    run_command.assert_called_once()
+    command = run_command.call_args.args[0]
+    assert command[:10] == [
+        "codex",
+        "exec",
+        "--sandbox",
+        "read-only",
+        "--ephemeral",
+        "--ignore-user-config",
+        "--ignore-rules",
+        "--color",
+        "never",
+        "--cd",
+    ]
+    assert command[10] == str(runner.ROOT)
+    assert runner.RUNNER_CODEX_PRIMARY_HEALTH_PROBE_TOKEN in command[11]
+    assert "Reply with exactly:" in command[11]
+    assert "--oss" not in command
+    assert "--local-provider" not in command
+    assert "--model" not in command
+    assert "--profile" not in command
+    assert "--approve-for-me" not in command
+    assert "--dangerously-bypass-approvals-and-sandbox" not in command
+    assert run_command.call_args.kwargs == {
+        "cwd": runner.ROOT,
+        "timeout": runner.RUNNER_CODEX_PRIMARY_HEALTH_PROBE_TIMEOUT_SECONDS,
+    }
     run_codex.assert_not_called()
     secondary_route.assert_not_called()
 
@@ -746,6 +779,8 @@ def test_codex_primary_health_blocks_missing_primary_cli_without_fallback(
 ) -> None:
     monkeypatch.setattr(runner, "_read_exact_git_sha", lambda ref: HEAD_SHA)
     monkeypatch.setattr(runner.shutil, "which", lambda executable: None)
+    run_command = mock.Mock()
+    monkeypatch.setattr(runner, "run_command", run_command)
 
     with mock.patch.object(runner, "run_codex_task") as run_codex, mock.patch.object(
         runner, "select_openhands_secondary_route"
@@ -763,6 +798,7 @@ def test_codex_primary_health_blocks_missing_primary_cli_without_fallback(
     assert "provider_request_executed=false" in report
     assert "fallback_provider_selection=false" in report
     assert "success_criteria=not_met" in report
+    run_command.assert_not_called()
     run_codex.assert_not_called()
     secondary_route.assert_not_called()
 
@@ -774,7 +810,7 @@ def test_codex_primary_health_blocks_stale_sha_before_probe(
 
     with mock.patch.object(runner.shutil, "which") as which, mock.patch.object(
         runner, "run_codex_task"
-    ) as run_codex:
+    ) as run_codex, mock.patch.object(runner, "run_command") as run_command:
         report = runner.dispatch_runtime_maintenance_task(
             runner.RUNNER_CODEX_PRIMARY_HEALTH_PROBE_V1,
             str(runner.ROOT),
@@ -787,7 +823,84 @@ def test_codex_primary_health_blocks_stale_sha_before_probe(
     assert "provider_request_executed=false" in report
     assert "fallback_provider_selection=false" in report
     which.assert_not_called()
+    run_command.assert_not_called()
     run_codex.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("exit_code", "output"),
+    (
+        (1, "primary provider unavailable\n"),
+        (0, "unexpected response\n"),
+        (0, f"prefix {runner.RUNNER_CODEX_PRIMARY_HEALTH_PROBE_TOKEN}\n"),
+        (0, f"{runner.RUNNER_CODEX_PRIMARY_HEALTH_PROBE_TOKEN}\nextra\n"),
+    ),
+)
+def test_codex_primary_health_blocks_failed_direct_primary_probe_without_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+    exit_code: int,
+    output: str,
+) -> None:
+    monkeypatch.setattr(runner, "_read_exact_git_sha", lambda ref: HEAD_SHA)
+    monkeypatch.setattr(runner.shutil, "which", lambda executable: "/usr/bin/codex")
+    run_command = mock.Mock(return_value=(exit_code, output))
+    monkeypatch.setattr(runner, "run_command", run_command)
+
+    with mock.patch.object(runner, "run_codex_task") as run_codex, mock.patch.object(
+        runner, "select_openhands_secondary_route"
+    ) as secondary_route:
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.RUNNER_CODEX_PRIMARY_HEALTH_PROBE_V1,
+            str(runner.ROOT),
+            _codex_primary_health_issue_body(),
+        )
+
+    assert runner.maintenance_report_status(report) == "BLOCKED"
+    assert "codex_primary_health_status=blocked" in report
+    assert "reason=codex_primary_health_probe_failed" in report
+    assert "provider_request_executed=true" in report
+    assert "fallback_provider_selection=false" in report
+    assert "mutation_performed=false" in report
+    assert f"exit_code={exit_code}" in report
+    assert output.strip() not in report
+    run_command.assert_called_once()
+    run_codex.assert_not_called()
+    secondary_route.assert_not_called()
+
+
+def test_codex_primary_health_blocks_timed_out_direct_primary_probe_without_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(runner, "_read_exact_git_sha", lambda ref: HEAD_SHA)
+    monkeypatch.setattr(runner.shutil, "which", lambda executable: "/usr/bin/codex")
+    run_command = mock.Mock(
+        side_effect=runner.subprocess.TimeoutExpired(
+            cmd=["codex", "exec"],
+            timeout=runner.RUNNER_CODEX_PRIMARY_HEALTH_PROBE_TIMEOUT_SECONDS,
+        )
+    )
+    monkeypatch.setattr(runner, "run_command", run_command)
+
+    with mock.patch.object(runner, "run_codex_task") as run_codex, mock.patch.object(
+        runner, "select_openhands_secondary_route"
+    ) as secondary_route:
+        report = runner.dispatch_runtime_maintenance_task(
+            runner.RUNNER_CODEX_PRIMARY_HEALTH_PROBE_V1,
+            str(runner.ROOT),
+            _codex_primary_health_issue_body(),
+        )
+
+    assert runner.maintenance_report_status(report) == "BLOCKED"
+    assert "codex_primary_health_status=blocked" in report
+    assert "reason=codex_primary_health_probe_timeout" in report
+    assert "provider_request_executed=true" in report
+    assert "fallback_provider_selection=false" in report
+    assert "mutation_performed=false" in report
+    assert "network_provider_enabled=true" in report
+    assert "model_credentials_used=true" in report
+    run_command.assert_called_once()
+    run_codex.assert_not_called()
+    secondary_route.assert_not_called()
 
 
 @pytest.mark.parametrize(
