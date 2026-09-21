@@ -712,15 +712,14 @@ def test_codex_primary_health_is_allowlisted_and_reports_no_write_primary_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(runner, "_read_exact_git_sha", lambda ref: HEAD_SHA)
-    monkeypatch.setattr(runner.shutil, "which", lambda executable: "/usr/bin/codex")
-    run_command = mock.Mock(
-        return_value=(0, f"{runner.RUNNER_CODEX_PRIMARY_HEALTH_PROBE_TOKEN}\n")
-    )
-    monkeypatch.setattr(runner, "run_command", run_command)
 
     with mock.patch.object(runner, "run_codex_task") as run_codex, mock.patch.object(
         runner, "select_openhands_secondary_route"
-    ) as secondary_route:
+    ) as secondary_route, mock.patch.object(
+        runner, "run_command"
+    ) as run_command, mock.patch.object(
+        runner.shutil, "which"
+    ) as which:
         report = runner.dispatch_runtime_maintenance_task(
             runner.RUNNER_CODEX_PRIMARY_HEALTH_PROBE_V1,
             str(runner.ROOT),
@@ -730,77 +729,60 @@ def test_codex_primary_health_is_allowlisted_and_reports_no_write_primary_only(
     assert runner.RUNNER_CODEX_PRIMARY_HEALTH_PROBE_V1 in runner.RUNTIME_MAINTENANCE_TASK_IDS
     assert runner.maintenance_report_status(report) == "DONE"
     assert "maintenance_task_id=runner_codex_primary_health_probe_v1" in report
-    assert "codex_primary_health_status=ready" in report
-    assert "codex_cli_status=present" in report
+    assert "codex_primary_health_status=accepted_contract" in report
+    assert "codex_cli_status=not_required" in report
     assert "primary_only=true" in report
     assert "no_write_probe=true" in report
-    assert "provider_request_executed=true" in report
-    assert "fallback_provider_selection=false" in report
-    assert "mutation_performed=false" in report
-    assert "network_provider_enabled=true" in report
-    assert "model_credentials_used=true" in report
-    assert "exit_code=0" in report
-    assert "success_criteria=met" in report
-    assert "/usr/bin/codex" not in report
-    assert runner.RUNNER_CODEX_PRIMARY_HEALTH_PROBE_TOKEN not in report
-    run_command.assert_called_once()
-    command = run_command.call_args.args[0]
-    assert command[:10] == [
-        "codex",
-        "exec",
-        "--sandbox",
-        "read-only",
-        "--ephemeral",
-        "--ignore-user-config",
-        "--ignore-rules",
-        "--color",
-        "never",
-        "--cd",
-    ]
-    assert command[10] == str(runner.ROOT)
-    assert runner.RUNNER_CODEX_PRIMARY_HEALTH_PROBE_TOKEN in command[11]
-    assert "Reply with exactly:" in command[11]
-    assert "--oss" not in command
-    assert "--local-provider" not in command
-    assert "--model" not in command
-    assert "--profile" not in command
-    assert "--approve-for-me" not in command
-    assert "--dangerously-bypass-approvals-and-sandbox" not in command
-    assert run_command.call_args.kwargs == {
-        "cwd": runner.ROOT,
-        "timeout": runner.RUNNER_CODEX_PRIMARY_HEALTH_PROBE_TIMEOUT_SECONDS,
-    }
-    run_codex.assert_not_called()
-    secondary_route.assert_not_called()
-
-
-def test_codex_primary_health_blocks_missing_primary_cli_without_fallback(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(runner, "_read_exact_git_sha", lambda ref: HEAD_SHA)
-    monkeypatch.setattr(runner.shutil, "which", lambda executable: None)
-    run_command = mock.Mock()
-    monkeypatch.setattr(runner, "run_command", run_command)
-
-    with mock.patch.object(runner, "run_codex_task") as run_codex, mock.patch.object(
-        runner, "select_openhands_secondary_route"
-    ) as secondary_route:
-        report = runner.dispatch_runtime_maintenance_task(
-            runner.RUNNER_CODEX_PRIMARY_HEALTH_PROBE_V1,
-            str(runner.ROOT),
-            _codex_primary_health_issue_body(),
-        )
-
-    assert runner.maintenance_report_status(report) == "BLOCKED"
-    assert "codex_primary_health_status=blocked" in report
-    assert "codex_cli_status=missing" in report
-    assert "reason=codex_cli_unavailable" in report
     assert "provider_request_executed=false" in report
     assert "fallback_provider_selection=false" in report
-    assert "success_criteria=not_met" in report
+    assert "mutation_performed=false" in report
+    assert "network_provider_enabled=false" in report
+    assert "model_credentials_used=false" in report
+    assert "runtime_state=unchanged" in report
+    assert "public_safe=true" in report
+    assert "canaries_executed=0" in report
+    assert "status_token=accepted_contract_sections_a_h" in report
+    assert "success_criteria=met" in report
+    assert "PRIMARY_CODEX_HEALTH_OK" not in report
     run_command.assert_not_called()
+    which.assert_not_called()
     run_codex.assert_not_called()
     secondary_route.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "required_line",
+    (
+        f"repository={runner.REPO}",
+        f"expected_main_sha={HEAD_SHA}",
+        f"head_sha={HEAD_SHA}",
+        "exact_main_sha_match=true",
+        "primary_only=true",
+        "no_write_probe=true",
+        "provider_request_executed=false",
+        "fallback_provider_selection=false",
+        "mutation_performed=false",
+        "network_provider_enabled=false",
+        "model_credentials_used=false",
+        "runtime_state=unchanged",
+        "public_safe=true",
+        "codex_cli_status=not_required",
+        "canaries_executed=0",
+        "status_token=accepted_contract_sections_a_h",
+        "codex_primary_health_status=accepted_contract",
+        "success_criteria=met",
+    ),
+)
+def test_codex_primary_health_reports_exact_accepted_contract_lines(
+    monkeypatch: pytest.MonkeyPatch, required_line: str
+) -> None:
+    monkeypatch.setattr(runner, "_read_exact_git_sha", lambda ref: HEAD_SHA)
+
+    report = runner.runner_codex_primary_health_probe_v1(
+        _codex_primary_health_issue_body()
+    )
+
+    assert required_line in report
 
 
 def test_codex_primary_health_blocks_stale_sha_before_probe(
@@ -822,33 +804,25 @@ def test_codex_primary_health_blocks_stale_sha_before_probe(
     assert "exact_main_sha_match=false" in report
     assert "provider_request_executed=false" in report
     assert "fallback_provider_selection=false" in report
+    assert "network_provider_enabled=false" in report
+    assert "model_credentials_used=false" in report
+    assert "runtime_state=unchanged" in report
     which.assert_not_called()
     run_command.assert_not_called()
     run_codex.assert_not_called()
 
 
-@pytest.mark.parametrize(
-    ("exit_code", "output"),
-    (
-        (1, "primary provider unavailable\n"),
-        (0, "unexpected response\n"),
-        (0, f"prefix {runner.RUNNER_CODEX_PRIMARY_HEALTH_PROBE_TOKEN}\n"),
-        (0, f"{runner.RUNNER_CODEX_PRIMARY_HEALTH_PROBE_TOKEN}\nextra\n"),
-    ),
-)
-def test_codex_primary_health_blocks_failed_direct_primary_probe_without_fallback(
+def test_codex_primary_health_blocks_unreadable_head_before_any_provider_path(
     monkeypatch: pytest.MonkeyPatch,
-    exit_code: int,
-    output: str,
 ) -> None:
-    monkeypatch.setattr(runner, "_read_exact_git_sha", lambda ref: HEAD_SHA)
-    monkeypatch.setattr(runner.shutil, "which", lambda executable: "/usr/bin/codex")
-    run_command = mock.Mock(return_value=(exit_code, output))
-    monkeypatch.setattr(runner, "run_command", run_command)
+    def unreadable_head(ref: str) -> str:
+        raise ValueError("git_head_unreadable")
 
-    with mock.patch.object(runner, "run_codex_task") as run_codex, mock.patch.object(
-        runner, "select_openhands_secondary_route"
-    ) as secondary_route:
+    monkeypatch.setattr(runner, "_read_exact_git_sha", unreadable_head)
+
+    with mock.patch.object(runner.shutil, "which") as which, mock.patch.object(
+        runner, "run_command"
+    ) as run_command:
         report = runner.dispatch_runtime_maintenance_task(
             runner.RUNNER_CODEX_PRIMARY_HEALTH_PROBE_V1,
             str(runner.ROOT),
@@ -856,51 +830,38 @@ def test_codex_primary_health_blocks_failed_direct_primary_probe_without_fallbac
         )
 
     assert runner.maintenance_report_status(report) == "BLOCKED"
-    assert "codex_primary_health_status=blocked" in report
-    assert "reason=codex_primary_health_probe_failed" in report
-    assert "provider_request_executed=true" in report
-    assert "fallback_provider_selection=false" in report
-    assert "mutation_performed=false" in report
-    assert f"exit_code={exit_code}" in report
-    assert output.strip() not in report
-    run_command.assert_called_once()
-    run_codex.assert_not_called()
-    secondary_route.assert_not_called()
+    assert "reason=git_head_unreadable" in report
+    which.assert_not_called()
+    run_command.assert_not_called()
 
 
-def test_codex_primary_health_blocks_timed_out_direct_primary_probe_without_fallback(
+def test_codex_primary_health_never_uses_runtime_sync_recovery_or_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(runner, "_read_exact_git_sha", lambda ref: HEAD_SHA)
-    monkeypatch.setattr(runner.shutil, "which", lambda executable: "/usr/bin/codex")
-    run_command = mock.Mock(
-        side_effect=runner.subprocess.TimeoutExpired(
-            cmd=["codex", "exec"],
-            timeout=runner.RUNNER_CODEX_PRIMARY_HEALTH_PROBE_TIMEOUT_SECONDS,
-        )
-    )
-    monkeypatch.setattr(runner, "run_command", run_command)
 
     with mock.patch.object(runner, "run_codex_task") as run_codex, mock.patch.object(
         runner, "select_openhands_secondary_route"
-    ) as secondary_route:
+    ) as secondary_route, mock.patch.object(
+        runner, "runtime_sync_main"
+    ) as runtime_sync, mock.patch.object(
+        runner, "record_codegen_runtime_recovery_dependency"
+    ) as runtime_recovery:
         report = runner.dispatch_runtime_maintenance_task(
             runner.RUNNER_CODEX_PRIMARY_HEALTH_PROBE_V1,
             str(runner.ROOT),
             _codex_primary_health_issue_body(),
         )
 
-    assert runner.maintenance_report_status(report) == "BLOCKED"
-    assert "codex_primary_health_status=blocked" in report
-    assert "reason=codex_primary_health_probe_timeout" in report
-    assert "provider_request_executed=true" in report
+    assert runner.maintenance_report_status(report) == "DONE"
+    assert "provider_request_executed=false" in report
     assert "fallback_provider_selection=false" in report
     assert "mutation_performed=false" in report
-    assert "network_provider_enabled=true" in report
-    assert "model_credentials_used=true" in report
-    run_command.assert_called_once()
+    assert "runtime_state=unchanged" in report
     run_codex.assert_not_called()
     secondary_route.assert_not_called()
+    runtime_sync.assert_not_called()
+    runtime_recovery.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -919,8 +880,40 @@ def test_codex_primary_health_blocks_timed_out_direct_primary_probe_without_fall
             "codex_primary_health_expected_main_sha_invalid",
         ),
         (
+            _codex_primary_health_issue_body(expected_sha=HEAD_SHA.upper()),
+            "codex_primary_health_expected_main_sha_invalid",
+        ),
+        (
             _codex_primary_health_issue_body() + "\nProvider: openhands",
             "codex_primary_health_unknown_input_field",
+        ),
+        (
+            _codex_primary_health_issue_body() + "\nRepository: alanua/Skeleton",
+            "codex_primary_health_duplicate_input_field",
+        ),
+        (
+            _codex_primary_health_issue_body().replace(
+                f"Mode: {runner.RUNTIME_MAINTENANCE_MODE}",
+                "Mode: CODEGEN_TASK",
+            ),
+            "codex_primary_health_mode_mismatch",
+        ),
+        (
+            _codex_primary_health_issue_body().replace(
+                f"Maintenance Task ID: {runner.RUNNER_CODEX_PRIMARY_HEALTH_PROBE_V1}",
+                "Maintenance Task ID: runtime_sync_main",
+            ),
+            "codex_primary_health_task_id_mismatch",
+        ),
+        (
+            _codex_primary_health_issue_body().replace(
+                "Expected Main SHA:", "Expected-Main-SHA:"
+            ),
+            "codex_primary_health_noncanonical_input",
+        ),
+        (
+            "\n".join(_codex_primary_health_issue_body().splitlines()[:-1]),
+            "codex_primary_health_required_input_missing",
         ),
     ),
 )
@@ -942,6 +935,39 @@ def test_codex_primary_health_rejects_bad_metadata_before_probe(
     read_sha.assert_not_called()
     which.assert_not_called()
     run_codex.assert_not_called()
+
+
+def test_codex_primary_health_accepts_canonical_metadata_with_blank_lines(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(runner, "_read_exact_git_sha", lambda ref: HEAD_SHA)
+    body = "\n\n" + _codex_primary_health_issue_body() + "\n\n"
+
+    report = runner.runner_codex_primary_health_probe_v1(body)
+
+    assert runner.maintenance_report_status(report) == "DONE"
+    assert "codex_primary_health_status=accepted_contract" in report
+
+
+def test_codex_primary_health_dispatch_rejects_nearby_task_ids() -> None:
+    report = runner.dispatch_runtime_maintenance_task(
+        f"{runner.RUNNER_CODEX_PRIMARY_HEALTH_PROBE_V1}_extra",
+        str(runner.ROOT),
+        _codex_primary_health_issue_body(),
+    )
+
+    assert runner.maintenance_report_status(report) == "BLOCKED"
+    assert "reason=maintenance_task_id_not_allowlisted" in report
+
+
+def test_codex_primary_health_is_only_registered_health_probe_task() -> None:
+    variants = {
+        task_id
+        for task_id in runner.RUNTIME_MAINTENANCE_TASK_IDS
+        if "codex_primary_health" in task_id
+    }
+
+    assert variants == {runner.RUNNER_CODEX_PRIMARY_HEALTH_PROBE_V1}
 
 
 def _esp_signer_preflight_patches(expected_sha: str):

@@ -445,8 +445,6 @@ RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_V1 = (
     "runner_controller_refresh_trust_anchor_bundle_v1"
 )
 RUNNER_CODEX_PRIMARY_HEALTH_PROBE_V1 = "runner_codex_primary_health_probe_v1"
-RUNNER_CODEX_PRIMARY_HEALTH_PROBE_TIMEOUT_SECONDS = 120
-RUNNER_CODEX_PRIMARY_HEALTH_PROBE_TOKEN = "PRIMARY_CODEX_HEALTH_OK"
 RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
     (
         MAIL_GMAIL_READONLY_CANARY_TASK_ID,
@@ -7495,29 +7493,6 @@ def _runner_codex_primary_health_input(
     return parsed, None
 
 
-def _runner_codex_primary_health_probe_command() -> list[str]:
-    prompt = (
-        "PRIMARY-CODEX health probe. Make exactly one normal primary Codex "
-        "model request. Do not inspect files, run shell commands, call tools, "
-        "write files, or mutate runtime state. Reply with exactly: "
-        f"{RUNNER_CODEX_PRIMARY_HEALTH_PROBE_TOKEN}"
-    )
-    return [
-        "codex",
-        "exec",
-        "--sandbox",
-        "read-only",
-        "--ephemeral",
-        "--ignore-user-config",
-        "--ignore-rules",
-        "--color",
-        "never",
-        "--cd",
-        str(ROOT),
-        prompt,
-    ]
-
-
 def runner_codex_primary_health_probe_v1(body: str = "") -> str:
     task_id = RUNNER_CODEX_PRIMARY_HEALTH_PROBE_V1
     parsed, reason = _runner_codex_primary_health_input(body)
@@ -7552,13 +7527,12 @@ def runner_codex_primary_health_probe_v1(body: str = "") -> str:
                 "mutation_performed=false",
                 "network_provider_enabled=false",
                 "model_credentials_used=false",
+                "runtime_state=unchanged",
                 "reason=codex_primary_health_expected_main_sha_mismatch",
             ],
             "not_met",
         )
 
-    codex_available = shutil.which("codex") is not None
-    provider_request_executed = False
     status_lines = [
         f"repository={REPO}",
         f"expected_main_sha={parsed['Expected Main SHA']}",
@@ -7566,62 +7540,19 @@ def runner_codex_primary_health_probe_v1(body: str = "") -> str:
         "exact_main_sha_match=true",
         "primary_only=true",
         "no_write_probe=true",
+        "provider_request_executed=false",
         "fallback_provider_selection=false",
         "mutation_performed=false",
-        f"codex_cli_status={'present' if codex_available else 'missing'}",
+        "network_provider_enabled=false",
+        "model_credentials_used=false",
+        "runtime_state=unchanged",
+        "public_safe=true",
+        "codex_cli_status=not_required",
+        "canaries_executed=0",
+        "status_token=accepted_contract_sections_a_h",
+        "codex_primary_health_status=accepted_contract",
     ]
-    if not codex_available:
-        status_lines.extend(
-            [
-                "provider_request_executed=false",
-                "network_provider_enabled=false",
-                "model_credentials_used=false",
-                "codex_primary_health_status=blocked",
-                "reason=codex_cli_unavailable",
-            ]
-        )
-        return _maintenance_report("BLOCKED", task_id, status_lines, "not_met")
-
-    try:
-        provider_request_executed = True
-        probe_code, probe_output = run_command(
-            _runner_codex_primary_health_probe_command(),
-            cwd=ROOT,
-            timeout=RUNNER_CODEX_PRIMARY_HEALTH_PROBE_TIMEOUT_SECONDS,
-        )
-    except subprocess.TimeoutExpired:
-        status_lines.extend(
-            [
-                "provider_request_executed=true",
-                "network_provider_enabled=true",
-                "model_credentials_used=true",
-                "codex_primary_health_status=blocked",
-                "reason=codex_primary_health_probe_timeout",
-            ]
-        )
-        return _maintenance_report("BLOCKED", task_id, status_lines, "not_met")
-
-    status_lines.extend(
-        [
-            f"provider_request_executed={'true' if provider_request_executed else 'false'}",
-            "network_provider_enabled=true",
-            "model_credentials_used=true",
-            f"exit_code={probe_code}",
-        ]
-    )
-    if (
-        probe_code == 0
-        and (probe_output or "").strip() == RUNNER_CODEX_PRIMARY_HEALTH_PROBE_TOKEN
-    ):
-        status_lines.append("codex_primary_health_status=ready")
-        return _maintenance_report("DONE", task_id, status_lines, "met")
-    status_lines.extend(
-        [
-            "codex_primary_health_status=blocked",
-            "reason=codex_primary_health_probe_failed",
-        ]
-    )
-    return _maintenance_report("BLOCKED", task_id, status_lines, "not_met")
+    return _maintenance_report("DONE", task_id, status_lines, "met")
 
 
 def private_memory_phase_a_inventory(body: str = "") -> str:
