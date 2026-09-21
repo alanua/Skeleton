@@ -713,13 +713,20 @@ def test_codex_primary_health_is_allowlisted_and_reports_no_write_primary_only(
 ) -> None:
     monkeypatch.setattr(runner, "_read_exact_git_sha", lambda ref: HEAD_SHA)
 
+    completed = runner.subprocess.CompletedProcess(
+        args=[],
+        returncode=0,
+        stdout=f"{runner.RUNNER_CODEX_PRIMARY_HEALTH_TOKEN}\n",
+        stderr="",
+    )
     with mock.patch.object(runner, "run_codex_task") as run_codex, mock.patch.object(
         runner, "select_openhands_secondary_route"
     ) as secondary_route, mock.patch.object(
         runner, "run_command"
     ) as run_command, mock.patch.object(
         runner.shutil, "which"
-    ) as which:
+    ) as which, mock.patch.object(runner.subprocess, "run", return_value=completed) as run:
+        which.return_value = "/usr/bin/codex"
         report = runner.dispatch_runtime_maintenance_task(
             runner.RUNNER_CODEX_PRIMARY_HEALTH_PROBE_V1,
             str(runner.ROOT),
@@ -729,23 +736,43 @@ def test_codex_primary_health_is_allowlisted_and_reports_no_write_primary_only(
     assert runner.RUNNER_CODEX_PRIMARY_HEALTH_PROBE_V1 in runner.RUNTIME_MAINTENANCE_TASK_IDS
     assert runner.maintenance_report_status(report) == "DONE"
     assert "maintenance_task_id=runner_codex_primary_health_probe_v1" in report
-    assert "codex_primary_health_status=accepted_contract" in report
-    assert "codex_cli_status=not_required" in report
+    assert "codex_primary_health_status=ok" in report
+    assert "codex_cli_status=present" in report
     assert "primary_only=true" in report
     assert "no_write_probe=true" in report
-    assert "provider_request_executed=false" in report
+    assert "provider_request_executed=true" in report
     assert "fallback_provider_selection=false" in report
     assert "mutation_performed=false" in report
-    assert "network_provider_enabled=false" in report
-    assert "model_credentials_used=false" in report
+    assert "network_provider_enabled=true" in report
+    assert "model_credentials_used=true" in report
     assert "runtime_state=unchanged" in report
     assert "public_safe=true" in report
-    assert "canaries_executed=0" in report
-    assert "status_token=accepted_contract_sections_a_h" in report
+    assert "canaries_executed=1" in report
+    assert "status_token=primary_codex_health_ok" in report
     assert "success_criteria=met" in report
     assert "PRIMARY_CODEX_HEALTH_OK" not in report
+    which.assert_called_once_with("codex")
+    run.assert_called_once()
+    command = run.call_args.args[0]
+    assert command[:7] == [
+        "/usr/bin/codex",
+        "exec",
+        "--sandbox",
+        "read-only",
+        "--ephemeral",
+        "--ignore-user-config",
+        "--ignore-rules",
+    ]
+    assert runner.RUNNER_CODEX_PRIMARY_HEALTH_TOKEN in command[7]
+    assert "Do not inspect files" in command[7]
+    assert run.call_args.kwargs == {
+        "cwd": str(runner.ROOT),
+        "check": False,
+        "capture_output": True,
+        "text": True,
+        "timeout": runner.RUNNER_CODEX_PRIMARY_HEALTH_TIMEOUT_SECONDS,
+    }
     run_command.assert_not_called()
-    which.assert_not_called()
     run_codex.assert_not_called()
     secondary_route.assert_not_called()
 
@@ -759,17 +786,17 @@ def test_codex_primary_health_is_allowlisted_and_reports_no_write_primary_only(
         "exact_main_sha_match=true",
         "primary_only=true",
         "no_write_probe=true",
-        "provider_request_executed=false",
+        "provider_request_executed=true",
         "fallback_provider_selection=false",
         "mutation_performed=false",
-        "network_provider_enabled=false",
-        "model_credentials_used=false",
+        "network_provider_enabled=true",
+        "model_credentials_used=true",
         "runtime_state=unchanged",
         "public_safe=true",
-        "codex_cli_status=not_required",
-        "canaries_executed=0",
-        "status_token=accepted_contract_sections_a_h",
-        "codex_primary_health_status=accepted_contract",
+        "codex_cli_status=present",
+        "canaries_executed=1",
+        "status_token=primary_codex_health_ok",
+        "codex_primary_health_status=ok",
         "success_criteria=met",
     ),
 )
@@ -777,10 +804,19 @@ def test_codex_primary_health_reports_exact_accepted_contract_lines(
     monkeypatch: pytest.MonkeyPatch, required_line: str
 ) -> None:
     monkeypatch.setattr(runner, "_read_exact_git_sha", lambda ref: HEAD_SHA)
-
-    report = runner.runner_codex_primary_health_probe_v1(
-        _codex_primary_health_issue_body()
+    completed = runner.subprocess.CompletedProcess(
+        args=[],
+        returncode=0,
+        stdout=f"{runner.RUNNER_CODEX_PRIMARY_HEALTH_TOKEN}\n",
+        stderr="",
     )
+
+    with mock.patch.object(
+        runner.shutil, "which", return_value="/usr/bin/codex"
+    ), mock.patch.object(runner.subprocess, "run", return_value=completed):
+        report = runner.runner_codex_primary_health_probe_v1(
+            _codex_primary_health_issue_body()
+        )
 
     assert required_line in report
 
@@ -839,6 +875,12 @@ def test_codex_primary_health_never_uses_runtime_sync_recovery_or_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(runner, "_read_exact_git_sha", lambda ref: HEAD_SHA)
+    completed = runner.subprocess.CompletedProcess(
+        args=[],
+        returncode=0,
+        stdout=f"{runner.RUNNER_CODEX_PRIMARY_HEALTH_TOKEN}\n",
+        stderr="",
+    )
 
     with mock.patch.object(runner, "run_codex_task") as run_codex, mock.patch.object(
         runner, "select_openhands_secondary_route"
@@ -846,7 +888,9 @@ def test_codex_primary_health_never_uses_runtime_sync_recovery_or_fallback(
         runner, "runtime_sync_main"
     ) as runtime_sync, mock.patch.object(
         runner, "record_codegen_runtime_recovery_dependency"
-    ) as runtime_recovery:
+    ) as runtime_recovery, mock.patch.object(
+        runner.shutil, "which", return_value="/usr/bin/codex"
+    ), mock.patch.object(runner.subprocess, "run", return_value=completed):
         report = runner.dispatch_runtime_maintenance_task(
             runner.RUNNER_CODEX_PRIMARY_HEALTH_PROBE_V1,
             str(runner.ROOT),
@@ -854,7 +898,7 @@ def test_codex_primary_health_never_uses_runtime_sync_recovery_or_fallback(
         )
 
     assert runner.maintenance_report_status(report) == "DONE"
-    assert "provider_request_executed=false" in report
+    assert "provider_request_executed=true" in report
     assert "fallback_provider_selection=false" in report
     assert "mutation_performed=false" in report
     assert "runtime_state=unchanged" in report
@@ -941,12 +985,21 @@ def test_codex_primary_health_accepts_canonical_metadata_with_blank_lines(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(runner, "_read_exact_git_sha", lambda ref: HEAD_SHA)
+    completed = runner.subprocess.CompletedProcess(
+        args=[],
+        returncode=0,
+        stdout=f"{runner.RUNNER_CODEX_PRIMARY_HEALTH_TOKEN}\n",
+        stderr="",
+    )
     body = "\n\n" + _codex_primary_health_issue_body() + "\n\n"
 
-    report = runner.runner_codex_primary_health_probe_v1(body)
+    with mock.patch.object(
+        runner.shutil, "which", return_value="/usr/bin/codex"
+    ), mock.patch.object(runner.subprocess, "run", return_value=completed):
+        report = runner.runner_codex_primary_health_probe_v1(body)
 
     assert runner.maintenance_report_status(report) == "DONE"
-    assert "codex_primary_health_status=accepted_contract" in report
+    assert "codex_primary_health_status=ok" in report
 
 
 def test_codex_primary_health_dispatch_rejects_nearby_task_ids() -> None:

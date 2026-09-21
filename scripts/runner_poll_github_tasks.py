@@ -445,6 +445,8 @@ RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_V1 = (
     "runner_controller_refresh_trust_anchor_bundle_v1"
 )
 RUNNER_CODEX_PRIMARY_HEALTH_PROBE_V1 = "runner_codex_primary_health_probe_v1"
+RUNNER_CODEX_PRIMARY_HEALTH_TOKEN = "PRIMARY_CODEX_HEALTH_OK"
+RUNNER_CODEX_PRIMARY_HEALTH_TIMEOUT_SECONDS = 120
 RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
     (
         MAIL_GMAIL_READONLY_CANARY_TASK_ID,
@@ -7533,24 +7535,114 @@ def runner_codex_primary_health_probe_v1(body: str = "") -> str:
             "not_met",
         )
 
-    status_lines = [
+    codex_cli = shutil.which("codex")
+    if codex_cli is None:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [
+                f"repository={REPO}",
+                f"expected_main_sha={parsed['Expected Main SHA']}",
+                f"head_sha={current_sha}",
+                "exact_main_sha_match=true",
+                "primary_only=true",
+                "no_write_probe=true",
+                "provider_request_executed=false",
+                "fallback_provider_selection=false",
+                "mutation_performed=false",
+                "network_provider_enabled=false",
+                "model_credentials_used=false",
+                "runtime_state=unchanged",
+                "public_safe=true",
+                "codex_cli_status=missing",
+                "canaries_executed=0",
+                "codex_primary_health_status=blocked",
+                "reason=codex_primary_health_cli_missing",
+            ],
+            "not_met",
+        )
+
+    prompt = (
+        f"Reply exactly {RUNNER_CODEX_PRIMARY_HEALTH_TOKEN} and nothing else. "
+        "Do not inspect files. Do not call tools or shell commands. Do not write "
+        "files. Do not mutate runtime state."
+    )
+    command = [
+        codex_cli,
+        "exec",
+        "--sandbox",
+        "read-only",
+        "--ephemeral",
+        "--ignore-user-config",
+        "--ignore-rules",
+        prompt,
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            cwd=str(ROOT),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=RUNNER_CODEX_PRIMARY_HEALTH_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        probe_reason = "codex_primary_health_probe_timeout"
+        exit_code = "timeout"
+    except PermissionError:
+        probe_reason = "codex_primary_health_cli_permission_denied"
+        exit_code = "permission_denied"
+    except FileNotFoundError:
+        probe_reason = "codex_primary_health_cli_missing"
+        exit_code = "not_found"
+    except (OSError, subprocess.SubprocessError):
+        probe_reason = "codex_primary_health_probe_failed_closed"
+        exit_code = "failed_closed"
+    else:
+        exit_code = str(result.returncode)
+        output = result.stdout
+        stderr = result.stderr
+        if result.returncode != 0:
+            probe_reason = "codex_primary_health_probe_nonzero"
+        elif output.strip() == RUNNER_CODEX_PRIMARY_HEALTH_TOKEN and not stderr.strip():
+            probe_reason = ""
+        else:
+            probe_reason = "codex_primary_health_token_mismatch"
+
+    common_lines = [
         f"repository={REPO}",
         f"expected_main_sha={parsed['Expected Main SHA']}",
         f"head_sha={current_sha}",
         "exact_main_sha_match=true",
         "primary_only=true",
         "no_write_probe=true",
-        "provider_request_executed=false",
+        "provider_request_executed=true",
         "fallback_provider_selection=false",
         "mutation_performed=false",
-        "network_provider_enabled=false",
-        "model_credentials_used=false",
+        "network_provider_enabled=true",
+        "model_credentials_used=true",
         "runtime_state=unchanged",
         "public_safe=true",
-        "codex_cli_status=not_required",
-        "canaries_executed=0",
-        "status_token=accepted_contract_sections_a_h",
-        "codex_primary_health_status=accepted_contract",
+        "codex_cli_status=present",
+        "canaries_executed=1",
+    ]
+    if probe_reason:
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [
+                *common_lines,
+                f"exit_code={exit_code}",
+                "codex_primary_health_status=blocked",
+                f"reason={probe_reason}",
+            ],
+            "not_met",
+        )
+
+    status_lines = [
+        *common_lines,
+        "status_token=primary_codex_health_ok",
+        "codex_primary_health_status=ok",
     ]
     return _maintenance_report("DONE", task_id, status_lines, "met")
 
