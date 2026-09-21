@@ -21,6 +21,23 @@ acceptance:
 - publisher verifies read-back
 ```"""
 
+VALID_RUNNER_TASK_BODY = """```task
+schema: skeleton.runner_task.v1
+repo: alanua/Skeleton
+branch: runner/issue-3834
+task_kind: code_generation
+payload:
+  operation: harden_runner
+allowed_files:
+  - scripts/runner_poll_github_tasks.py
+validation:
+  - python -m pytest tests/test_runner_poll_github_tasks.py
+expected_output:
+  - tests PASS
+privacy_boundary: PUBLIC_SAFE_REPOSITORY_ONLY
+idempotency_key: publisher-test
+```"""
+
 
 def _write_body(tmp_path: Path, body: str = VALID_BODY) -> Path:
     path = tmp_path / "task.md"
@@ -106,6 +123,49 @@ def test_valid_body_creates_issue_with_body_file_verifies_then_marks_ready(
     assert "--body" not in create_call
     assert calls[1][:3] == ["gh", "issue", "view"]
     assert calls[2][-2:] == ["--add-label", publisher.READY_LABEL]
+
+
+def test_valid_runner_task_body_under_task_fence_is_accepted(tmp_path: Path) -> None:
+    body_file = _write_body(tmp_path, VALID_RUNNER_TASK_BODY)
+
+    assert publisher.load_and_validate_body(body_file) == VALID_RUNNER_TASK_BODY
+
+
+def test_runner_task_payload_under_yaml_fence_is_rejected_before_ready_label(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    body_file = _write_body(
+        tmp_path,
+        VALID_RUNNER_TASK_BODY.replace("```task", "```yaml", 1),
+    )
+
+    def fake_run_command(args: list[str]) -> tuple[int, str]:
+        raise AssertionError(args)
+
+    monkeypatch.setattr(publisher, "run_command", fake_run_command)
+
+    with pytest.raises(publisher.PublishError, match="```task fence"):
+        publisher.publish_task_issue(
+            repo="alanua/Skeleton",
+            title="Safe task",
+            body_file=body_file,
+        )
+
+
+def test_arbitrary_yaml_under_task_fence_is_not_executable_runner_task(
+    tmp_path: Path,
+) -> None:
+    body_file = _write_body(
+        tmp_path,
+        """```task
+title: documentation-only note
+items:
+  - not a runner task
+```""",
+    )
+
+    with pytest.raises(publisher.PublishError, match="classification"):
+        publisher.load_and_validate_body(body_file)
 
 
 def test_missing_closing_fence_is_rejected(tmp_path: Path) -> None:
