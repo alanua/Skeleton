@@ -25696,6 +25696,8 @@ def _skeleton_control_mcp_gateway_receipt(**updates: object) -> dict[str, object
         "stderr_exposed": False,
         "env_exposed": False,
         "private_paths_exposed": False,
+        "mutation_started": False,
+        "mutation_performed": False,
         "external_side_effects_executed": False,
     }
     receipt.update(updates)
@@ -25882,6 +25884,14 @@ def test_skeleton_control_mcp_pre_executor_needs_operator_surfaces_bounded_reaso
         {"__drop__": ("env_exposed",)},
         {"__drop__": ("private_paths_exposed",)},
         {"activation_executed": True},
+        {"mutation_started": True},
+        {"mutation_started": None},
+        {"mutation_started": "false"},
+        {"__drop__": ("mutation_started",)},
+        {"mutation_performed": True},
+        {"mutation_performed": None},
+        {"mutation_performed": "false"},
+        {"__drop__": ("mutation_performed",)},
         {"external_side_effects_executed": True},
         {"external_side_effects_executed": None},
         {"external_side_effects_executed": "false"},
