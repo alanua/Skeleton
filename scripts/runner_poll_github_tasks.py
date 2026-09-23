@@ -38,6 +38,11 @@ if str(ROOT) not in sys.path:
 
 from core.audit_ledger import AuditLedger, validate_public_safe_payload
 from core.aufmass_source_pack import validate_source_pack_manifest
+from core.codex_runtime_recovery import (
+    CodexRuntimeRecoveryError,
+    pinned_codex_recovery_marker_present,
+    pinned_codex_runtime_path,
+)
 from core.control_recovery import (
     CODEGEN_UNKNOWN_VARIANT_MAX_MESSAGE,
     CONTROL_RECOVERY_SCHEMA,
@@ -444,6 +449,12 @@ SKELETON_CONTROL_MCP_HETZNER_ACTIVATE_V1 = (
 RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_V1 = (
     "runner_controller_refresh_trust_anchor_bundle_v1"
 )
+RUNNER_CODEX_PRIMARY_HEALTH_PROBE = "runner_codex_primary_health_probe"
+RUNNER_CODEX_PRIMARY_HEALTH_TOKEN = "CODEX_HEALTH_OK"
+RUNNER_CODEX_PRIMARY_HEALTH_TIMEOUT_SECONDS = 120
+RUNNER_CODEX_PRIMARY_HEALTH_SCHEMA = (
+    "skeleton.runner_codex_primary_health_probe_receipt.v1"
+)
 RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
     (
         MAIL_GMAIL_READONLY_CANARY_TASK_ID,
@@ -494,6 +505,7 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         "runner_controller_repair_codex_state_mount_v1",
         SKELETON_CONTROL_MCP_HETZNER_ACTIVATE_V1,
         RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_V1,
+        RUNNER_CODEX_PRIMARY_HEALTH_PROBE,
         RUNNER_VNEXT_READONLY_PREFLIGHT_TASK_ID,
         RUNNER_VNEXT_EXTERNAL_ATTESTATION_TASK_ID,
         RUNNER_VNEXT_EXACT_GREEN_CANARY_TASK_ID,
@@ -559,6 +571,7 @@ PROTECTED_MAINTENANCE_TASK_IDS = frozenset(
         BUILD_AUFMASS_PRIVATE_AREA_SCHEDULE,
         QUARANTINE_STALE_CLEAN_SKELETON_WORKTREES,
         REPLENISH_RUNNER_QUEUE,
+        RUNNER_CODEX_PRIMARY_HEALTH_PROBE,
         RUNNER_VNEXT_EXTERNAL_ATTESTATION_TASK_ID,
         RUNNER_VNEXT_EXACT_GREEN_CANARY_TASK_ID,
     )
@@ -752,6 +765,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "artifact_count",
         "artifact_id",
         "actions_executed",
+        "auth_binding_present",
         "audit_id",
         "audit_persist_status",
         "audit_receipt_hash",
@@ -772,6 +786,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "candidate_count",
         "ready_depth_before",
         "selected_count",
+        "selected_model",
         "selected_issues",
         "waiting_dependency_count",
         "telegram_notifications",
@@ -782,12 +797,14 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "final_postcheck_receipt_hash",
         "failure_class",
         "failure_key",
+        "fallback_invoked",
         "private_artifact_hash_matches",
         "private_artifact_written",
         "changed_files_count",
         "changed_tracked_files",
         "changed_tracked_files_count",
         "check",
+        "checkout_clean",
         "checkout_head_sha",
         "checkout_path",
         "checkout_sync_state",
@@ -841,9 +858,11 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "device_canary",
         "exact_base_changed_files_count",
         "evidence_ref",
+        "executable_available",
         "existing_pr_lookup",
         "existing_pr_head_sha",
         "existing_pr_url",
+        "expected_current_sha_equal",
         "expected_existing_pr_head_sha",
         "expected_branch",
         "expected_main_sha",
@@ -1045,6 +1064,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "source_version_marker",
         "source_token_count",
         "sourcepack_note",
+        "retry_at",
         "schema",
         "status",
         "status_token",
@@ -1056,6 +1076,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "encrypted_result_cms_sha256",
         "serve_private",
         "verification_status",
+        "verdict",
         "cleanup_status",
         "status_count_approved",
         "status_count_needs_review",
@@ -7436,6 +7457,403 @@ def private_memory_healthcheck(body: str = "") -> str:
         return _maintenance_report("DONE", task_id, status_lines, "met")
     status_lines.append("reason=private_memory_healthcheck_not_ready")
     return _maintenance_report("BLOCKED", task_id, status_lines, "not_met")
+
+
+_RUNNER_CODEX_PRIMARY_HEALTH_INPUT_FIELDS = frozenset(
+    (
+        "Mode",
+        "Maintenance Task ID",
+        "Repository",
+        "Expected Main SHA",
+    )
+)
+_RUNNER_CODEX_PRIMARY_HEALTH_APPROVAL_FIELDS = frozenset(
+    ("Approval Reference", "Operator Approval")
+)
+_RUNNER_CODEX_PRIMARY_HEALTH_PROMPT = (
+    "Return exactly CODEX_HEALTH_OK. Do not inspect, create, modify, or delete "
+    "files. Do not run tools."
+)
+_RUNNER_CODEX_PRIMARY_HEALTH_VERDICTS = frozenset(
+    (
+        "CODEX_HEALTHY",
+        "CODEX_USAGE_LIMIT",
+        "CODEX_AUTH_FAILURE",
+        "CODEX_PROVIDER_OUTAGE",
+        "CODEX_EXECUTABLE_UNAVAILABLE",
+        "CODEX_ROUTE_UNAVAILABLE",
+        "CODEX_RESPONSE_INVALID",
+        "UNKNOWN_FAIL_CLOSED",
+    )
+)
+_RUNNER_CODEX_USAGE_MARKERS = (
+    "usage limit",
+    "rate limit",
+    "quota",
+    "insufficient_quota",
+    "limit reached",
+)
+_RUNNER_CODEX_AUTH_MARKERS = (
+    "authentication failed",
+    "authentication required",
+    "authorization failed",
+    "invalid api key",
+    "invalid_api_key",
+    "not logged in",
+    "login required",
+    "unauthorized",
+)
+_RUNNER_CODEX_PROVIDER_MARKERS = (
+    "provider unavailable",
+    "temporarily unavailable",
+    "service unavailable",
+    "internal server error",
+    "upstream error",
+    "bad gateway",
+    "gateway timeout",
+)
+_RUNNER_CODEX_RETRY_AT_RE = re.compile(
+    r"(?i)\b(?:reset|retry|try again)(?:\s+(?:at|after))?\s*[:=]?\s*"
+    r"(?P<timestamp>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}"
+    r"(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2}))\b"
+)
+
+
+def _runner_codex_primary_health_input(
+    body: str,
+) -> tuple[dict[str, str] | None, str | None]:
+    parsed: dict[str, str] = {}
+    metadata = _metadata_before_task(body).strip()
+    if not metadata:
+        return None, "codex_primary_health_required_input_missing"
+    for raw_line in metadata.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        match = re.fullmatch(
+            r"(?P<field>[A-Za-z][A-Za-z0-9 ]*):\s*(?P<value>\S(?:.*\S)?)",
+            line,
+        )
+        if match is None:
+            return None, "codex_primary_health_noncanonical_input"
+        field = match.group("field")
+        if field not in (
+            _RUNNER_CODEX_PRIMARY_HEALTH_INPUT_FIELDS
+            | _RUNNER_CODEX_PRIMARY_HEALTH_APPROVAL_FIELDS
+        ):
+            return None, "codex_primary_health_unknown_input_field"
+        if field in parsed:
+            return None, "codex_primary_health_duplicate_input_field"
+        parsed[field] = match.group("value")
+    if not _RUNNER_CODEX_PRIMARY_HEALTH_INPUT_FIELDS <= set(parsed):
+        return None, "codex_primary_health_required_input_missing"
+    if _RUNNER_CODEX_PRIMARY_HEALTH_APPROVAL_FIELDS <= set(parsed):
+        return None, "codex_primary_health_duplicate_input_field"
+    if parsed["Mode"] != RUNTIME_MAINTENANCE_MODE:
+        return None, "codex_primary_health_mode_mismatch"
+    if parsed["Maintenance Task ID"] != RUNNER_CODEX_PRIMARY_HEALTH_PROBE:
+        return None, "codex_primary_health_task_id_mismatch"
+    if parsed["Repository"] != REPO:
+        return None, "codex_primary_health_repository_mismatch"
+    if re.fullmatch(r"[0-9a-f]{40}", parsed["Expected Main SHA"]) is None:
+        return None, "codex_primary_health_expected_main_sha_invalid"
+    return parsed, None
+
+
+def _runner_codex_primary_health_report(
+    verdict: str,
+    *,
+    expected_current_sha_equal: bool = False,
+    checkout_clean: bool = False,
+    executable_available: bool = False,
+    auth_binding_present: bool = False,
+    selected_model: str | None = None,
+    retry_at: str | None = None,
+    mutation_performed: bool = False,
+) -> str:
+    if verdict not in _RUNNER_CODEX_PRIMARY_HEALTH_VERDICTS:
+        verdict = "UNKNOWN_FAIL_CLOSED"
+    status_lines = [
+        f"schema={RUNNER_CODEX_PRIMARY_HEALTH_SCHEMA}",
+        "expected_current_sha_equal="
+        + str(expected_current_sha_equal).lower(),
+        f"checkout_clean={str(checkout_clean).lower()}",
+        f"executable_available={str(executable_available).lower()}",
+        f"auth_binding_present={str(auth_binding_present).lower()}",
+    ]
+    if selected_model is not None:
+        status_lines.append(f"selected_model={selected_model}")
+    status_lines.extend(
+        (
+            f"verdict={verdict}",
+            f"retry_at={retry_at or 'none'}",
+            "fallback_invoked=false",
+            f"mutation_performed={str(mutation_performed).lower()}",
+        )
+    )
+    healthy = verdict == "CODEX_HEALTHY"
+    return _maintenance_report(
+        "DONE" if healthy else "BLOCKED",
+        RUNNER_CODEX_PRIMARY_HEALTH_PROBE,
+        status_lines,
+        "met" if healthy else "not_met",
+    )
+
+
+def _runner_codex_primary_executable(
+    environment: Mapping[str, str],
+) -> str | None:
+    if not pinned_codex_recovery_marker_present(environment):
+        return None
+    try:
+        executable = pinned_codex_runtime_path(environment)
+        candidate = Path(executable)
+        if (
+            not candidate.is_absolute()
+            or not candidate.is_file()
+            or not os.access(candidate, os.X_OK)
+        ):
+            return None
+    except (CodexRuntimeRecoveryError, OSError, subprocess.SubprocessError):
+        return None
+    return str(candidate)
+
+
+def _runner_codex_primary_auth_home(
+    environment: Mapping[str, str],
+) -> Path | None:
+    home_text = environment.get("HOME", "").strip()
+    if not home_text:
+        return None
+    home = Path(home_text).expanduser()
+    if not home.is_absolute():
+        return None
+    codex_home = home / ".codex"
+    auth_file = codex_home / "auth.json"
+    try:
+        if codex_home.is_symlink() or auth_file.is_symlink():
+            return None
+        codex_stat = codex_home.stat()
+        auth_stat = auth_file.stat()
+    except OSError:
+        return None
+    uid = os.getuid()
+    if (
+        not stat.S_ISDIR(codex_stat.st_mode)
+        or not stat.S_ISREG(auth_stat.st_mode)
+        or codex_stat.st_uid != uid
+        or auth_stat.st_uid != uid
+        or stat.S_IMODE(codex_stat.st_mode) & 0o077
+        or stat.S_IMODE(auth_stat.st_mode) & 0o077
+    ):
+        return None
+    return codex_home
+
+
+def _runner_codex_primary_retry_at(output: str) -> str | None:
+    match = _RUNNER_CODEX_RETRY_AT_RE.search(output or "")
+    if match is None:
+        return None
+    timestamp = match.group("timestamp")
+    try:
+        parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return timestamp
+
+
+def _runner_codex_primary_failure_verdict(exit_code: int, output: str) -> str:
+    lowered = (output or "").lower()
+    availability_failure = codex_failure_allows_secondary(exit_code, output)
+    if any(marker in lowered for marker in _RUNNER_CODEX_USAGE_MARKERS):
+        return "CODEX_USAGE_LIMIT"
+    if any(marker in lowered for marker in _RUNNER_CODEX_AUTH_MARKERS):
+        return "CODEX_AUTH_FAILURE"
+    if availability_failure or any(
+        marker in lowered for marker in _RUNNER_CODEX_PROVIDER_MARKERS
+    ):
+        return "CODEX_PROVIDER_OUTAGE"
+    return "UNKNOWN_FAIL_CLOSED"
+
+
+def runner_codex_primary_health_probe(body: str = "") -> str:
+    parsed, reason = _runner_codex_primary_health_input(body)
+    if reason is not None or parsed is None:
+        return _runner_codex_primary_health_report("CODEX_ROUTE_UNAVAILABLE")
+
+    task_id = RUNNER_CODEX_PRIMARY_HEALTH_PROBE
+    registered_checkout, checkout_report = _registered_skeleton_checkout(task_id)
+    if checkout_report is not None or registered_checkout is None:
+        return _runner_codex_primary_health_report("CODEX_ROUTE_UNAVAILABLE")
+    if _verify_skeleton_checkout_present(task_id, registered_checkout) is not None:
+        return _runner_codex_primary_health_report("CODEX_ROUTE_UNAVAILABLE")
+
+    checkout_path = registered_checkout.checkout_path
+    preflight_lines = list(registered_checkout.status_lines)
+    if _read_skeleton_origin(task_id, registered_checkout, preflight_lines) is not None:
+        return _runner_codex_primary_health_report("CODEX_ROUTE_UNAVAILABLE")
+    if _read_skeleton_current_branch(task_id, checkout_path, preflight_lines) is not None:
+        return _runner_codex_primary_health_report("CODEX_ROUTE_UNAVAILABLE")
+    if _read_skeleton_clean_state(task_id, checkout_path, preflight_lines) is not None:
+        return _runner_codex_primary_health_report(
+            "CODEX_ROUTE_UNAVAILABLE", checkout_clean=False
+        )
+    current_sha, sha_report = _read_skeleton_sha(
+        task_id,
+        checkout_path,
+        "HEAD",
+        preflight_lines,
+        "read_checkout_head",
+    )
+    expected_sha = parsed["Expected Main SHA"]
+    sha_equal = sha_report is None and current_sha == expected_sha
+    if not sha_equal:
+        return _runner_codex_primary_health_report(
+            "CODEX_ROUTE_UNAVAILABLE",
+            expected_current_sha_equal=False,
+            checkout_clean=True,
+        )
+
+    authority_environment = dict(os.environ)
+    executable = _runner_codex_primary_executable(authority_environment)
+    if executable is None:
+        return _runner_codex_primary_health_report(
+            "CODEX_EXECUTABLE_UNAVAILABLE",
+            expected_current_sha_equal=True,
+            checkout_clean=True,
+        )
+    auth_home = _runner_codex_primary_auth_home(authority_environment)
+    if auth_home is None:
+        return _runner_codex_primary_health_report(
+            "CODEX_AUTH_FAILURE",
+            expected_current_sha_equal=True,
+            checkout_clean=True,
+            executable_available=True,
+        )
+
+    try:
+        child_environment = sanitize_codegen_child_environment(
+            authority_environment,
+            authority_environment={},
+        )
+        child_environment["CODEX_HOME"] = str(auth_home)
+        selected_model = selected_codex_model()
+    except (OSError, ValueError):
+        return _runner_codex_primary_health_report(
+            "CODEX_ROUTE_UNAVAILABLE",
+            expected_current_sha_equal=True,
+            checkout_clean=True,
+            executable_available=True,
+            auth_binding_present=True,
+        )
+
+    environment_token = _RUN_COMMAND_ENV_OVERRIDE.set(child_environment)
+    try:
+        try:
+            help_code, help_output = run_command(
+                [executable, "exec", "--help"],
+                cwd=checkout_path,
+                timeout=30,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return _runner_codex_primary_health_report(
+                "CODEX_ROUTE_UNAVAILABLE",
+                expected_current_sha_equal=True,
+                checkout_clean=True,
+                executable_available=True,
+                auth_binding_present=True,
+                selected_model=selected_model,
+            )
+        required_help_markers = (
+            "--sandbox",
+            "read-only",
+            "--ephemeral",
+            "--ignore-user-config",
+            "--ignore-rules",
+        )
+        if help_code != 0 or not all(
+            marker in help_output for marker in required_help_markers
+        ):
+            return _runner_codex_primary_health_report(
+                "CODEX_ROUTE_UNAVAILABLE",
+                expected_current_sha_equal=True,
+                checkout_clean=True,
+                executable_available=True,
+                auth_binding_present=True,
+                selected_model=selected_model,
+            )
+
+        command = [
+            executable,
+            "exec",
+            "--sandbox",
+            "read-only",
+            "--ephemeral",
+            "--ignore-user-config",
+            "--ignore-rules",
+            "--color",
+            "never",
+        ]
+        if selected_model is not None:
+            command.extend(("--model", selected_model))
+        command.extend(("--cd", str(checkout_path), "-"))
+        try:
+            provider_code, provider_output = run_command(
+                command,
+                cwd=checkout_path,
+                timeout=RUNNER_CODEX_PRIMARY_HEALTH_TIMEOUT_SECONDS,
+                input=_RUNNER_CODEX_PRIMARY_HEALTH_PROMPT,
+            )
+        except subprocess.TimeoutExpired:
+            provider_code, provider_output = -1, "provider unavailable"
+        except (OSError, subprocess.SubprocessError):
+            provider_code, provider_output = -1, ""
+    finally:
+        _RUN_COMMAND_ENV_OVERRIDE.reset(environment_token)
+
+    retry_at: str | None = None
+    if provider_code == 0:
+        verdict = (
+            "CODEX_HEALTHY"
+            if final_codex_answer(provider_output) == RUNNER_CODEX_PRIMARY_HEALTH_TOKEN
+            else "CODEX_RESPONSE_INVALID"
+        )
+    else:
+        verdict = _runner_codex_primary_failure_verdict(
+            provider_code, provider_output
+        )
+        retry_at = _runner_codex_primary_retry_at(provider_output)
+
+    postflight_lines: list[str] = []
+    post_sha, post_sha_report = _read_skeleton_sha(
+        task_id,
+        checkout_path,
+        "HEAD",
+        postflight_lines,
+        "reread_checkout_head",
+    )
+    post_clean_report = _read_skeleton_clean_state(
+        task_id, checkout_path, postflight_lines
+    )
+    final_sha_equal = post_sha_report is None and post_sha == expected_sha
+    final_clean = post_clean_report is None
+    mutation_performed = not final_sha_equal or not final_clean
+    if mutation_performed:
+        verdict = "UNKNOWN_FAIL_CLOSED"
+        retry_at = None
+
+    return _runner_codex_primary_health_report(
+        verdict,
+        expected_current_sha_equal=final_sha_equal,
+        checkout_clean=final_clean,
+        executable_available=True,
+        auth_binding_present=True,
+        selected_model=selected_model,
+        retry_at=retry_at,
+        mutation_performed=mutation_performed,
+    )
 
 
 def private_memory_phase_a_inventory(body: str = "") -> str:
@@ -20815,6 +21233,8 @@ def dispatch_runtime_maintenance_task(
             return skeleton_control_mcp_hetzner_activate_v1(body)
         if task_id == RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_V1:
             return runner_controller_refresh_trust_anchor_bundle_v1(body)
+        if task_id == RUNNER_CODEX_PRIMARY_HEALTH_PROBE:
+            return runner_codex_primary_health_probe(body)
         if task_id == MAIL_GMAIL_PRIMARY_REGISTERED_ACTIVATION:
             return mail_gmail_primary_registered_activation_v1(body)
         if task_id == MAIL_GMAIL_READONLY_CANARY_TASK_ID:

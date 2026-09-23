@@ -175,6 +175,17 @@ def _media_source_snapshot_receipt() -> dict[str, object]:
     }
 
 
+def _codex_primary_health_issue_body(expected_sha: str = HEAD_SHA) -> str:
+    return "\n".join(
+        (
+            f"Mode: {runner.RUNTIME_MAINTENANCE_MODE}",
+            f"Maintenance Task ID: {runner.RUNNER_CODEX_PRIMARY_HEALTH_PROBE}",
+            f"Repository: {runner.REPO}",
+            f"Expected Main SHA: {expected_sha}",
+        )
+    )
+
+
 def _esp_lab_stage1_signer_install_body(
     *,
     expected_main_sha: str = runner.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_APPROVED_MAIN_SHA,
@@ -695,6 +706,443 @@ def test_home_edge_media_source_snapshot_registry_exposes_only_exact_fixed_task_
             _media_source_snapshot_issue_body(),
         ).startswith("BLOCKED:")
     )
+
+
+def _codex_health_fakes(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    pre_sha: str = HEAD_SHA,
+    post_sha: str = HEAD_SHA,
+    pre_clean: bool = True,
+    post_clean: bool = True,
+    executable: str | None = "/registered/codex",
+    auth_home: Path | None = Path("/canonical/.codex"),
+    selected_model: str | None = "gpt-5.5",
+):
+    checkout = mock.Mock(
+        checkout_path=Path("/canonical/skeleton"), status_lines=[]
+    )
+    state = {"clean": 0, "sha": 0}
+    monkeypatch.setattr(
+        runner, "_registered_skeleton_checkout", lambda _task_id: (checkout, None)
+    )
+    monkeypatch.setattr(
+        runner,
+        "_verify_skeleton_checkout_present",
+        lambda _task_id, _checkout: None,
+    )
+    monkeypatch.setattr(
+        runner,
+        "_read_skeleton_origin",
+        lambda _task_id, _checkout, _lines: None,
+    )
+    monkeypatch.setattr(
+        runner,
+        "_read_skeleton_current_branch",
+        lambda _task_id, _path, _lines: None,
+    )
+
+    def read_clean(_task_id, _path, _lines):
+        index = min(state["clean"], 1)
+        state["clean"] += 1
+        return None if (pre_clean, post_clean)[index] else "BLOCKED"
+
+    def read_sha(_task_id, _path, _ref, _lines, _step):
+        index = min(state["sha"], 1)
+        state["sha"] += 1
+        return (pre_sha, post_sha)[index], None
+
+    monkeypatch.setattr(runner, "_read_skeleton_clean_state", read_clean)
+    monkeypatch.setattr(runner, "_read_skeleton_sha", read_sha)
+    executable_probe = mock.Mock(return_value=executable)
+    auth_probe = mock.Mock(return_value=auth_home)
+    sanitizer = mock.Mock(return_value={"HOME": "/canonical", "PATH": "/usr/bin"})
+    monkeypatch.setattr(
+        runner, "_runner_codex_primary_executable", executable_probe
+    )
+    monkeypatch.setattr(runner, "_runner_codex_primary_auth_home", auth_probe)
+    monkeypatch.setattr(runner, "sanitize_codegen_child_environment", sanitizer)
+    monkeypatch.setattr(runner, "selected_codex_model", lambda: selected_model)
+    return checkout, state, executable_probe, auth_probe, sanitizer
+
+
+def _codex_health_run(
+    *,
+    provider_code: int = 0,
+    provider_output: str = "CODEX_HEALTH_OK",
+    help_output: str = (
+        "--sandbox <MODE> [read-only|workspace-write] --ephemeral "
+        "--ignore-user-config --ignore-rules"
+    ),
+    seen_envs: list[dict[str, str]] | None = None,
+):
+    def run(args, cwd=None, **kwargs):
+        if seen_envs is not None:
+            seen_envs.append(dict(runner._RUN_COMMAND_ENV_OVERRIDE.get() or {}))
+        if args == ["/registered/codex", "exec", "--help"]:
+            return 0, help_output
+        return provider_code, provider_output
+
+    return run
+
+
+def _codex_health_receipt_keys(report: str) -> set[str]:
+    return {
+        line.split("=", 1)[0]
+        for line in report.splitlines()
+        if line.count("=") == 1
+        and not line.startswith(("maintenance_task_id=", "success_criteria="))
+    }
+
+
+def test_codex_primary_health_exact_registration_command_and_receipt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checkout, state, _executable, _auth, sanitizer = _codex_health_fakes(
+        monkeypatch
+    )
+    seen_envs: list[dict[str, str]] = []
+    run = mock.Mock(side_effect=_codex_health_run(seen_envs=seen_envs))
+    monkeypatch.setattr(runner, "run_command", run)
+
+    report = runner.dispatch_runtime_maintenance_task(
+        runner.RUNNER_CODEX_PRIMARY_HEALTH_PROBE,
+        str(runner.ROOT),
+        _codex_primary_health_issue_body(),
+    )
+
+    assert runner.RUNNER_CODEX_PRIMARY_HEALTH_PROBE in runner.RUNTIME_MAINTENANCE_TASK_IDS
+    assert runner.RUNNER_CODEX_PRIMARY_HEALTH_PROBE in runner.PROTECTED_MAINTENANCE_TASK_IDS
+    assert runner.maintenance_report_status(report) == "DONE"
+    assert "maintenance_task_id=runner_codex_primary_health_probe" in report
+    assert "verdict=CODEX_HEALTHY" in report
+    assert "fallback_invoked=false" in report
+    assert "mutation_performed=false" in report
+    assert "_v1" not in report
+    assert state == {"clean": 2, "sha": 2}
+    sanitizer.assert_called_once()
+    assert sanitizer.call_args.kwargs == {"authority_environment": {}}
+    assert len(run.call_args_list) == 2
+    help_call, provider_call = run.call_args_list
+    assert help_call.args[0] == ["/registered/codex", "exec", "--help"]
+    assert provider_call.args[0] == [
+        "/registered/codex",
+        "exec",
+        "--sandbox",
+        "read-only",
+        "--ephemeral",
+        "--ignore-user-config",
+        "--ignore-rules",
+        "--color",
+        "never",
+        "--model",
+        "gpt-5.5",
+        "--cd",
+        str(checkout.checkout_path),
+        "-",
+    ]
+    assert provider_call.kwargs["input"] == (
+        "Return exactly CODEX_HEALTH_OK. Do not inspect, create, modify, or "
+        "delete files. Do not run tools."
+    )
+    assert provider_call.kwargs["cwd"] == checkout.checkout_path
+    assert all(env["CODEX_HOME"] == "/canonical/.codex" for env in seen_envs)
+    assert runner._RUN_COMMAND_ENV_OVERRIDE.get() is None
+    assert _codex_health_receipt_keys(report) == {
+        "schema",
+        "expected_current_sha_equal",
+        "checkout_clean",
+        "executable_available",
+        "auth_binding_present",
+        "selected_model",
+        "verdict",
+        "retry_at",
+        "fallback_invoked",
+        "mutation_performed",
+    }
+
+
+@pytest.mark.parametrize(
+    "body",
+    (
+        "",
+        "Mode: RUNTIME_MAINTENANCE_TASK",
+        _codex_primary_health_issue_body() + "\nProvider: openhands",
+        _codex_primary_health_issue_body() + "\nRepository: alanua/Skeleton",
+        _codex_primary_health_issue_body(expected_sha="not-a-sha"),
+        _codex_primary_health_issue_body(expected_sha=HEAD_SHA.upper()),
+    ),
+)
+def test_codex_primary_health_malformed_metadata_makes_zero_calls(
+    monkeypatch: pytest.MonkeyPatch, body: str
+) -> None:
+    registered = mock.Mock()
+    run = mock.Mock()
+    monkeypatch.setattr(runner, "_registered_skeleton_checkout", registered)
+    monkeypatch.setattr(runner, "run_command", run)
+
+    report = runner.runner_codex_primary_health_probe(body)
+
+    assert "verdict=CODEX_ROUTE_UNAVAILABLE" in report
+    registered.assert_not_called()
+    run.assert_not_called()
+
+
+def test_codex_primary_health_approval_framing_is_not_probe_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _codex_health_fakes(monkeypatch)
+    run = mock.Mock(side_effect=_codex_health_run())
+    monkeypatch.setattr(runner, "run_command", run)
+    report = runner.runner_codex_primary_health_probe(
+        _codex_primary_health_issue_body()
+        + "\nApproval Reference: public-safe-framing"
+    )
+    ambiguous = runner.runner_codex_primary_health_probe(
+        _codex_primary_health_issue_body()
+        + "\nApproval Reference: public-safe-framing"
+        + "\nOperator Approval: public-safe-framing"
+    )
+
+    assert "verdict=CODEX_HEALTHY" in report
+    assert "verdict=CODEX_ROUTE_UNAVAILABLE" in ambiguous
+    assert len(run.call_args_list) == 2
+
+
+@pytest.mark.parametrize(
+    ("pre_sha", "pre_clean", "field"),
+    (("b" * 40, True, "expected_current_sha_equal=false"),
+     (HEAD_SHA, False, "checkout_clean=false")),
+)
+def test_codex_primary_health_preflight_blocks_before_executable(
+    monkeypatch: pytest.MonkeyPatch,
+    pre_sha: str,
+    pre_clean: bool,
+    field: str,
+) -> None:
+    _checkout, _state, executable, _auth, _sanitizer = _codex_health_fakes(
+        monkeypatch, pre_sha=pre_sha, pre_clean=pre_clean
+    )
+    run = mock.Mock()
+    monkeypatch.setattr(runner, "run_command", run)
+
+    report = runner.runner_codex_primary_health_probe(
+        _codex_primary_health_issue_body()
+    )
+
+    assert field in report
+    assert "verdict=CODEX_ROUTE_UNAVAILABLE" in report
+    executable.assert_not_called()
+    run.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("executable", "auth_home", "verdict"),
+    ((None, Path("/canonical/.codex"), "CODEX_EXECUTABLE_UNAVAILABLE"),
+     ("/registered/codex", None, "CODEX_AUTH_FAILURE")),
+)
+def test_codex_primary_health_missing_binding_makes_zero_cli_calls(
+    monkeypatch: pytest.MonkeyPatch,
+    executable: str | None,
+    auth_home: Path | None,
+    verdict: str,
+) -> None:
+    _codex_health_fakes(
+        monkeypatch, executable=executable, auth_home=auth_home
+    )
+    run = mock.Mock()
+    monkeypatch.setattr(runner, "run_command", run)
+
+    report = runner.runner_codex_primary_health_probe(
+        _codex_primary_health_issue_body()
+    )
+
+    assert f"verdict={verdict}" in report
+    run.assert_not_called()
+
+
+def test_codex_primary_health_auth_metadata_rejects_insecure_binding(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "runner-home"
+    codex_home = home / ".codex"
+    codex_home.mkdir(parents=True, mode=0o700)
+    auth_file = codex_home / "auth.json"
+    auth_file.write_text("not-read-by-probe", encoding="utf-8")
+    codex_home.chmod(0o700)
+    auth_file.chmod(0o600)
+    assert runner._runner_codex_primary_auth_home({"HOME": str(home)}) == codex_home
+
+    auth_file.chmod(0o644)
+    assert runner._runner_codex_primary_auth_home({"HOME": str(home)}) is None
+    auth_file.unlink()
+    auth_file.symlink_to(tmp_path / "missing-auth")
+    assert runner._runner_codex_primary_auth_home({"HOME": str(home)}) is None
+
+
+def test_codex_primary_health_executable_requires_existing_marker(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    executable = tmp_path / "codex"
+    executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    executable.chmod(0o700)
+    marker = mock.Mock(return_value=False)
+    pinned = mock.Mock(return_value=str(executable))
+    monkeypatch.setattr(runner, "pinned_codex_recovery_marker_present", marker)
+    monkeypatch.setattr(runner, "pinned_codex_runtime_path", pinned)
+    assert runner._runner_codex_primary_executable({}) is None
+    pinned.assert_not_called()
+
+    marker.return_value = True
+    assert runner._runner_codex_primary_executable({}) == str(executable)
+
+
+def test_codex_primary_health_missing_readonly_help_makes_zero_provider_calls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _codex_health_fakes(monkeypatch)
+    run = mock.Mock(
+        side_effect=_codex_health_run(
+            help_output="--sandbox read-only --ignore-user-config --ignore-rules"
+        )
+    )
+    monkeypatch.setattr(runner, "run_command", run)
+
+    report = runner.runner_codex_primary_health_probe(
+        _codex_primary_health_issue_body()
+    )
+
+    assert "verdict=CODEX_ROUTE_UNAVAILABLE" in report
+    assert len(run.call_args_list) == 1
+
+
+@pytest.mark.parametrize(
+    ("output", "verdict", "retry_at"),
+    (("Usage limit. Try again at 2026-09-22T12:34:56Z. PRIVATE_MARKER",
+      "CODEX_USAGE_LIMIT", "2026-09-22T12:34:56Z"),
+     ("Authentication failed PRIVATE_MARKER", "CODEX_AUTH_FAILURE", "none"),
+     ("Service unavailable PRIVATE_MARKER", "CODEX_PROVIDER_OUTAGE", "none"),
+     ("unclassified failure PRIVATE_MARKER", "UNKNOWN_FAIL_CLOSED", "none")),
+)
+def test_codex_primary_health_classifies_failure_without_raw_output(
+    monkeypatch: pytest.MonkeyPatch,
+    output: str,
+    verdict: str,
+    retry_at: str,
+) -> None:
+    _codex_health_fakes(monkeypatch)
+    run = mock.Mock(
+        side_effect=_codex_health_run(provider_code=1, provider_output=output)
+    )
+    monkeypatch.setattr(runner, "run_command", run)
+    classifier = mock.Mock(wraps=runner.codex_failure_allows_secondary)
+    monkeypatch.setattr(runner, "codex_failure_allows_secondary", classifier)
+
+    report = runner.runner_codex_primary_health_probe(
+        _codex_primary_health_issue_body()
+    )
+
+    assert f"verdict={verdict}" in report
+    assert f"retry_at={retry_at}" in report
+    assert "PRIVATE_MARKER" not in report
+    assert len(run.call_args_list) == 2
+    classifier.assert_called_once()
+
+
+def test_codex_primary_health_success_requires_exact_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _codex_health_fakes(monkeypatch)
+    monkeypatch.setattr(
+        runner,
+        "run_command",
+        mock.Mock(
+            side_effect=_codex_health_run(
+                provider_output="CODEX_HEALTH_OK plus extra text"
+            )
+        ),
+    )
+    report = runner.runner_codex_primary_health_probe(
+        _codex_primary_health_issue_body()
+    )
+    assert "verdict=CODEX_RESPONSE_INVALID" in report
+
+
+@pytest.mark.parametrize(
+    ("post_sha", "post_clean"), (("b" * 40, True), (HEAD_SHA, False))
+)
+def test_codex_primary_health_postcheck_detects_mutation(
+    monkeypatch: pytest.MonkeyPatch, post_sha: str, post_clean: bool
+) -> None:
+    _codex_health_fakes(
+        monkeypatch, post_sha=post_sha, post_clean=post_clean
+    )
+    monkeypatch.setattr(
+        runner, "run_command", mock.Mock(side_effect=_codex_health_run())
+    )
+    report = runner.runner_codex_primary_health_probe(
+        _codex_primary_health_issue_body()
+    )
+    assert "verdict=UNKNOWN_FAIL_CLOSED" in report
+    assert "mutation_performed=true" in report
+    assert f"checkout_clean={str(post_clean).lower()}" in report
+
+
+def test_codex_primary_health_never_uses_fallback_or_codegen_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _codex_health_fakes(monkeypatch)
+    monkeypatch.setattr(
+        runner, "run_command", mock.Mock(side_effect=_codex_health_run())
+    )
+    forbidden_names = (
+        "run_codex_task",
+        "codex_exec_command",
+        "select_openhands_secondary_route",
+        "openhands_secondary_command",
+        "prepare_openhands_secondary_environment",
+        "task_contract_allows_cloud_secondary",
+        "_write_codegen_manifest",
+        "prepare_issue_worktree",
+        "prepare_git_issue_worktree",
+        "prepare_issue_worktree_from_existing_pr_head",
+    )
+    patchers = [
+        mock.patch.object(runner, name, side_effect=AssertionError(name))
+        for name in forbidden_names
+    ] + [
+        mock.patch.object(runner, "MemoryBootstrap", side_effect=AssertionError()),
+        mock.patch.object(
+            runner.tempfile, "NamedTemporaryFile", side_effect=AssertionError()
+        ),
+    ]
+    for patcher in patchers:
+        patcher.start()
+    try:
+        report = runner.runner_codex_primary_health_probe(
+            _codex_primary_health_issue_body()
+        )
+    finally:
+        for patcher in reversed(patchers):
+            patcher.stop()
+
+    assert "verdict=CODEX_HEALTHY" in report
+    assert "fallback_invoked=false" in report
+
+
+def test_codex_primary_health_rejects_nearby_task_id() -> None:
+    report = runner.dispatch_runtime_maintenance_task(
+        f"{runner.RUNNER_CODEX_PRIMARY_HEALTH_PROBE}_extra",
+        str(runner.ROOT),
+        _codex_primary_health_issue_body(),
+    )
+    assert runner.maintenance_report_status(report) == "BLOCKED"
+    variants = {
+        task_id
+        for task_id in runner.RUNTIME_MAINTENANCE_TASK_IDS
+        if "codex_primary_health" in task_id
+    }
+    assert variants == {runner.RUNNER_CODEX_PRIMARY_HEALTH_PROBE}
 
 
 def _esp_signer_preflight_patches(expected_sha: str):
