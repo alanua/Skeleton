@@ -19883,16 +19883,6 @@ _SKELETON_CONTROL_MCP_HETZNER_INPUT_FIELDS = frozenset(
 )
 
 
-_SKELETON_CONTROL_MCP_HETZNER_LEGACY_ZERO_MUTATION_REASONS = frozenset(
-    (
-        "ACTION_NOT_REGISTERED",
-        "REQUEST_REPLAY",
-        "IDEMPOTENCY_KEY_REPLAY",
-        "TRUSTED_SOURCE_ANCESTOR_MISSING",
-    )
-)
-
-
 def _skeleton_control_mcp_hetzner_dispatch_identity(
     expected_main_sha: str,
 ) -> tuple[str, str]:
@@ -20101,12 +20091,6 @@ def _skeleton_control_mcp_hetzner_receipt_valid(
             "mutation_performed",
             "external_side_effects_executed",
         ):
-            if (
-                key in {"mutation_started", "mutation_performed"}
-                and key not in receipt
-                and reason in _SKELETON_CONTROL_MCP_HETZNER_LEGACY_ZERO_MUTATION_REASONS
-            ):
-                continue
             if receipt.get(key) is not False:
                 return False
         if reason == "SKELETON_CONTROL_MCP_HETZNER_LAUNCHER_VERIFIED":
