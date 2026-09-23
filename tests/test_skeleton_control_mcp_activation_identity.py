@@ -66,6 +66,8 @@ def _receipt(reason: str) -> dict[str, object]:
         "stderr_exposed": False,
         "env_exposed": False,
         "private_paths_exposed": False,
+        "mutation_started": False,
+        "mutation_performed": False,
         "external_side_effects_executed": False,
     }
 
@@ -152,3 +154,54 @@ def test_current_replay_reasons_fail_closed_instead_of_receipt_invalid(monkeypat
         assert "reason=privileged_gateway_receipt_invalid" not in report
         assert "activation_executed=false" in report
         assert "external_side_effects_executed=false" in report
+
+
+def test_zero_mutation_needs_operator_reason_surfaces_without_reason_allowlist(
+    monkeypatch,
+):
+    _patch_checkout(monkeypatch)
+
+    class FakeTransport:
+        def submit(self, request):
+            return 0, json.dumps(_receipt("BOUNDED_ZERO_MUTATION_GATE")).encode(
+                "utf-8"
+            )
+
+    monkeypatch.setattr(gateway, "LocalSudoGatewayTransport", FakeTransport)
+
+    report = runner.skeleton_control_mcp_hetzner_activate_v1(_body())
+
+    assert runner.maintenance_report_status(report) == "NEEDS_OPERATOR"
+    assert "gateway_status=NEEDS_OPERATOR" in report
+    assert "reason=BOUNDED_ZERO_MUTATION_GATE" in report
+    assert "reason=privileged_gateway_receipt_invalid" not in report
+    assert "activation_executed=false" in report
+    assert "external_side_effects_executed=false" in report
+
+
+def test_needs_operator_receipt_requires_false_zero_mutation_flags(monkeypatch):
+    _patch_checkout(monkeypatch)
+    receipts = []
+    for key in (
+        "mutation_started",
+        "mutation_performed",
+        "external_side_effects_executed",
+    ):
+        for value in (True, None, "false"):
+            receipt = _receipt("BOUNDED_ZERO_MUTATION_GATE")
+            receipt[key] = value
+            receipts.append(receipt)
+        receipt = _receipt("BOUNDED_ZERO_MUTATION_GATE")
+        receipt.pop(key)
+        receipts.append(receipt)
+
+    class FakeTransport:
+        def submit(self, request):
+            return 0, json.dumps(receipts.pop(0)).encode("utf-8")
+
+    monkeypatch.setattr(gateway, "LocalSudoGatewayTransport", FakeTransport)
+
+    for _ in range(len(receipts)):
+        report = runner.skeleton_control_mcp_hetzner_activate_v1(_body())
+        assert runner.maintenance_report_status(report) == "BLOCKED"
+        assert "reason=privileged_gateway_receipt_invalid" in report

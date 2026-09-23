@@ -19881,13 +19881,13 @@ _SKELETON_CONTROL_MCP_HETZNER_INPUT_FIELDS = frozenset(
         "Operator Approval",
     )
 )
-_SKELETON_CONTROL_MCP_HETZNER_PRE_EXECUTOR_REASONS = frozenset(
+
+
+_SKELETON_CONTROL_MCP_HETZNER_LEGACY_ZERO_MUTATION_REASONS = frozenset(
     (
         "ACTION_NOT_REGISTERED",
         "REQUEST_REPLAY",
         "IDEMPOTENCY_KEY_REPLAY",
-        "IDEMPOTENCY_KEY_CONFLICT",
-        "PRIOR_EXECUTION_STATE_UNCERTAIN",
         "TRUSTED_SOURCE_ANCESTOR_MISSING",
     )
 )
@@ -20096,16 +20096,23 @@ def _skeleton_control_mcp_hetzner_receipt_valid(
     ):
         return False
     if status == "NEEDS_OPERATOR":
-        if reason not in _SKELETON_CONTROL_MCP_HETZNER_PRE_EXECUTOR_REASONS:
-            return False
-        if receipt.get("external_side_effects_executed") is not False:
-            return False
-        if (
-            "activation_executed" in receipt
-            and receipt.get("activation_executed") is not False
+        for key in (
+            "mutation_started",
+            "mutation_performed",
+            "external_side_effects_executed",
         ):
+            if (
+                key in {"mutation_started", "mutation_performed"}
+                and key not in receipt
+                and reason in _SKELETON_CONTROL_MCP_HETZNER_LEGACY_ZERO_MUTATION_REASONS
+            ):
+                continue
+            if receipt.get(key) is not False:
+                return False
+        if reason == "SKELETON_CONTROL_MCP_HETZNER_LAUNCHER_VERIFIED":
             return False
         for key in (
+            "activation_executed",
             "protected_copy_verified",
             "installed_artifacts_verified",
         ):
