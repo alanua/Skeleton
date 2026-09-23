@@ -134,6 +134,31 @@ Next actions:
 - Add Codex runtime preflight before starting further Codex tasks.
 - Add Hermes quota-aware review rules before using Hermes for queue audits.
 
+### skeleton_media
+
+- Means: public media subsystem for Skeleton Home Edge playback, discovery, clients and video understanding
+- Repo: `alanua/skeleton-media`
+- Entrypoint: `projects/skeleton_media/PROJECT_MANIFEST.yaml`
+- State file: `projects/skeleton_media/STATE.yaml`
+- Status: `SOURCE_FULLY_SEPARATED_RUNTIME_CUTOVER_PENDING`
+- State role: `handoff_not_canon_truth`
+- Last verified: `2026-09-18`
+- Evidence source: alanua/skeleton-media main 7089b1ba37292aab0283cadb8ac85644cc3d28f8
+
+Summary:
+
+- Media-domain source was extracted from Skeleton main 1f3d2d8310c9b35b5be6402eee555e45634c0c2c into public repository alanua/skeleton-media.
+- Extracted Git history was sanitized for private home paths and private topology before publication.
+- Skeleton Media main 7089b1ba37292aab0283cadb8ac85644cc3d28f8 passed 363 tests in GitHub Actions run 35333524713.
+- Apache-2.0 is the repository license.
+- Production Home Edge was not modified during extraction.
+- Media implementation copies have been removed from Skeleton Core; the bridge is external-only and fails closed when Skeleton Media is unavailable.
+
+Next actions:
+
+- Route new media implementation issues and PRs to alanua/skeleton-media.
+- Keep production deployment disabled in skeleton-media until a registered audited Home Edge operation performs the cutover.
+
 ### dios
 
 - Means: Drawing Intelligence Operating System for construction and technical drawings
