@@ -19886,9 +19886,29 @@ _SKELETON_CONTROL_MCP_HETZNER_PRE_EXECUTOR_REASONS = frozenset(
         "ACTION_NOT_REGISTERED",
         "REQUEST_REPLAY",
         "IDEMPOTENCY_KEY_REPLAY",
+        "IDEMPOTENCY_KEY_CONFLICT",
+        "PRIOR_EXECUTION_STATE_UNCERTAIN",
         "TRUSTED_SOURCE_ANCESTOR_MISSING",
     )
 )
+
+
+def _skeleton_control_mcp_hetzner_dispatch_identity(
+    expected_main_sha: str,
+) -> tuple[str, str]:
+    exact_main_sha = expected_main_sha.lower()
+    nonce = f"{time.time_ns() & ((1 << 64) - 1):016x}"
+    seed = (
+        f"{SKELETON_CONTROL_MCP_HETZNER_ACTIVATE_V1}:"
+        f"{REPO}:{exact_main_sha}:{nonce}"
+    )
+    digest = hashlib.sha256(seed.encode("ascii")).hexdigest()
+    token_prefix = "skeleton-control-mcp-hetzner-activate"
+    sha_ref = exact_main_sha[:12]
+    return (
+        f"{token_prefix}:{sha_ref}:{nonce}:{digest[:24]}",
+        f"{token_prefix}:{sha_ref}:{nonce}:{digest[24:48]}",
+    )
 
 
 def _skeleton_control_mcp_hetzner_input(
@@ -20158,9 +20178,12 @@ def skeleton_control_mcp_hetzner_activate_v1(body: str) -> str:
         build_gateway_request,
     )
 
+    request_id, idempotency_key = _skeleton_control_mcp_hetzner_dispatch_identity(
+        expected_main_sha
+    )
     request = build_gateway_request(
-        request_id="skeleton-control-mcp-hetzner-activate-3640",
-        idempotency_key="skeleton-control-mcp-hetzner-activate-20260901-v1",
+        request_id=request_id,
+        idempotency_key=idempotency_key,
         expected_main_sha=expected_main_sha,
         registered_clean_main_sha=head_sha,
         github_main_sha=github_sha,
