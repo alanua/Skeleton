@@ -102,6 +102,23 @@ def _execute(
     )
 
 
+def test_repository_action_registry_matches_gateway_expected_registry_byte_for_byte() -> None:
+    registry_text = (ROOT / "RUNNER_PRIVILEGED_ACTIONS.yaml").read_text(encoding="utf-8")
+    assert registry_text == gateway.EXPECTED_ACTION_REGISTRY
+
+    refresh_block = (
+        "  - action_id: runner_controller_refresh_trust_anchor_bundle_v1\n"
+        "    handler: runner_controller_refresh_trust_anchor_bundle\n"
+        "    repository: alanua/Skeleton\n"
+        "    target: runner-controller\n"
+        "    operator_approval: EXACT_HEAD_RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_V1_APPROVED\n"
+    )
+    assert refresh_block in registry_text
+    assert registry_text.count(
+        "  - action_id: runner_controller_refresh_trust_anchor_bundle_v1\n"
+    ) == 1
+
+
 def test_source_trust_anchors_are_fail_closed_before_runner(tmp_path: Path) -> None:
     calls = 0
 
@@ -697,6 +714,7 @@ def test_hardened_synthetic_bootstrap_installs_exact_trust_and_functional_forced
         "PATH": os.environ.get("PATH", ""),
         "SKELETON_GATEWAY_ALLOW_SYNTHETIC_ORIGIN": "1",
         "SKELETON_GATEWAY_HARDENED_SYNTHETIC": "1",
+        "TMPDIR": str(tmp_path),
     }
     result = subprocess.run(
         [
@@ -750,6 +768,7 @@ def test_hardened_synthetic_bootstrap_rejects_bad_ssh_key_before_destdir_mutatio
         "PATH": os.environ.get("PATH", ""),
         "SKELETON_GATEWAY_ALLOW_SYNTHETIC_ORIGIN": "1",
         "SKELETON_GATEWAY_HARDENED_SYNTHETIC": "1",
+        "TMPDIR": str(tmp_path),
     }
     result = subprocess.run(
         [
@@ -787,6 +806,7 @@ def test_hardened_synthetic_bootstrap_rejects_bad_sshd_before_destdir_mutation(t
         "PATH": os.environ.get("PATH", ""),
         "SKELETON_GATEWAY_ALLOW_SYNTHETIC_ORIGIN": "1",
         "SKELETON_GATEWAY_HARDENED_SYNTHETIC": "1",
+        "TMPDIR": str(tmp_path),
     }
     result = subprocess.run(
         [
