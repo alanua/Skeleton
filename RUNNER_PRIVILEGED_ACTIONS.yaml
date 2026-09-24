@@ -47,3 +47,8 @@ actions:
       - path: /usr/local/bin/skeleton-control-mcp
         content_hash: e14d54e8ea3f00dbb2bd4fe1b3dcfd310e3b10c5f01e433e1eb5306a60547395
         mode: "0555"
+  - action_id: runner_controller_refresh_trust_anchor_bundle_v1
+    handler: runner_controller_refresh_trust_anchor_bundle
+    repository: alanua/Skeleton
+    target: runner-controller
+    operator_approval: EXACT_HEAD_RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_V1_APPROVED
