@@ -20085,23 +20085,59 @@ def _skeleton_control_mcp_hetzner_receipt_valid(
         )
     ):
         return False
+    installer_sha256 = receipt.get("installer_sha256")
+    if installer_sha256 is not None and (
+        not isinstance(installer_sha256, str)
+        or re.fullmatch(r"[0-9a-f]{64}", installer_sha256) is None
+    ):
+        return False
     if status == "NEEDS_OPERATOR":
         for key in (
             "mutation_started",
             "mutation_performed",
             "external_side_effects_executed",
         ):
-            if receipt.get(key) is not False:
+            if not isinstance(receipt.get(key), bool):
                 return False
         if reason == "SKELETON_CONTROL_MCP_HETZNER_LAUNCHER_VERIFIED":
             return False
-        for key in (
-            "activation_executed",
-            "protected_copy_verified",
-            "installed_artifacts_verified",
+        mutation_started = receipt.get("mutation_started") is True
+        mutation_performed = receipt.get("mutation_performed") is True
+        external_side_effects_executed = (
+            receipt.get("external_side_effects_executed") is True
+        )
+        if mutation_performed and not mutation_started:
+            return False
+        if external_side_effects_executed != mutation_performed:
+            return False
+        if not mutation_started:
+            for key in (
+                "activation_executed",
+                "protected_copy_verified",
+                "installed_artifacts_verified",
+            ):
+                if key in receipt and receipt.get(key) is not False:
+                    return False
+            return True
+        if (
+            receipt.get("expected_main_sha") != expected_main_sha
+            or receipt.get("source_blob") != SKELETON_CONTROL_MCP_HETZNER_SOURCE_BLOB
+            or receipt.get("activation_executed") is not False
         ):
-            if key in receipt and receipt.get(key) is not False:
+            return False
+        for key in ("protected_copy_verified", "installed_artifacts_verified"):
+            if key in receipt and not isinstance(receipt.get(key), bool):
                 return False
+        if mutation_performed and not (
+            receipt.get("protected_copy_verified") is True
+            or receipt.get("installed_artifacts_verified") is True
+        ):
+            return False
+        if not mutation_performed and (
+            receipt.get("protected_copy_verified") is True
+            or receipt.get("installed_artifacts_verified") is True
+        ):
+            return False
         return True
     if (
         receipt.get("expected_main_sha") != expected_main_sha
@@ -20120,12 +20156,6 @@ def _skeleton_control_mcp_hetzner_receipt_valid(
     ):
         if key in receipt and receipt.get(key) not in {True, False}:
             return False
-    installer_sha256 = receipt.get("installer_sha256")
-    if installer_sha256 is not None and (
-        not isinstance(installer_sha256, str)
-        or re.fullmatch(r"[0-9a-f]{64}", installer_sha256) is None
-    ):
-        return False
     return True
 
 
@@ -20220,6 +20250,8 @@ def skeleton_control_mcp_hetzner_activate_v1(body: str) -> str:
         f"gateway_status={gateway_status}",
         f"protected_copy_verified={str(receipt.get('protected_copy_verified') is True).lower()}",
         f"installed_artifacts_verified={str(receipt.get('installed_artifacts_verified') is True).lower()}",
+        f"mutation_started={str(receipt.get('mutation_started') is True).lower()}",
+        f"mutation_performed={str(receipt.get('mutation_performed') is True).lower()}",
         f"activation_executed={str(receipt.get('activation_executed') is True).lower()}",
         f"external_side_effects_executed={str(receipt.get('external_side_effects_executed') is True).lower()}",
         f"private_evidence_exposed={str(receipt.get('private_evidence_exposed') is True).lower()}",
