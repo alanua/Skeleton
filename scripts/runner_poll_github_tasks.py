@@ -20085,6 +20085,12 @@ def _skeleton_control_mcp_hetzner_receipt_valid(
         )
     ):
         return False
+    installer_sha256 = receipt.get("installer_sha256")
+    if installer_sha256 is not None and (
+        not isinstance(installer_sha256, str)
+        or re.fullmatch(r"[0-9a-f]{64}", installer_sha256) is None
+    ):
+        return False
     if status == "NEEDS_OPERATOR":
         mutation_flags = (
             receipt.get("mutation_started"),
@@ -20105,6 +20111,11 @@ def _skeleton_control_mcp_hetzner_receipt_valid(
         if (
             "installed_artifacts_verified" in receipt
             and receipt.get("installed_artifacts_verified") is not False
+        ):
+            return False
+        if post_dispatch_failure and (
+            receipt.get("expected_main_sha") != expected_main_sha
+            or receipt.get("source_blob") != SKELETON_CONTROL_MCP_HETZNER_SOURCE_BLOB
         ):
             return False
         if "protected_copy_verified" in receipt:
@@ -20131,12 +20142,6 @@ def _skeleton_control_mcp_hetzner_receipt_valid(
     ):
         if key in receipt and receipt.get(key) not in {True, False}:
             return False
-    installer_sha256 = receipt.get("installer_sha256")
-    if installer_sha256 is not None and (
-        not isinstance(installer_sha256, str)
-        or re.fullmatch(r"[0-9a-f]{64}", installer_sha256) is None
-    ):
-        return False
     return True
 
 
@@ -20231,6 +20236,8 @@ def skeleton_control_mcp_hetzner_activate_v1(body: str) -> str:
         f"gateway_status={gateway_status}",
         f"protected_copy_verified={str(receipt.get('protected_copy_verified') is True).lower()}",
         f"installed_artifacts_verified={str(receipt.get('installed_artifacts_verified') is True).lower()}",
+        f"mutation_started={str(receipt.get('mutation_started') is True).lower()}",
+        f"mutation_performed={str(receipt.get('mutation_performed') is True).lower()}",
         f"activation_executed={str(receipt.get('activation_executed') is True).lower()}",
         f"external_side_effects_executed={str(receipt.get('external_side_effects_executed') is True).lower()}",
         f"private_evidence_exposed={str(receipt.get('private_evidence_exposed') is True).lower()}",

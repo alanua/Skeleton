@@ -25877,6 +25877,8 @@ def test_skeleton_control_mcp_post_dispatch_needs_operator_accepts_coherent_muta
                     mutation_started=True,
                     mutation_performed=True,
                     external_side_effects_executed=True,
+                    expected_main_sha=HEAD_SHA,
+                    source_blob=gateway.SKELETON_CONTROL_MCP_HETZNER_SOURCE_BLOB,
                     protected_copy_verified=True,
                     installed_artifacts_verified=False,
                     activation_executed=False,
@@ -25892,8 +25894,11 @@ def test_skeleton_control_mcp_post_dispatch_needs_operator_accepts_coherent_muta
     assert runner.maintenance_report_status(report) == "NEEDS_OPERATOR"
     assert "gateway_status=NEEDS_OPERATOR" in report
     assert "reason=POST_DISPATCH_ARTIFACT_AUDIT_FAILED" in report
+    assert "source_blob=" + gateway.SKELETON_CONTROL_MCP_HETZNER_SOURCE_BLOB in report
     assert "protected_copy_verified=true" in report
     assert "installed_artifacts_verified=false" in report
+    assert "mutation_started=true" in report
+    assert "mutation_performed=true" in report
     assert "activation_executed=false" in report
     assert "external_side_effects_executed=true" in report
 
@@ -25941,6 +25946,34 @@ def test_skeleton_control_mcp_post_dispatch_needs_operator_accepts_coherent_muta
             "mutation_performed": True,
             "external_side_effects_executed": True,
             "installed_artifacts_verified": True,
+            "activation_executed": False,
+        },
+        {
+            "mutation_started": True,
+            "mutation_performed": True,
+            "external_side_effects_executed": True,
+            "expected_main_sha": "b" * 40,
+            "source_blob": "d94576297ea26fdd78f9ac8fc50d7cdb91bfdc09",
+            "installed_artifacts_verified": False,
+            "activation_executed": False,
+        },
+        {
+            "mutation_started": True,
+            "mutation_performed": True,
+            "external_side_effects_executed": True,
+            "expected_main_sha": HEAD_SHA,
+            "source_blob": "e" * 40,
+            "installed_artifacts_verified": False,
+            "activation_executed": False,
+        },
+        {
+            "mutation_started": True,
+            "mutation_performed": True,
+            "external_side_effects_executed": True,
+            "expected_main_sha": HEAD_SHA,
+            "source_blob": "d94576297ea26fdd78f9ac8fc50d7cdb91bfdc09",
+            "installer_sha256": "not-a-sha",
+            "installed_artifacts_verified": False,
             "activation_executed": False,
         },
         {

@@ -189,6 +189,8 @@ def test_post_dispatch_needs_operator_receipt_surfaces_when_mutation_flags_coher
             "mutation_started": True,
             "mutation_performed": True,
             "external_side_effects_executed": True,
+            "expected_main_sha": HEAD_SHA,
+            "source_blob": gateway.SKELETON_CONTROL_MCP_HETZNER_SOURCE_BLOB,
             "protected_copy_verified": True,
             "installed_artifacts_verified": False,
             "activation_executed": False,
@@ -206,8 +208,11 @@ def test_post_dispatch_needs_operator_receipt_surfaces_when_mutation_flags_coher
     assert runner.maintenance_report_status(report) == "NEEDS_OPERATOR"
     assert "gateway_status=NEEDS_OPERATOR" in report
     assert "reason=BOUNDED_POST_DISPATCH_GATE" in report
+    assert "source_blob=" + gateway.SKELETON_CONTROL_MCP_HETZNER_SOURCE_BLOB in report
     assert "protected_copy_verified=true" in report
     assert "installed_artifacts_verified=false" in report
+    assert "mutation_started=true" in report
+    assert "mutation_performed=true" in report
     assert "activation_executed=false" in report
     assert "external_side_effects_executed=true" in report
 
@@ -233,6 +238,8 @@ def test_needs_operator_receipt_requires_false_zero_mutation_flags(monkeypatch):
             "mutation_started": True,
             "mutation_performed": True,
             "external_side_effects_executed": True,
+            "expected_main_sha": HEAD_SHA,
+            "source_blob": gateway.SKELETON_CONTROL_MCP_HETZNER_SOURCE_BLOB,
             "installed_artifacts_verified": True,
             "activation_executed": False,
         }
