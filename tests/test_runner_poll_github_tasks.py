@@ -25862,6 +25862,42 @@ def test_skeleton_control_mcp_pre_executor_needs_operator_surfaces_bounded_reaso
     assert "private_path" not in report.lower()
 
 
+def test_skeleton_control_mcp_post_dispatch_needs_operator_accepts_coherent_mutation_flags(
+    monkeypatch,
+):
+    from core import runner_controller_privileged_gateway as gateway
+
+    _patch_skeleton_control_mcp_checkout(monkeypatch)
+
+    class FakeTransport:
+        def submit(self, request):
+            return 0, json.dumps(
+                _skeleton_control_mcp_gateway_receipt(
+                    reason="POST_DISPATCH_ARTIFACT_AUDIT_FAILED",
+                    mutation_started=True,
+                    mutation_performed=True,
+                    external_side_effects_executed=True,
+                    protected_copy_verified=True,
+                    installed_artifacts_verified=False,
+                    activation_executed=False,
+                )
+            ).encode("utf-8")
+
+    monkeypatch.setattr(gateway, "LocalSudoGatewayTransport", FakeTransport)
+
+    report = runner.skeleton_control_mcp_hetzner_activate_v1(
+        _skeleton_control_mcp_hetzner_body()
+    )
+
+    assert runner.maintenance_report_status(report) == "NEEDS_OPERATOR"
+    assert "gateway_status=NEEDS_OPERATOR" in report
+    assert "reason=POST_DISPATCH_ARTIFACT_AUDIT_FAILED" in report
+    assert "protected_copy_verified=true" in report
+    assert "installed_artifacts_verified=false" in report
+    assert "activation_executed=false" in report
+    assert "external_side_effects_executed=true" in report
+
+
 @pytest.mark.parametrize(
     "updates",
     (
@@ -25900,6 +25936,19 @@ def test_skeleton_control_mcp_pre_executor_needs_operator_surfaces_bounded_reaso
         {"protected_copy_verified": None},
         {"installed_artifacts_verified": True},
         {"installed_artifacts_verified": None},
+        {
+            "mutation_started": True,
+            "mutation_performed": True,
+            "external_side_effects_executed": True,
+            "installed_artifacts_verified": True,
+            "activation_executed": False,
+        },
+        {
+            "mutation_started": True,
+            "mutation_performed": False,
+            "external_side_effects_executed": True,
+            "activation_executed": False,
+        },
         {"reason": "SKELETON_CONTROL_MCP_HETZNER_LAUNCHER_VERIFIED"},
         {"payload": {"private": "data"}},
         {"raw_payload": {"private": "data"}},

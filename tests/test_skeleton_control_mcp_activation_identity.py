@@ -179,6 +179,39 @@ def test_zero_mutation_needs_operator_reason_surfaces_without_reason_allowlist(
     assert "external_side_effects_executed=false" in report
 
 
+def test_post_dispatch_needs_operator_receipt_surfaces_when_mutation_flags_cohere(
+    monkeypatch,
+):
+    _patch_checkout(monkeypatch)
+    receipt = _receipt("BOUNDED_POST_DISPATCH_GATE")
+    receipt.update(
+        {
+            "mutation_started": True,
+            "mutation_performed": True,
+            "external_side_effects_executed": True,
+            "protected_copy_verified": True,
+            "installed_artifacts_verified": False,
+            "activation_executed": False,
+        }
+    )
+
+    class FakeTransport:
+        def submit(self, request):
+            return 0, json.dumps(receipt).encode("utf-8")
+
+    monkeypatch.setattr(gateway, "LocalSudoGatewayTransport", FakeTransport)
+
+    report = runner.skeleton_control_mcp_hetzner_activate_v1(_body())
+
+    assert runner.maintenance_report_status(report) == "NEEDS_OPERATOR"
+    assert "gateway_status=NEEDS_OPERATOR" in report
+    assert "reason=BOUNDED_POST_DISPATCH_GATE" in report
+    assert "protected_copy_verified=true" in report
+    assert "installed_artifacts_verified=false" in report
+    assert "activation_executed=false" in report
+    assert "external_side_effects_executed=true" in report
+
+
 def test_needs_operator_receipt_requires_false_zero_mutation_flags(monkeypatch):
     _patch_checkout(monkeypatch)
     receipts = []
@@ -194,6 +227,17 @@ def test_needs_operator_receipt_requires_false_zero_mutation_flags(monkeypatch):
         receipt = _receipt("BOUNDED_ZERO_MUTATION_GATE")
         receipt.pop(key)
         receipts.append(receipt)
+    receipt = _receipt("BOUNDED_POST_DISPATCH_GATE")
+    receipt.update(
+        {
+            "mutation_started": True,
+            "mutation_performed": True,
+            "external_side_effects_executed": True,
+            "installed_artifacts_verified": True,
+            "activation_executed": False,
+        }
+    )
+    receipts.append(receipt)
 
     class FakeTransport:
         def submit(self, request):
