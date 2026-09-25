@@ -9,7 +9,8 @@ ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github/workflows/runner-controller-gateway-bootstrap-bridge-fe611870.yml"
 EXPECTED_MAIN_SHA = "fe61187008c7041ed02321e5a41c8a6628bf92b3"
 EXPECTED_BRANCH = "runner/issue-4249"
-EXPECTED_MARKER = "EXACT_HEAD_RUNNER_CONTROLLER_GATEWAY_BOOTSTRAP_BRIDGE_APPROVED"
+EXPECTED_LABEL = "gateway-bootstrap-approved-fe611870"
+EXPECTED_MARKER = "EXACT_HEAD_RUNNER_CONTROLLER_GATEWAY_BOOTSTRAP_BRIDGE_FE611870_APPROVED"
 EXPECTED_BOOTSTRAP_BLOB = "5b909c12ba57d5e71b236d709a54b761552b39e8"
 ALLOWED_CHANGED_FILES = {
     ".github/workflows/runner-controller-gateway-bootstrap-bridge-fe611870.yml",
@@ -57,8 +58,10 @@ def test_operator_gate_binds_exact_base_branch_and_current_head() -> None:
     assert f"github.event.pull_request.base.sha == '{EXPECTED_MAIN_SHA}'" in condition
     assert f"github.event.pull_request.head.ref == '{EXPECTED_BRANCH}'" in condition
     assert "github.event.pull_request.user.login == 'alanua'" in condition
-    assert "github.event.label.name == 'gateway-bootstrap-approved'" in condition
+    assert f"github.event.label.name == '{EXPECTED_LABEL}'" in condition
     assert f"Authorization Marker: {EXPECTED_MARKER}" in condition
+    assert "github.event.label.name == 'gateway-bootstrap-approved'" not in condition
+    assert "Authorization Marker: EXACT_HEAD_RUNNER_CONTROLLER_GATEWAY_BOOTSTRAP_BRIDGE_APPROVED" not in condition
     assert "contains(github.event.pull_request.body, github.event.pull_request.head.sha)" in condition
 
 
