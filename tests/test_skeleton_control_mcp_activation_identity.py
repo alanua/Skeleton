@@ -179,6 +179,44 @@ def test_zero_mutation_needs_operator_reason_surfaces_without_reason_allowlist(
     assert "external_side_effects_executed=false" in report
 
 
+def test_post_dispatch_needs_operator_receipt_surfaces_true_mutation_flags(
+    monkeypatch,
+):
+    _patch_checkout(monkeypatch)
+
+    receipt = _receipt("SKELETON_CONTROL_MCP_DESTINATION_MODE_MISMATCH")
+    receipt.update(
+        {
+            "expected_main_sha": HEAD_SHA,
+            "source_blob": gateway.SKELETON_CONTROL_MCP_HETZNER_SOURCE_BLOB,
+            "installer_sha256": "c" * 64,
+            "protected_copy_verified": True,
+            "installed_artifacts_verified": False,
+            "activation_executed": False,
+            "mutation_started": True,
+            "mutation_performed": True,
+            "external_side_effects_executed": True,
+        }
+    )
+
+    class FakeTransport:
+        def submit(self, request):
+            return 0, json.dumps(receipt).encode("utf-8")
+
+    monkeypatch.setattr(gateway, "LocalSudoGatewayTransport", FakeTransport)
+
+    report = runner.skeleton_control_mcp_hetzner_activate_v1(_body())
+
+    assert runner.maintenance_report_status(report) == "NEEDS_OPERATOR"
+    assert "gateway_status=NEEDS_OPERATOR" in report
+    assert "reason=SKELETON_CONTROL_MCP_DESTINATION_MODE_MISMATCH" in report
+    assert "reason=privileged_gateway_receipt_invalid" not in report
+    assert "mutation_started=true" in report
+    assert "mutation_performed=true" in report
+    assert "external_side_effects_executed=true" in report
+    assert "activation_executed=false" in report
+
+
 def test_needs_operator_receipt_requires_false_zero_mutation_flags(monkeypatch):
     _patch_checkout(monkeypatch)
     receipts = []

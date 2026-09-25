@@ -25862,6 +25862,49 @@ def test_skeleton_control_mcp_pre_executor_needs_operator_surfaces_bounded_reaso
     assert "private_path" not in report.lower()
 
 
+def test_skeleton_control_mcp_post_dispatch_needs_operator_surfaces_mutation_flags(
+    monkeypatch,
+):
+    from core import runner_controller_privileged_gateway as gateway
+
+    _patch_skeleton_control_mcp_checkout(monkeypatch)
+
+    class FakeTransport:
+        def submit(self, request):
+            return 0, json.dumps(
+                _skeleton_control_mcp_gateway_receipt(
+                    reason="SKELETON_CONTROL_MCP_DESTINATION_MODE_MISMATCH",
+                    expected_main_sha=HEAD_SHA,
+                    source_blob=gateway.SKELETON_CONTROL_MCP_HETZNER_SOURCE_BLOB,
+                    installer_sha256="c" * 64,
+                    protected_copy_verified=True,
+                    installed_artifacts_verified=False,
+                    activation_executed=False,
+                    mutation_started=True,
+                    mutation_performed=True,
+                    external_side_effects_executed=True,
+                )
+            ).encode("utf-8")
+
+    monkeypatch.setattr(gateway, "LocalSudoGatewayTransport", FakeTransport)
+
+    report = runner.skeleton_control_mcp_hetzner_activate_v1(
+        _skeleton_control_mcp_hetzner_body()
+    )
+
+    assert runner.maintenance_report_status(report) == "NEEDS_OPERATOR"
+    assert "gateway_status=NEEDS_OPERATOR" in report
+    assert "reason=SKELETON_CONTROL_MCP_DESTINATION_MODE_MISMATCH" in report
+    assert "reason=privileged_gateway_receipt_invalid" not in report
+    assert "mutation_started=true" in report
+    assert "mutation_performed=true" in report
+    assert "external_side_effects_executed=true" in report
+    assert "activation_executed=false" in report
+    assert "protected_copy_verified=true" in report
+    assert "source_blob=" + gateway.SKELETON_CONTROL_MCP_HETZNER_SOURCE_BLOB in report
+    assert "installer_sha256=" + "c" * 64 in report
+
+
 @pytest.mark.parametrize(
     "updates",
     (
@@ -25916,6 +25959,16 @@ def test_skeleton_control_mcp_pre_executor_needs_operator_surfaces_bounded_reaso
             "status": "DONE",
             "expected_main_sha": HEAD_SHA,
             "activation_executed": False,
+        },
+        {
+            "reason": "SKELETON_CONTROL_MCP_DESTINATION_MODE_MISMATCH",
+            "expected_main_sha": HEAD_SHA,
+            "source_blob": "d94576297ea26fdd78f9ac8fc50d7cdb91bfdc09",
+            "protected_copy_verified": True,
+            "activation_executed": True,
+            "mutation_started": True,
+            "mutation_performed": True,
+            "external_side_effects_executed": True,
         },
     ),
 )
