@@ -19,8 +19,8 @@ jobs:
       github.event.pull_request.base.sha == 'fe61187008c7041ed02321e5a41c8a6628bf92b3' &&
       github.event.pull_request.head.ref == 'runner/issue-4249' &&
       github.event.pull_request.user.login == 'alanua' &&
-      github.event.label.name == 'gateway-bootstrap-approved' &&
-      contains(github.event.pull_request.body, 'Authorization Marker: EXACT_HEAD_RUNNER_CONTROLLER_GATEWAY_BOOTSTRAP_BRIDGE_APPROVED') &&
+      github.event.label.name == 'gateway-bootstrap-approved-fe611870' &&
+      contains(github.event.pull_request.body, 'Authorization Marker: EXACT_HEAD_RUNNER_CONTROLLER_GATEWAY_BOOTSTRAP_BRIDGE_FE611870_APPROVED') &&
       contains(github.event.pull_request.body, github.event.pull_request.head.sha)
     runs-on:
       - self-hosted
