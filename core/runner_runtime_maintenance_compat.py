@@ -9,8 +9,12 @@ import yaml
 RUNNER_CONTROLLER_REPAIR_CODEX_STATE_MOUNT_V1: Final = (
     "runner_controller_repair_codex_state_mount_v1"
 )
+PUBLISH_ISSUE_WORKTREE_PR: Final = "publish_issue_worktree_pr"
 REGISTERED_RUNTIME_MAINTENANCE_OPERATIONS: Final = frozenset(
-    {RUNNER_CONTROLLER_REPAIR_CODEX_STATE_MOUNT_V1}
+    {
+        PUBLISH_ISSUE_WORKTREE_PR,
+        RUNNER_CONTROLLER_REPAIR_CODEX_STATE_MOUNT_V1,
+    }
 )
 
 

@@ -1,4 +1,5 @@
 from core.runner_runtime_maintenance_compat import (
+    PUBLISH_ISSUE_WORKTREE_PR,
     RUNNER_CONTROLLER_REPAIR_CODEX_STATE_MOUNT_V1,
     extract_fenced_runtime_maintenance_operation,
 )
@@ -19,6 +20,15 @@ def test_exact_registered_operation_is_recognized() -> None:
             _task(RUNNER_CONTROLLER_REPAIR_CODEX_STATE_MOUNT_V1)
         )
         == RUNNER_CONTROLLER_REPAIR_CODEX_STATE_MOUNT_V1
+    )
+
+
+def test_publish_issue_worktree_pr_operation_is_recognized() -> None:
+    assert (
+        extract_fenced_runtime_maintenance_operation(
+            _task(PUBLISH_ISSUE_WORKTREE_PR)
+        )
+        == PUBLISH_ISSUE_WORKTREE_PR
     )
 
 
