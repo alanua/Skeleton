@@ -25777,7 +25777,7 @@ def test_skeleton_control_mcp_builds_exact_typed_gateway_request(monkeypatch):
                     "target": "runner-controller",
                     "expected_main_sha": HEAD_SHA,
                     "source_blob": gateway.SKELETON_CONTROL_MCP_HETZNER_SOURCE_BLOB,
-                    "installer_sha256": "c" * 64,
+                    "installer_sha256": gateway.SKELETON_CONTROL_MCP_HETZNER_SOURCE_SHA256,
                     "protected_copy_verified": True,
                     "installed_artifacts_verified": True,
                     "activation_executed": False,
@@ -25785,6 +25785,8 @@ def test_skeleton_control_mcp_builds_exact_typed_gateway_request(monkeypatch):
                     "stderr_exposed": False,
                     "env_exposed": False,
                     "private_paths_exposed": False,
+                    "mutation_started": True,
+                    "mutation_performed": True,
                     "external_side_effects_executed": True,
                 }
             ).encode("utf-8")
@@ -25815,7 +25817,10 @@ def test_skeleton_control_mcp_builds_exact_typed_gateway_request(monkeypatch):
     assert captured["checkout_path"] == str(checkout)
     assert "gateway_status=DONE" in report
     assert "source_blob=" + gateway.SKELETON_CONTROL_MCP_HETZNER_SOURCE_BLOB in report
-    assert "installer_sha256=" + "c" * 64 in report
+    assert (
+        "installer_sha256=" + gateway.SKELETON_CONTROL_MCP_HETZNER_SOURCE_SHA256
+        in report
+    )
     assert "activation_executed=false" in report
     assert "private_evidence_exposed=false" in report
     assert "action=typed_gateway_dispatch" in report
@@ -25980,6 +25985,42 @@ def test_skeleton_control_mcp_post_dispatch_needs_operator_accepts_coherent_muta
             "mutation_started": True,
             "mutation_performed": False,
             "external_side_effects_executed": True,
+            "activation_executed": False,
+        },
+        {
+            "mutation_started": True,
+            "mutation_performed": True,
+            "external_side_effects_executed": True,
+            "expected_main_sha": HEAD_SHA,
+            "source_blob": "d94576297ea26fdd78f9ac8fc50d7cdb91bfdc09",
+            "installer_sha256": "a" * 64,
+            "protected_copy_verified": True,
+            "installed_artifacts_verified": False,
+            "activation_executed": False,
+        },
+        {
+            "status": "DONE",
+            "reason": "SKELETON_CONTROL_MCP_HETZNER_LAUNCHER_VERIFIED",
+            "mutation_started": True,
+            "mutation_performed": True,
+            "external_side_effects_executed": True,
+            "expected_main_sha": HEAD_SHA,
+            "source_blob": "d94576297ea26fdd78f9ac8fc50d7cdb91bfdc09",
+            "installer_sha256": "a" * 64,
+            "protected_copy_verified": True,
+            "installed_artifacts_verified": True,
+            "activation_executed": False,
+        },
+        {
+            "status": "DONE",
+            "reason": "SKELETON_CONTROL_MCP_HETZNER_LAUNCHER_VERIFIED",
+            "mutation_started": True,
+            "mutation_performed": True,
+            "external_side_effects_executed": True,
+            "expected_main_sha": HEAD_SHA,
+            "source_blob": "d94576297ea26fdd78f9ac8fc50d7cdb91bfdc09",
+            "protected_copy_verified": True,
+            "installed_artifacts_verified": True,
             "activation_executed": False,
         },
         {"reason": "SKELETON_CONTROL_MCP_HETZNER_LAUNCHER_VERIFIED"},

@@ -217,6 +217,82 @@ def test_post_dispatch_needs_operator_receipt_surfaces_when_mutation_flags_coher
     assert "external_side_effects_executed=true" in report
 
 
+def test_post_dispatch_needs_operator_rejects_wrong_well_formed_installer_sha(
+    monkeypatch,
+):
+    _patch_checkout(monkeypatch)
+    receipt = _receipt("BOUNDED_POST_DISPATCH_GATE")
+    receipt.update(
+        {
+            "mutation_started": True,
+            "mutation_performed": True,
+            "external_side_effects_executed": True,
+            "expected_main_sha": HEAD_SHA,
+            "source_blob": gateway.SKELETON_CONTROL_MCP_HETZNER_SOURCE_BLOB,
+            "installer_sha256": "a" * 64,
+            "protected_copy_verified": True,
+            "installed_artifacts_verified": False,
+            "activation_executed": False,
+        }
+    )
+
+    class FakeTransport:
+        def submit(self, request):
+            return 0, json.dumps(receipt).encode("utf-8")
+
+    monkeypatch.setattr(gateway, "LocalSudoGatewayTransport", FakeTransport)
+
+    report = runner.skeleton_control_mcp_hetzner_activate_v1(_body())
+
+    assert runner.maintenance_report_status(report) == "BLOCKED"
+    assert "reason=privileged_gateway_receipt_invalid" in report
+
+
+def test_done_receipt_requires_exact_installer_and_hardened_success_state(monkeypatch):
+    _patch_checkout(monkeypatch)
+    valid = _receipt("SKELETON_CONTROL_MCP_HETZNER_LAUNCHER_VERIFIED")
+    valid.update(
+        {
+            "status": "DONE",
+            "mutation_started": True,
+            "mutation_performed": True,
+            "external_side_effects_executed": True,
+            "expected_main_sha": HEAD_SHA,
+            "source_blob": gateway.SKELETON_CONTROL_MCP_HETZNER_SOURCE_BLOB,
+            "installer_sha256": gateway.SKELETON_CONTROL_MCP_HETZNER_SOURCE_SHA256,
+            "protected_copy_verified": True,
+            "installed_artifacts_verified": True,
+            "activation_executed": False,
+        }
+    )
+    wrong_hash = dict(valid)
+    wrong_hash["installer_sha256"] = "a" * 64
+    missing_hash = dict(valid)
+    missing_hash.pop("installer_sha256")
+    wrong_flags = dict(valid)
+    wrong_flags["mutation_performed"] = False
+    wrong_flags["external_side_effects_executed"] = False
+    receipts = [valid, wrong_hash, missing_hash, wrong_flags]
+
+    class FakeTransport:
+        def submit(self, request):
+            return 0, json.dumps(receipts.pop(0)).encode("utf-8")
+
+    monkeypatch.setattr(gateway, "LocalSudoGatewayTransport", FakeTransport)
+
+    report = runner.skeleton_control_mcp_hetzner_activate_v1(_body())
+    assert runner.maintenance_report_status(report) == "DONE"
+    assert (
+        "installer_sha256=" + gateway.SKELETON_CONTROL_MCP_HETZNER_SOURCE_SHA256
+        in report
+    )
+
+    for _ in range(3):
+        report = runner.skeleton_control_mcp_hetzner_activate_v1(_body())
+        assert runner.maintenance_report_status(report) == "BLOCKED"
+        assert "reason=privileged_gateway_receipt_invalid" in report
+
+
 def test_needs_operator_receipt_requires_false_zero_mutation_flags(monkeypatch):
     _patch_checkout(monkeypatch)
     receipts = []

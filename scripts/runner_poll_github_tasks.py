@@ -20041,6 +20041,7 @@ def _skeleton_control_mcp_hetzner_receipt_valid(
     from core.runner_controller_privileged_gateway import (
         RECEIPT_SCHEMA_ID,
         SKELETON_CONTROL_MCP_HETZNER_SOURCE_BLOB,
+        SKELETON_CONTROL_MCP_HETZNER_SOURCE_SHA256,
     )
 
     status = receipt.get("status")
@@ -20086,9 +20087,9 @@ def _skeleton_control_mcp_hetzner_receipt_valid(
     ):
         return False
     installer_sha256 = receipt.get("installer_sha256")
-    if installer_sha256 is not None and (
-        not isinstance(installer_sha256, str)
-        or re.fullmatch(r"[0-9a-f]{64}", installer_sha256) is None
+    if (
+        installer_sha256 is not None
+        and installer_sha256 != SKELETON_CONTROL_MCP_HETZNER_SOURCE_SHA256
     ):
         return False
     if status == "NEEDS_OPERATOR":
@@ -20126,22 +20127,18 @@ def _skeleton_control_mcp_hetzner_receipt_valid(
                 return False
         return True
     if (
-        receipt.get("expected_main_sha") != expected_main_sha
+        reason != "SKELETON_CONTROL_MCP_HETZNER_LAUNCHER_VERIFIED"
+        or receipt.get("expected_main_sha") != expected_main_sha
         or receipt.get("source_blob") != SKELETON_CONTROL_MCP_HETZNER_SOURCE_BLOB
+        or installer_sha256 != SKELETON_CONTROL_MCP_HETZNER_SOURCE_SHA256
+        or receipt.get("mutation_started") is not True
+        or receipt.get("mutation_performed") is not True
+        or receipt.get("external_side_effects_executed") is not True
+        or receipt.get("protected_copy_verified") is not True
+        or receipt.get("installed_artifacts_verified") is not True
         or receipt.get("activation_executed") is not False
     ):
         return False
-    for key in (
-        "stderr_exposed",
-        "env_exposed",
-        "private_paths_exposed",
-        "external_side_effects_executed",
-        "protected_copy_verified",
-        "installed_artifacts_verified",
-        "activation_executed",
-    ):
-        if key in receipt and receipt.get(key) not in {True, False}:
-            return False
     return True
 
 
