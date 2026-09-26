@@ -3,11 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from core.telegram_audit import TelegramAuditLog, provenance_hash
 from core.telegram_memory_bridge import TelegramMemoryProposalBridge
-from core.telegram_mtproto import TelegramFloodWaitError, TelegramMTProtoFacade
+from core.telegram_mtproto import AuthorizationProvider, SecretResolver, SessionPersistCallback, TelegramFloodWaitError, TelegramMTProtoFacade
 from core.telegram_notifications import TelegramNotificationError, send_telegram_notification
 from core.telegram_permissions import (
     TelegramAccessMode,
@@ -89,16 +89,38 @@ class TelegramGateway:
         store: TelegramStore,
         audit_log: TelegramAuditLog | None = None,
         memory_bridge: TelegramMemoryProposalBridge | None = None,
+        secret_resolver: SecretResolver | None = None,
+        authorization_provider: AuthorizationProvider | None = None,
+        session_persist: SessionPersistCallback | None = None,
+        mtproto_factory: Callable[[TelegramSource], TelegramMTProtoFacade] | None = None,
     ) -> None:
         self.allowlist = allowlist
         self.store = store
         self.audit_log = audit_log or TelegramAuditLog()
         self.memory_bridge = memory_bridge or TelegramMemoryProposalBridge()
         self.retrieval = TelegramRetrieval(store)
+        self.secret_resolver = secret_resolver
+        self.authorization_provider = authorization_provider
+        self.session_persist = session_persist
+        self._mtproto_factory = mtproto_factory
 
     @classmethod
-    def for_sources(cls, sources: list[Mapping[str, object]], *, store_path: str | Path) -> "TelegramGateway":
-        return cls(allowlist=TelegramAllowlist.from_iterable(sources), store=TelegramStore.open(store_path))
+    def for_sources(
+        cls,
+        sources: list[Mapping[str, object]],
+        *,
+        store_path: str | Path,
+        secret_resolver: SecretResolver | None = None,
+        authorization_provider: AuthorizationProvider | None = None,
+        session_persist: SessionPersistCallback | None = None,
+    ) -> "TelegramGateway":
+        return cls(
+            allowlist=TelegramAllowlist.from_iterable(sources),
+            store=TelegramStore.open(store_path),
+            secret_resolver=secret_resolver,
+            authorization_provider=authorization_provider,
+            session_persist=session_persist,
+        )
 
     def read_allowed_private(
         self,
@@ -110,7 +132,7 @@ class TelegramGateway:
         mtproto: TelegramMTProtoFacade | None = None,
     ) -> dict[str, object]:
         source = self.allowlist.source(source_id)
-        facade = mtproto or TelegramMTProtoFacade(source)
+        facade = mtproto or self._live_facade(source)
         try:
             messages = facade.read_messages(peer_id, limit=limit, offset_id=offset_id)
         except TelegramFloodWaitError as exc:
@@ -144,7 +166,13 @@ class TelegramGateway:
         self.audit_log.record(action="READ_ALLOWED_PRIVATE", source_id=source_id, status="DONE", details={"count": len(messages), "peer_id_hash": provenance_hash(source_id, peer_id)})
         return {"status": "DONE", "messages": messages, "resume_offset": max((int(item["message_id"]) for item in messages), default=offset_id)}
 
-    def resolve_source(self, source_ref: str, *, mode: TelegramAccessMode | str = TelegramAccessMode.READ_PUBLIC) -> dict[str, object]:
+    def resolve_source(
+        self,
+        source_ref: str,
+        *,
+        mode: TelegramAccessMode | str = TelegramAccessMode.READ_PUBLIC,
+        mtproto: TelegramMTProtoFacade | None = None,
+    ) -> dict[str, object]:
         access_mode = TelegramAccessMode(mode)
         try:
             source = self.allowlist.resolve(source_ref, mode=access_mode)
@@ -153,7 +181,19 @@ class TelegramGateway:
             source_id = source_ref if source_ref in self.allowlist.sources else "unknown"
             self.audit_log.record(action="RESOLVE_SOURCE", source_id=source_id, status="BLOCKED", reason_code=exc.reason_code, details={"count": 0})
             return {"status": "BLOCKED", "reason_code": exc.reason_code}
-        result = _source_record(source, peer_id=peer_id)
+        facade = mtproto or self._live_facade(source)
+        try:
+            live_peer = facade.resolve_peer(peer_id, public=access_mode == TelegramAccessMode.READ_PUBLIC)
+        except TelegramFloodWaitError as exc:
+            self.audit_log.record(action="RESOLVE_SOURCE", source_id=source.source_id, status="FLOOD_WAIT", reason_code="FLOOD_WAIT", details={"seconds": exc.seconds, "count": 0, "peer_id_hash": provenance_hash(source.source_id, peer_id)})
+            return {"status": "FLOOD_WAIT", "reason_code": "FLOOD_WAIT", "retry_after_seconds": exc.seconds}
+        except TelegramGatewayError as exc:
+            self.audit_log.record(action="RESOLVE_SOURCE", source_id=source.source_id, status="BLOCKED", reason_code=exc.reason_code, details={"count": 0, "peer_id_hash": provenance_hash(source.source_id, peer_id)})
+            return {"status": "BLOCKED", "reason_code": exc.reason_code}
+        except Exception:
+            self.audit_log.record(action="RESOLVE_SOURCE", source_id=source.source_id, status="BLOCKED", reason_code="BLOCKED", details={"count": 0, "peer_id_hash": provenance_hash(source.source_id, peer_id)})
+            return {"status": "BLOCKED", "reason_code": "BLOCKED"}
+        result = _source_record(source, peer_id=peer_id, live_peer=live_peer)
         self.audit_log.record(action="RESOLVE_SOURCE", source_id=source.source_id, status="DONE", details={"count": 1, "result": "resolved"})
         return {"status": "DONE", "source": result}
 
@@ -173,7 +213,7 @@ class TelegramGateway:
             return resolved
         source = resolved["source_obj"]
         peer_id = str(resolved["peer_id"])
-        facade = mtproto or TelegramMTProtoFacade(source)
+        facade = mtproto or self._live_facade(source)
         action = "READ_PUBLIC" if TelegramAccessMode(mode) == TelegramAccessMode.READ_PUBLIC else "READ_ALLOWED_PRIVATE"
         try:
             messages = facade.read_messages(peer_id, limit=limit, offset_id=offset_id, public=TelegramAccessMode(mode) == TelegramAccessMode.READ_PUBLIC)
@@ -273,7 +313,7 @@ class TelegramGateway:
         cursor = self.store.get_sync_cursor(source_id=source.source_id, peer_id=peer_id)
         cursor_state = cursor["state"] if cursor and isinstance(cursor.get("state"), dict) else {}
         min_id = max(0, int(cursor["cursor_message_id"]) - max(0, overlap)) if cursor else 0
-        facade = mtproto or TelegramMTProtoFacade(source)
+        facade = mtproto or self._live_facade(source)
         access_mode = TelegramAccessMode(mode)
         try:
             updates = facade.read_updates(peer_id, limit=limit, marker=cursor_state.get("update_marker"), public=access_mode == TelegramAccessMode.READ_PUBLIC)
@@ -362,8 +402,13 @@ class TelegramGateway:
             "kind": "telegram_message_extract",
             "source_id": message.get("source_id"),
             "peer_id_hash": provenance_hash(message.get("source_id"), message.get("peer_id")),
+            "message_ref_hash": provenance_hash(message.get("source_id"), message.get("peer_id"), message.get("message_id")),
             "message_id": message.get("message_id"),
+            "sent_at": message.get("sent_at"),
+            "permalink": message.get("permalink"),
+            "confidence": float(message.get("confidence", 0.7)),
             "source_evidence_hash": provenance_hash(message.get("source_id"), message.get("peer_id"), message.get("message_id"), fact),
+            "provenance_hash": provenance_hash(message.get("source_id"), message.get("peer_id"), message.get("message_id"), message.get("sent_at"), message.get("permalink"), fact),
         }
         return self.memory_bridge.propose(fact=fact, recommendation=recommendation, provenance=provenance)
 
@@ -387,9 +432,18 @@ class TelegramGateway:
                 "messages": history["messages"],
                 "search": search["messages"],
             }
-        if "telegram_mtproto_string_session" not in source.secret_refs:
+        if "telegram_mtproto_string_session" not in source.secret_refs or self.secret_resolver is None:
             return {"status": "AUTH_REQUIRED", "source": PUBLIC_INTEGRATION_SOURCE}
-        return {"status": "BLOCKED", "reason_code": "LIVE_AUTHORIZATION_REQUIRED", "source": PUBLIC_INTEGRATION_SOURCE}
+        history = self.get_history(PUBLIC_INTEGRATION_SOURCE, mode=TelegramAccessMode.READ_PUBLIC, limit=limit)
+        if history.get("status") != "DONE" or not history.get("messages"):
+            return {
+                "status": "BLOCKED",
+                "reason_code": history.get("reason_code", "NO_PUBLIC_MESSAGES_READ"),
+                "source": PUBLIC_INTEGRATION_SOURCE,
+                "messages": [],
+            }
+        search = self.search(query, source_ref=PUBLIC_INTEGRATION_SOURCE, mode=TelegramAccessMode.READ_PUBLIC, limit=source.bounded_limit(limit or source.max_page_size))
+        return {"status": "DONE", "source": PUBLIC_INTEGRATION_SOURCE, "messages": history["messages"], "search": search["messages"]}
 
     def _resolve_peer(self, source_ref: str, mode: TelegramAccessMode) -> dict[str, Any]:
         try:
@@ -400,14 +454,27 @@ class TelegramGateway:
             return {"status": "BLOCKED", "reason_code": exc.reason_code}
         return {"status": "DONE", "source_obj": source, "peer_id": peer_id}
 
+    def _live_facade(self, source: TelegramSource) -> TelegramMTProtoFacade:
+        if self._mtproto_factory is not None:
+            return self._mtproto_factory(source)
+        return TelegramMTProtoFacade(
+            source,
+            secret_resolver=self.secret_resolver,
+            authorization_provider=self.authorization_provider,
+            session_persist=self.session_persist,
+        )
 
-def _source_record(source: TelegramSource, *, peer_id: str) -> dict[str, object]:
+
+def _source_record(source: TelegramSource, *, peer_id: str, live_peer: Mapping[str, object] | None = None) -> dict[str, object]:
+    live_peer = live_peer or {}
     return {
         "source_id": source.source_id,
-        "handle": source.handle,
-        "peer_id": peer_id,
-        "stable_peer_id": source.peer_id,
-        "title": source.title,
+        "handle": live_peer.get("handle") or source.handle,
+        "peer_id": live_peer.get("peer_id") or peer_id,
+        "stable_peer_id": live_peer.get("peer_channel_id") or source.peer_id,
+        "peer_channel_id": live_peer.get("peer_channel_id") or source.peer_id,
+        "username": live_peer.get("username"),
+        "title": live_peer.get("title") or source.title,
         "access_modes": [mode.value for mode in source.access_modes],
         "max_page_size": source.max_page_size,
         "media_downloads_default": source.media_downloads_default,

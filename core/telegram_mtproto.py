@@ -15,6 +15,7 @@ class MTProtoClient(Protocol):
 
 SecretResolver = Callable[[str], str | None]
 AuthorizationProvider = Callable[[TelegramSource, tuple[str, ...]], Mapping[str, str] | None]
+SessionPersistCallback = Callable[[TelegramSource, str], None]
 
 
 @dataclass(frozen=True)
@@ -55,11 +56,13 @@ class TelegramMTProtoFacade:
         client_factory: Callable[[], MTProtoClient] | None = None,
         secret_resolver: Callable[[str], str | None] | None = None,
         authorization_provider: AuthorizationProvider | None = None,
+        session_persist: SessionPersistCallback | None = None,
     ) -> None:
         self._source = source
         self._client_factory = client_factory
         self._secret_resolver = secret_resolver
         self._authorization_provider = authorization_provider
+        self._session_persist = session_persist
         self._client_instance: MTProtoClient | None = None
 
     def read_messages(self, peer_id: str, *, limit: int | None = None, offset_id: int = 0, min_id: int = 0, public: bool = False) -> list[Mapping[str, Any]]:
@@ -110,6 +113,28 @@ class TelegramMTProtoFacade:
             if isinstance(exc, TelegramGatewayError):
                 raise
             raise TelegramGatewayError("BLOCKED", "Telegram MTProto update read failed") from exc
+
+    def resolve_peer(self, peer_id: str, *, public: bool = False) -> Mapping[str, Any]:
+        if public:
+            self._source.require(TelegramAccessMode.READ_PUBLIC)
+            peer_id = self._source.require_public_ref(peer_id)
+        else:
+            self._source.require(TelegramAccessMode.READ_ALLOWED_PRIVATE)
+            self._source.require_peer(peer_id)
+        client = self._client()
+        resolver = getattr(client, "get_entity", None) or getattr(client, "get_input_entity", None)
+        if resolver is None:
+            raise TelegramGatewayError("BLOCKED", "Telegram MTProto peer resolver is unavailable")
+        try:
+            entity = self._call(resolver, peer_id)
+            return _normalize_peer(entity, self._source, peer_id)
+        except Exception as exc:
+            seconds = getattr(exc, "seconds", None) or getattr(exc, "value", None)
+            if seconds is not None or "FloodWait" in type(exc).__name__:
+                raise TelegramFloodWaitError(int(seconds or 0)) from exc
+            if isinstance(exc, TelegramGatewayError):
+                raise
+            raise TelegramGatewayError("BLOCKED", "Telegram MTProto peer resolution failed") from exc
 
     def unavailable_write(self, *_args: object, **_kwargs: object) -> None:
         raise TelegramGatewayError("OPERATION_NOT_AVAILABLE", "Telegram user-account writes are unavailable")
@@ -170,6 +195,8 @@ class TelegramMTProtoFacade:
         if not value and self._authorization_provider is not None and ref == "telegram_mtproto_string_session":
             material = self._authorization_provider(self._source, tuple(self._source.secret_refs)) or {}
             value = material.get(ref)
+            if value and self._session_persist is not None:
+                self._session_persist(self._source, value)
         if not value:
             raise TelegramGatewayError("AUTH_REQUIRED", "MTProto credential is unavailable")
         return value
@@ -231,6 +258,33 @@ def _normalize_update(update: Any, source: TelegramSource, peer_id: str) -> dict
         return {"kind": "noop", "marker": marker}
     kind = "edit" if "edit" in class_name else "new"
     return {"kind": kind, "message": _normalize_mtproto_message(message, source, peer_id), "marker": marker}
+
+
+def _normalize_peer(entity: Any, source: TelegramSource, peer_id: str) -> dict[str, Any]:
+    channel_id = getattr(entity, "channel_id", None) or getattr(entity, "id", None)
+    normalized_channel_id = _normal_channel_id(channel_id, fallback=source.peer_id)
+    username = _text(getattr(entity, "username", None)) or _username(source.handle)
+    title = _text(getattr(entity, "title", None)) or _sender_name(entity) or source.title
+    handle = f"@{username}" if username else source.handle
+    return {
+        "peer_id": str(peer_id),
+        "peer_channel_id": normalized_channel_id,
+        "username": username,
+        "title": title,
+        "handle": handle,
+    }
+
+
+def _normal_channel_id(value: object, *, fallback: str | None) -> str | None:
+    if value is None:
+        return fallback
+    text = str(value)
+    if text.startswith("-100") or text.startswith("@"):
+        return text
+    if text.lstrip("-").isdigit():
+        digits = text.lstrip("-")
+        return f"-100{digits}"
+    return text
 
 
 def _await_sync(value: Any) -> Any:

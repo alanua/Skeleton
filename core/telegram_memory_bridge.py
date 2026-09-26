@@ -19,6 +19,12 @@ class TelegramMemoryProposalBridge:
             raise TelegramGatewayError("RAW_BULK_INGEST_FORBIDDEN", "raw Telegram history cannot enter MemoryGateway")
         if provenance.get("kind") != "telegram_message_extract":
             raise TelegramGatewayError("PROVENANCE_REQUIRED", "Telegram memory proposals require extracted provenance")
+        required = {"source_id", "peer_id_hash", "message_ref_hash", "message_id", "source_evidence_hash", "provenance_hash", "confidence"}
+        if not required <= set(provenance):
+            raise TelegramGatewayError("PROVENANCE_REQUIRED", "Telegram memory proposals require bounded message provenance")
+        confidence = provenance.get("confidence")
+        if not isinstance(confidence, (float, int)) or confidence < 0 or confidence > 1:
+            raise TelegramGatewayError("PROVENANCE_REQUIRED", "Telegram memory proposal confidence must be bounded")
         proposal = {
             "schema": TELEGRAM_MEMORY_PROPOSAL_SCHEMA,
             "mode": "proposal_only",

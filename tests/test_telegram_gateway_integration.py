@@ -81,8 +81,4 @@ def test_midnightquantum_harness_does_not_attempt_live_login(tmp_path: Path) -> 
     )
     gateway = TelegramGateway(allowlist=TelegramAllowlist({"midnight": source}), store=TelegramStore.open(tmp_path / "telegram.db"))
 
-    assert gateway.run_public_integration_harness("midnight") == {
-        "status": "BLOCKED",
-        "reason_code": "LIVE_AUTHORIZATION_REQUIRED",
-        "source": "@midnightquantum",
-    }
+    assert gateway.run_public_integration_harness("midnight") == {"status": "AUTH_REQUIRED", "source": "@midnightquantum"}

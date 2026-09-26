@@ -97,6 +97,9 @@ class RichClient:
     def iter_messages(self, peer_id: str, *, limit: int, offset_id: int = 0):
         return self.messages
 
+    def get_entity(self, peer_id: str):
+        return type("Peer", (), {"id": 123, "username": "midnightquantum", "title": "Midnight Quantum Live"})()
+
 
 class AsyncClient:
     def __init__(self):
@@ -224,10 +227,37 @@ def test_private_access_accepts_stable_peer_allowlist_without_handle(tmp_path: P
     private_src = source(access_modes=["READ_ALLOWED_PRIVATE"], peer_id="-100123", allowlisted_peer_ids=["-100123"])
     private_gw = gateway(tmp_path, private_src)
 
-    resolved = private_gw.resolve_source("midnight", mode=TelegramAccessMode.READ_ALLOWED_PRIVATE)
+    resolved = private_gw.resolve_source(
+        "midnight",
+        mode=TelegramAccessMode.READ_ALLOWED_PRIVATE,
+        mtproto=TelegramMTProtoFacade(private_src, client_factory=lambda: RichClient()),
+    )
 
     assert resolved["status"] == "DONE"
     assert resolved["source"]["peer_id"] == "-100123"
+
+
+def test_resolve_source_uses_live_mtproto_metadata(tmp_path: Path) -> None:
+    src = source(access_modes=["READ_PUBLIC"], allowlisted_peer_ids=[], peer_id="-100999", title="Configured Title")
+    gw = gateway(tmp_path, src)
+
+    resolved = gw.resolve_source("@midnightquantum", mtproto=TelegramMTProtoFacade(src, client_factory=lambda: RichClient()))
+
+    assert resolved["status"] == "DONE"
+    assert resolved["source"]["stable_peer_id"] == "-100123"
+    assert resolved["source"]["peer_channel_id"] == "-100123"
+    assert resolved["source"]["username"] == "midnightquantum"
+    assert resolved["source"]["title"] == "Midnight Quantum Live"
+
+
+def test_resolve_source_without_live_auth_is_audited_auth_required(tmp_path: Path) -> None:
+    src = source(access_modes=["READ_PUBLIC"], allowlisted_peer_ids=[])
+    gw = gateway(tmp_path, src)
+
+    resolved = gw.resolve_source("@midnightquantum")
+
+    assert resolved == {"status": "BLOCKED", "reason_code": "AUTH_REQUIRED"}
+    assert gw.audit_log.events[-1]["reason_code"] == "AUTH_REQUIRED"
 
 
 def test_get_message_history_date_filters_and_search_filters(tmp_path: Path) -> None:

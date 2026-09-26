@@ -35,6 +35,12 @@ awaitables and async iterators from the synchronous gateway API, and checks that
 the user session is authorized before any read. If Telethon, Home Edge secret
 resolution, session authorization, or bounded API access is unavailable, the
 gateway fails closed with `AUTH_REQUIRED`, `FLOOD_WAIT`, or `BLOCKED`.
+Gateway construction accepts only narrow provider callbacks for this live path:
+`secret_resolver(ref)`, `authorization_provider(source, refs)`, and
+`session_persist(source, string_session)`. These callbacks are supplied by the
+Home Edge -> Bitwarden credential boundary; callers do not pass raw MTProto
+secrets into action methods, and the gateway never falls back to shell
+environment, ChatGPT text, or plaintext config values.
 
 Secrets are provisioned only through the Home Edge app Devices -> Secrets tab,
 synchronized to Bitwarden. Source contracts may reference only these material
@@ -54,6 +60,14 @@ for the allowed material refs above. After successful authorization, the
 StringSession is persisted only by the Home Edge -> Bitwarden provider and
 referenced as `telegram_mtproto_string_session`; existing sessions read without
 prompting again.
+
+`resolve_source` performs bounded live peer resolution when an MTProto facade or
+the provider-backed default facade is available. It resolves only the configured
+handle, source id, stable peer id, or exact allowlisted peer; it does not list
+dialogs. The returned source record includes normalized peer/channel id,
+username, handle, and title from Telegram. Without live auth/client access it
+returns an audited `AUTH_REQUIRED`, `FLOOD_WAIT`, or `BLOCKED` result instead of
+claiming config-only source resolution as a live Telegram resolution.
 
 The local store is SQLite with FTS when available. It supports idempotent
 upserts, resume offsets, edit updates, delete tombstones, bounded pagination,
@@ -79,9 +93,11 @@ and injectable semantic retrieval with source/date/limit filters and returns the
 same normalized source, date, message id, and permalink metadata.
 
 MemoryGateway integration is proposal-only. The bridge accepts bounded
-extracted facts and recommendations with Telegram provenance hashes; it rejects
-raw bulk history and does not expose direct canonical writes. Raw Telegram posts
-are not copied into MemoryGate, receipts, audit, or repository artifacts.
+extracted facts and recommendations with Telegram message reference, sent date
+when available, permalink when available, confidence, and provenance hashes. It
+rejects raw bulk history and does not expose direct canonical writes. Raw
+Telegram posts are not copied into MemoryGate, receipts, audit, or repository
+artifacts.
 
 Media downloads are not part of default read, search, or sync actions. Any media
 download feature must be a separate explicit bounded operation.
