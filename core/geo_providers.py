@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+import math
 from typing import Protocol
 
 from core.geo import (
@@ -109,17 +110,38 @@ class GoogleMapsProviderAdapter:
         ordered = first.get("orderedPlaceIds", first.get("optimizedPlaceIds", place_ids))
         if not isinstance(ordered, Sequence) or isinstance(ordered, (str, bytes)):
             raise ProviderNormalizationError("PROVIDER_ROUTE_ORDER_INVALID")
+        if any(not isinstance(item, str) or not item.strip() for item in ordered):
+            raise ProviderNormalizationError("PROVIDER_ROUTE_ORDER_INVALID")
         distance = first.get("distanceMeters")
-        duration = first.get("durationSeconds")
-        if duration is None and isinstance(first.get("duration"), str) and first["duration"].endswith("s"):
+        duration = first.get("durationSeconds", first.get("duration"))
+        if isinstance(duration, str):
+            duration_text = duration.strip()
+            if duration_text.endswith("s"):
+                duration_text = duration_text[:-1]
             try:
-                duration = float(first["duration"][:-1])
+                duration = float(duration_text)
             except ValueError as exc:
                 raise ProviderNormalizationError("PROVIDER_ROUTE_DURATION_INVALID") from exc
+        normalized_distance = None
+        if distance is not None:
+            try:
+                normalized_distance = float(distance)
+            except (TypeError, ValueError) as exc:
+                raise ProviderNormalizationError("PROVIDER_ROUTE_DISTANCE_INVALID") from exc
+            if not math.isfinite(normalized_distance) or normalized_distance < 0:
+                raise ProviderNormalizationError("PROVIDER_ROUTE_DISTANCE_INVALID")
+        normalized_duration = None
+        if duration is not None:
+            try:
+                normalized_duration = float(duration)
+            except (TypeError, ValueError) as exc:
+                raise ProviderNormalizationError("PROVIDER_ROUTE_DURATION_INVALID") from exc
+            if not math.isfinite(normalized_duration) or normalized_duration < 0:
+                raise ProviderNormalizationError("PROVIDER_ROUTE_DURATION_INVALID")
         return ProviderRouteResult(
             ordered_place_ids=tuple(str(item) for item in ordered),
-            distance_m=float(distance) if distance is not None else None,
-            duration_s=int(float(duration)) if duration is not None else None,
+            distance_m=normalized_distance,
+            duration_s=int(normalized_duration) if normalized_duration is not None else None,
             provider=self.provider,
             provenance=Provenance("google_routes", confidence=0.95),
         )
@@ -152,6 +174,8 @@ def normalize_google_place(raw: Mapping[str, object], *, retrieved_at: str | Non
             raise ProviderNormalizationError("PROVIDER_LOCATION_INVALID") from exc
     types = raw.get("types", ())
     if not isinstance(types, Sequence) or isinstance(types, (str, bytes)):
+        raise ProviderNormalizationError("PROVIDER_TYPES_INVALID")
+    if any(not isinstance(item, str) or not item.strip() for item in types):
         raise ProviderNormalizationError("PROVIDER_TYPES_INVALID")
     identity = ProviderIdentity("google_maps", provider_place_id)
     source_ref = raw.get("googleMapsUri") if isinstance(raw.get("googleMapsUri"), str) else None
@@ -196,7 +220,10 @@ def normalize_google_geocode(raw: Mapping[str, object], *, retrieved_at: str | N
     place_id = first.get("placeId") or first.get("place_id")
     if place_id is not None and not isinstance(place_id, str):
         raise ProviderNormalizationError("GEOCODE_PLACE_ID_INVALID")
-    partial = bool(first.get("partialMatch", first.get("partial_match", False)))
+    partial_value = first.get("partialMatch", first.get("partial_match", False))
+    if not isinstance(partial_value, bool):
+        raise ProviderNormalizationError("GEOCODE_PARTIAL_MATCH_INVALID")
+    partial = partial_value
     confidence = 0.65 if partial else 0.9
     provenance = Provenance("google_geocoding", retrieved_at=retrieved_at or utc_now(), confidence=confidence)
     return GeocodeResult(coordinate, address.strip() if isinstance(address, str) else None, place_id, provenance)

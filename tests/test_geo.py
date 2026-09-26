@@ -162,6 +162,7 @@ def test_track_retention_and_simplification_keep_raw_private() -> None:
     assert derived.privacy_class == "PRIVATE_USER_GEO"
     assert derived.track_id != raw.track_id
     assert repository.get_track(raw.track_id).points == raw.points
+    assert GeoService(repository).simplify_track("raw-1", tolerance_m=2) == derived
     assert repository.purge_expired_tracks(now="2026-01-01T00:00:11Z") == ("raw-1",)
 
 
@@ -177,6 +178,13 @@ def test_visit_candidate_requires_confirmation_before_visited() -> None:
     confirmed = service.confirm_visit(candidate.visit_id)
     assert confirmed.status == "confirmed"
     assert repository.get_place("p").status == PlaceStatus.VISITED
+
+
+def test_visit_candidate_rejects_non_positive_radius() -> None:
+    repository = InMemoryGeoRepository()
+    with pytest.raises(GeoError) as error:
+        GeoService(repository).detect_visit_candidate(track_id="missing", place_id="missing", radius_m=0)
+    assert error.value.reason_code == "INVALID_RADIUS"
 
 
 class FakeGoogleTransport:

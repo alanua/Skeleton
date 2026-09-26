@@ -352,6 +352,11 @@ class Route:
             object.__setattr__(self, "route_kind", RouteKind(str(self.route_kind)))
         if not isinstance(self.travel_mode, TravelMode):
             object.__setattr__(self, "travel_mode", TravelMode(str(self.travel_mode)))
+        if not isinstance(self.status, RouteStatus):
+            try:
+                object.__setattr__(self, "status", RouteStatus(str(self.status)))
+            except ValueError as exc:
+                raise GeoError("INVALID_ROUTE_STATUS") from exc
         sequences = [stop.sequence for stop in self.stops]
         if sequences != list(range(len(self.stops))):
             raise GeoError("ROUTE_STOPS_MUST_BE_ORDERED")
@@ -504,6 +509,33 @@ class RouteProvider(Protocol):
 
 class GeoRepository(Protocol):
     def save_place(self, place: Place, *, idempotency_key: str | None = None) -> SaveResult: ...
+
+    def update_place(self, place: Place, *, idempotency_key: str | None = None) -> SaveResult: ...
+
+    def get_place(self, place_id: str) -> Place: ...
+
+    def list_places(self, *, category: str | None = None, tag: str | None = None,
+                    status: PlaceStatus | None = None, query: str | None = None) -> tuple[Place, ...]: ...
+
+    def query_bbox(self, *, min_lat: float, min_lon: float, max_lat: float, max_lon: float) -> tuple[Place, ...]: ...
+
+    def nearby(self, *, center: Coordinate, radius_m: float, category: str | None = None) -> tuple[tuple[Place, float], ...]: ...
+
+    def save_route(self, route: Route) -> Route: ...
+
+    def get_route(self, route_id: str) -> Route: ...
+
+    def ingest_track(self, track: Track, *, idempotency_key: str | None = None) -> Track: ...
+
+    def get_track(self, track_id: str) -> Track: ...
+
+    def list_tracks(self) -> tuple[Track, ...]: ...
+
+    def save_visit(self, visit: VisitRecord) -> VisitRecord: ...
+
+    def get_visit(self, visit_id: str) -> VisitRecord: ...
+
+    def list_visits(self, *, place_id: str | None = None, status: str | None = None) -> tuple[VisitRecord, ...]: ...
 
 
 def _provider_key(place: Place) -> tuple[tuple[str, str], ...]:
@@ -684,7 +716,7 @@ class InMemoryGeoRepository:
 
 
 class GeoService:
-    def __init__(self, repository: InMemoryGeoRepository, *, route_provider: RouteProvider | None = None) -> None:
+    def __init__(self, repository: GeoRepository, *, route_provider: RouteProvider | None = None) -> None:
         self.repository = repository
         self.route_provider = route_provider
 
@@ -766,13 +798,15 @@ class GeoService:
             track_id=f"{track.track_id}:simplified",
             points=tuple(kept),
             retention=TrackRetention.DERIVED_LONG,
-            created_at=utc_now(),
+            created_at=track.created_at,
             derived_geometry=tuple(point.coordinate for point in kept),
         )
         self.repository.ingest_track(simplified, idempotency_key=f"derived:{track.track_id}:{tolerance_m:g}")
         return simplified
 
     def detect_visit_candidate(self, *, track_id: str, place_id: str, radius_m: float = 100.0) -> VisitRecord:
+        if radius_m <= 0 or not math.isfinite(float(radius_m)):
+            raise GeoError("INVALID_RADIUS")
         track = self.repository.get_track(track_id)
         place = self.repository.get_place(place_id)
         if place.coordinate is None:
