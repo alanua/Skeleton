@@ -34,6 +34,8 @@ class TelegramSource:
     source_id: str
     handle: str
     access_modes: tuple[TelegramAccessMode, ...]
+    peer_id: str | None = None
+    title: str | None = None
     secret_refs: tuple[str, ...] = ()
     allowlisted_peer_ids: tuple[str, ...] = ()
     max_page_size: int = 100
@@ -61,6 +63,8 @@ class TelegramSource:
             source_id=source_id,
             handle=handle,
             access_modes=modes,
+            peer_id=_optional_text(data.get("peer_id")),
+            title=_optional_text(data.get("title")),
             secret_refs=refs,
             allowlisted_peer_ids=tuple(_string_list(data.get("allowlisted_peer_ids"))),
             max_page_size=max_page_size,
@@ -77,6 +81,20 @@ class TelegramSource:
             return
         if str(peer_id) not in self.allowlisted_peer_ids:
             raise TelegramGatewayError("PEER_NOT_ALLOWLISTED", "private peer is not allowlisted")
+
+    def require_public_ref(self, source_ref: str) -> str:
+        self.require(TelegramAccessMode.READ_PUBLIC)
+        if source_ref not in {self.source_id, self.handle, self.peer_id}:
+            raise TelegramGatewayError("SOURCE_REF_NOT_ALLOWED", "public reads require the configured handle or stable source id")
+        return self.handle
+
+    def resolve_private_peer(self, source_ref: str) -> str:
+        self.require(TelegramAccessMode.READ_ALLOWED_PRIVATE)
+        if source_ref in {self.source_id, self.handle, self.peer_id} and self.handle in self.allowlisted_peer_ids:
+            return self.handle
+        if source_ref in self.allowlisted_peer_ids:
+            return source_ref
+        raise TelegramGatewayError("PEER_NOT_ALLOWLISTED", "private peer is not allowlisted")
 
     def bounded_limit(self, requested: int | None = None) -> int:
         if requested is None:
@@ -101,11 +119,30 @@ class TelegramAllowlist:
         except KeyError as exc:
             raise TelegramGatewayError("SOURCE_NOT_ALLOWLISTED", "Telegram source is not allowlisted") from exc
 
+    def resolve(self, source_ref: str, *, mode: TelegramAccessMode | None = None) -> TelegramSource:
+        for source in self.sources.values():
+            refs = {source.source_id, source.handle}
+            if source.peer_id:
+                refs.add(source.peer_id)
+            if source_ref in refs or source_ref in source.allowlisted_peer_ids:
+                if mode is not None:
+                    source.require(mode)
+                return source
+        raise TelegramGatewayError("SOURCE_NOT_ALLOWLISTED", "Telegram source is not allowlisted")
+
 
 def _required_text(data: Mapping[str, Any], key: str) -> str:
     value = data.get(key)
     if not isinstance(value, str) or not value.strip():
         raise TelegramGatewayError("SOURCE_FIELD_REQUIRED", f"{key} is required")
+    return value.strip()
+
+
+def _optional_text(value: object) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise TelegramGatewayError("SOURCE_FIELD_INVALID", "expected a non-empty string")
     return value.strip()
 
 

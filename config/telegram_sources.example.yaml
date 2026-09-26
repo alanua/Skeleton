@@ -1,6 +1,8 @@
 sources:
   - source_id: midnightquantum_public_read
     handle: "@midnightquantum"
+    peer_id: "-1000000000000"
+    title: "Midnight Quantum"
     access_modes:
       - READ_PUBLIC
       - READ_ALLOWED_PRIVATE

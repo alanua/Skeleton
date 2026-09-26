@@ -68,6 +68,13 @@ def test_user_account_write_operations_are_unavailable(operation: str) -> None:
     assert excinfo.value.reason_code == "OPERATION_NOT_AVAILABLE"
 
 
+def test_raw_mtproto_client_is_not_exposed() -> None:
+    facade = TelegramMTProtoFacade(make_source(), client_factory=lambda: object())
+
+    with pytest.raises(AttributeError):
+        getattr(facade, "client")
+
+
 def test_memory_bridge_rejects_raw_bulk_and_direct_canonical_write() -> None:
     bridge = TelegramMemoryProposalBridge()
 

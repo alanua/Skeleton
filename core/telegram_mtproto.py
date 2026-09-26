@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from typing import Any, Callable, Iterable, Mapping, Protocol
 
 from core.telegram_permissions import TelegramAccessMode, TelegramGatewayError, TelegramSource
 
 
 class MTProtoClient(Protocol):
-    def iter_messages(self, peer_id: str, *, limit: int, offset_id: int = 0) -> Iterable[Any]: ...
+    def iter_messages(self, peer_id: str, *, limit: int, offset_id: int = 0, min_id: int = 0) -> Iterable[Any]: ...
 
 
 @dataclass(frozen=True)
@@ -15,6 +16,12 @@ class TelegramMTProtoCredentials:
     api_id_ref: str
     api_hash_ref: str
     string_session_ref: str
+
+
+class TelegramFloodWaitError(TelegramGatewayError):
+    def __init__(self, seconds: int) -> None:
+        super().__init__("FLOOD_WAIT", "Telegram MTProto flood wait")
+        self.seconds = max(0, int(seconds))
 
 
 class TelegramMTProtoFacade:
@@ -46,12 +53,26 @@ class TelegramMTProtoFacade:
         self._client_factory = client_factory
         self._secret_resolver = secret_resolver
 
-    def read_messages(self, peer_id: str, *, limit: int | None = None, offset_id: int = 0) -> list[Mapping[str, Any]]:
-        self._source.require(TelegramAccessMode.READ_ALLOWED_PRIVATE)
-        self._source.require_peer(peer_id)
+    def read_messages(self, peer_id: str, *, limit: int | None = None, offset_id: int = 0, min_id: int = 0, public: bool = False) -> list[Mapping[str, Any]]:
+        if public:
+            self._source.require(TelegramAccessMode.READ_PUBLIC)
+            peer_id = self._source.require_public_ref(peer_id)
+        else:
+            self._source.require(TelegramAccessMode.READ_ALLOWED_PRIVATE)
+            self._source.require_peer(peer_id)
         client = self._client()
         bounded_limit = self._source.bounded_limit(limit)
-        return [_normalize_mtproto_message(item, self._source.source_id, peer_id) for item in client.iter_messages(peer_id, limit=bounded_limit, offset_id=offset_id)]
+        try:
+            try:
+                items = client.iter_messages(peer_id, limit=bounded_limit, offset_id=offset_id, min_id=min_id)
+            except TypeError:
+                items = client.iter_messages(peer_id, limit=bounded_limit, offset_id=offset_id)
+            return [_normalize_mtproto_message(item, self._source, peer_id) for item in items]
+        except Exception as exc:
+            seconds = getattr(exc, "seconds", None) or getattr(exc, "value", None)
+            if seconds is not None or "FloodWait" in type(exc).__name__:
+                raise TelegramFloodWaitError(int(seconds or 0)) from exc
+            raise
 
     def unavailable_write(self, *_args: object, **_kwargs: object) -> None:
         raise TelegramGatewayError("OPERATION_NOT_AVAILABLE", "Telegram user-account writes are unavailable")
@@ -89,28 +110,110 @@ class TelegramMTProtoFacade:
         return value
 
 
-def _normalize_mtproto_message(item: Any, source_id: str, peer_id: str) -> dict[str, Any]:
+def _normalize_mtproto_message(item: Any, source: TelegramSource, peer_id: str) -> dict[str, Any]:
     message_id = getattr(item, "id", None)
     text = getattr(item, "message", None) or getattr(item, "text", "")
     date = getattr(item, "date", None)
     edited_at = getattr(item, "edit_date", None)
     media = getattr(item, "media", None)
+    sender = getattr(item, "sender", None) or getattr(item, "from_user", None)
+    reply_to = getattr(item, "reply_to", None)
+    fwd_from = getattr(item, "fwd_from", None) or getattr(item, "forward", None)
+    entities = [_entity(entity) for entity in list(getattr(item, "entities", None) or [])]
+    urls = _urls(str(text or ""), entities)
+    thread_id = getattr(reply_to, "forum_topic_id", None) or getattr(reply_to, "reply_to_top_id", None) or getattr(item, "thread_id", None)
+    caption = getattr(item, "caption", None)
     return {
-        "source_id": source_id,
+        "source_id": source.source_id,
         "peer_id": str(peer_id),
+        "peer_channel_id": source.peer_id,
+        "username": _username(source.handle),
+        "title": source.title,
         "message_id": int(message_id),
         "text": str(text or ""),
         "sent_at": date.isoformat() if hasattr(date, "isoformat") else None,
         "edited_at": edited_at.isoformat() if hasattr(edited_at, "isoformat") else None,
         "deleted_at": None,
-        "media": _media_metadata(media),
+        "sender_id": _text(getattr(sender, "id", None) or getattr(item, "sender_id", None)),
+        "sender_username": _text(getattr(sender, "username", None)),
+        "sender_name": _sender_name(sender),
+        "author": _text(getattr(item, "post_author", None) or getattr(item, "author", None)),
+        "entities": entities,
+        "urls": urls,
+        "reply_to_message_id": getattr(reply_to, "reply_to_msg_id", None) or getattr(item, "reply_to_msg_id", None),
+        "thread_id": thread_id,
+        "forwarded_from": _forward(fwd_from),
+        "media": _media_metadata(media, caption=caption),
+        "permalink": _permalink(source.handle, message_id),
+        "raw": {
+            "message_class": type(item).__name__,
+            "media_class": type(media).__name__ if media is not None else None,
+        },
     }
 
 
-def _media_metadata(media: object) -> dict[str, object] | None:
-    if media is None:
+def _media_metadata(media: object, *, caption: object = None) -> dict[str, object] | None:
+    if media is None and not caption:
         return None
-    return {
-        "kind": type(media).__name__,
+    metadata: dict[str, object] = {
+        "kind": type(media).__name__ if media is not None else "caption",
         "downloaded": False,
     }
+    size = getattr(media, "size", None)
+    if size is not None:
+        metadata["size_bytes"] = size
+    if caption:
+        metadata["caption"] = str(caption)
+    return metadata
+
+
+def _entity(entity: object) -> dict[str, object]:
+    return {
+        "type": type(entity).__name__,
+        "offset": getattr(entity, "offset", None),
+        "length": getattr(entity, "length", None),
+        "url": getattr(entity, "url", None),
+    }
+
+
+def _urls(text: str, entities: list[Mapping[str, object]]) -> list[str]:
+    found = [str(entity["url"]) for entity in entities if entity.get("url")]
+    found.extend(match.group(0) for match in re.finditer(r"https?://[^\s)>\]]+", text))
+    deduped: list[str] = []
+    for url in found:
+        if url not in deduped:
+            deduped.append(url)
+    return deduped
+
+
+def _forward(value: object) -> dict[str, object] | None:
+    if value is None:
+        return None
+    return {
+        "from_id": _text(getattr(value, "from_id", None)),
+        "from_name": _text(getattr(value, "from_name", None)),
+        "channel_id": _text(getattr(value, "channel_id", None)),
+        "date": getattr(getattr(value, "date", None), "isoformat", lambda: None)(),
+    }
+
+
+def _permalink(handle: str, message_id: object) -> str | None:
+    if not handle.startswith("@") or message_id is None:
+        return None
+    return f"https://t.me/{handle[1:]}/{int(message_id)}"
+
+
+def _username(handle: str) -> str | None:
+    return handle[1:] if handle.startswith("@") else None
+
+
+def _text(value: object) -> str | None:
+    return None if value is None else str(value)
+
+
+def _sender_name(sender: object) -> str | None:
+    if sender is None:
+        return None
+    parts = [getattr(sender, "first_name", None), getattr(sender, "last_name", None)]
+    name = " ".join(str(part) for part in parts if part)
+    return name or _text(getattr(sender, "title", None))
