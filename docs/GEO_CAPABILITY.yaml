@@ -1,0 +1,35 @@
+module_id: geo
+module_class: shared_capability
+contract_version: 1.0.0
+status: available
+operations:
+  - geo.place
+  - geo.route
+  - geo.track
+  - geo.visit
+  - geo.provider
+  - geo.open.external_navigation
+consumes:
+  - private_state.memory_gateway
+  - provider_adapters
+provides:
+  - provider_neutral_places
+  - provider_neutral_routes
+  - private_tracks_and_visits
+provider_bindings:
+  - google_maps_platform
+  - future_osm_or_maplibre
+privacy_classes:
+  - PRIVATE_USER_GEO
+  - PUBLIC_SAFE_SYNTHETIC
+authority_requirements:
+  - read_only_for_queries
+  - private_local_mutation_for_canonical_state
+  - external_mutation_gate_for_provider_account_changes
+side_effect_class: read_only|private_local_mutation|external_mutation
+input_schema: schemas/geo_mcp_request.schema.json
+output_schema: core/geo_mcp.py
+failure_contract: stable_reason_code_and_sanitized_receipt
+idempotency: required_for_save_and_track_ingest
+health_contract: provider_outage_must_not_corrupt_canonical_state
+owner_boundary: skeleton|private_runtime
