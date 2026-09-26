@@ -43,6 +43,7 @@
     },
     "allowlisted_peer_ids": {
       "type": "array",
+      "description": "Exact private peers allowed for READ_ALLOWED_PRIVATE. Stable peer_id entries are accepted even when the public handle is not listed.",
       "items": {
         "type": "string",
         "minLength": 1

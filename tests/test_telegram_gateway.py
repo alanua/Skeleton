@@ -98,6 +98,53 @@ class RichClient:
         return self.messages
 
 
+class AsyncClient:
+    def __init__(self):
+        self.connected = False
+
+    def is_connected(self):
+        return self.connected
+
+    async def connect(self):
+        self.connected = True
+
+    async def is_user_authorized(self):
+        return True
+
+    async def iter_messages(self, peer_id: str, *, limit: int, offset_id: int = 0, min_id: int = 0):
+        for message_id in range(min_id + 1, min_id + limit + 1):
+            yield FakeMessage(message_id, f"async message {message_id}")
+
+
+@dataclass
+class FakeNewUpdate:
+    message: object
+    pts: int
+
+
+@dataclass
+class FakeEditUpdate:
+    message: object
+    pts: int
+
+
+@dataclass
+class FakeDeleteUpdate:
+    messages: list[int]
+    pts: int
+
+
+class UpdateClient:
+    def __init__(self, updates):
+        self.updates = updates
+
+    def iter_updates(self, peer_id: str, *, limit: int, marker=None):
+        return self.updates
+
+    def iter_messages(self, peer_id: str, *, limit: int, offset_id: int = 0, min_id: int = 0):
+        return []
+
+
 class FloodClient:
     def iter_messages(self, peer_id: str, *, limit: int, offset_id: int = 0):
         raise FakeFloodWait()
@@ -148,6 +195,18 @@ def test_public_history_uses_mtproto_and_round_trips_rich_metadata(tmp_path: Pat
     assert message["permalink"] == "https://t.me/midnightquantum/101"
 
 
+def test_public_history_supports_async_telethon_shaped_client(tmp_path: Path) -> None:
+    src = source(access_modes=["READ_PUBLIC"], max_page_size=3)
+    gw = gateway(tmp_path, src)
+    client = AsyncClient()
+
+    result = gw.get_history("@midnightquantum", limit=2, mtproto=TelegramMTProtoFacade(src, client_factory=lambda: client))
+
+    assert result["status"] == "DONE"
+    assert client.connected is True
+    assert [message["message_id"] for message in result["messages"]] == [2, 1]
+
+
 def test_private_access_requires_exact_allowlisted_peer_but_public_does_not(tmp_path: Path) -> None:
     public_src = source(access_modes=["READ_PUBLIC"], allowlisted_peer_ids=[])
     public_gw = gateway(tmp_path, public_src)
@@ -159,6 +218,16 @@ def test_private_access_requires_exact_allowlisted_peer_but_public_does_not(tmp_
     private_gw = gateway(tmp_path, private_src)
     blocked = private_gw.resolve_source("@midnightquantum", mode=TelegramAccessMode.READ_ALLOWED_PRIVATE)
     assert blocked == {"status": "BLOCKED", "reason_code": "PEER_NOT_ALLOWLISTED"}
+
+
+def test_private_access_accepts_stable_peer_allowlist_without_handle(tmp_path: Path) -> None:
+    private_src = source(access_modes=["READ_ALLOWED_PRIVATE"], peer_id="-100123", allowlisted_peer_ids=["-100123"])
+    private_gw = gateway(tmp_path, private_src)
+
+    resolved = private_gw.resolve_source("midnight", mode=TelegramAccessMode.READ_ALLOWED_PRIVATE)
+
+    assert resolved["status"] == "DONE"
+    assert resolved["source"]["peer_id"] == "-100123"
 
 
 def test_get_message_history_date_filters_and_search_filters(tmp_path: Path) -> None:
@@ -176,6 +245,16 @@ def test_get_message_history_date_filters_and_search_filters(tmp_path: Path) -> 
     assert [row["message_id"] for row in gw.search("alpha", source_ref="@midnightquantum", min_date="2026-09-26T00:00:00Z")["messages"]] == [2]
 
 
+def test_get_message_can_bounded_fetch_when_cache_misses(tmp_path: Path) -> None:
+    src = source(access_modes=["READ_PUBLIC"])
+    gw = gateway(tmp_path, src)
+
+    result = gw.get_message("@midnightquantum", 101, mtproto=TelegramMTProtoFacade(src, client_factory=lambda: RichClient()))
+
+    assert result["status"] == "DONE"
+    assert result["message"]["message_id"] == 101
+
+
 def test_sync_source_persists_cursor_and_reconciles_edits_without_duplicates(tmp_path: Path) -> None:
     src = source(access_modes=["READ_PUBLIC"])
     gw = gateway(tmp_path, src)
@@ -189,6 +268,35 @@ def test_sync_source_persists_cursor_and_reconciles_edits_without_duplicates(tmp
     stored = restarted.get_message("@midnightquantum", 5)["message"]
     assert stored["text"] == "after edit"
     assert restarted.store.latest_message_id(source_id="midnight", peer_id="@midnightquantum") == 5
+
+
+def test_sync_source_applies_update_edits_deletes_and_marker(tmp_path: Path) -> None:
+    src = source(access_modes=["READ_PUBLIC"])
+    gw = gateway(tmp_path, src)
+    original = type("Msg", (), {"id": 10, "message": "original"})()
+    edited = type("Msg", (), {"id": 10, "message": "edited"})()
+    deleted = type("Msg", (), {"id": 11, "message": "delete me"})()
+    gw.read_public_seed(
+        "midnight",
+        [
+            TelegramMessage(source_id="midnight", peer_id="@midnightquantum", message_id=10, text="seed"),
+            TelegramMessage(source_id="midnight", peer_id="@midnightquantum", message_id=11, text="delete me"),
+        ],
+    )
+
+    result = gw.sync_source(
+        "@midnightquantum",
+        mtproto=TelegramMTProtoFacade(
+            src,
+            client_factory=lambda: UpdateClient([FakeNewUpdate(original, 1), FakeEditUpdate(edited, 2), FakeDeleteUpdate([11], 3)]),
+        ),
+    )
+
+    assert result["status"] == "DONE"
+    assert result["deleted_count"] == 1
+    assert gw.get_message("@midnightquantum", 10)["message"]["text"] == "edited"
+    assert gw.store.get_message(source_id="midnight", peer_id="@midnightquantum", message_id=11)["deleted_at"] is not None
+    assert gw.store.get_sync_cursor(source_id="midnight", peer_id="@midnightquantum")["state"]["update_marker"] == 3
 
 
 def test_flood_wait_is_bounded_audited_and_does_not_advance_cursor(tmp_path: Path) -> None:

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 import re
+import threading
 from typing import Any, Callable, Iterable, Mapping, Protocol
 
 from core.telegram_permissions import TelegramAccessMode, TelegramGatewayError, TelegramSource
@@ -9,6 +11,10 @@ from core.telegram_permissions import TelegramAccessMode, TelegramGatewayError, 
 
 class MTProtoClient(Protocol):
     def iter_messages(self, peer_id: str, *, limit: int, offset_id: int = 0, min_id: int = 0) -> Iterable[Any]: ...
+
+
+SecretResolver = Callable[[str], str | None]
+AuthorizationProvider = Callable[[TelegramSource, tuple[str, ...]], Mapping[str, str] | None]
 
 
 @dataclass(frozen=True)
@@ -48,10 +54,13 @@ class TelegramMTProtoFacade:
         *,
         client_factory: Callable[[], MTProtoClient] | None = None,
         secret_resolver: Callable[[str], str | None] | None = None,
+        authorization_provider: AuthorizationProvider | None = None,
     ) -> None:
         self._source = source
         self._client_factory = client_factory
         self._secret_resolver = secret_resolver
+        self._authorization_provider = authorization_provider
+        self._client_instance: MTProtoClient | None = None
 
     def read_messages(self, peer_id: str, *, limit: int | None = None, offset_id: int = 0, min_id: int = 0, public: bool = False) -> list[Mapping[str, Any]]:
         if public:
@@ -64,15 +73,43 @@ class TelegramMTProtoFacade:
         bounded_limit = self._source.bounded_limit(limit)
         try:
             try:
-                items = client.iter_messages(peer_id, limit=bounded_limit, offset_id=offset_id, min_id=min_id)
+                items = self._call(client.iter_messages, peer_id, limit=bounded_limit, offset_id=offset_id, min_id=min_id)
             except TypeError:
-                items = client.iter_messages(peer_id, limit=bounded_limit, offset_id=offset_id)
-            return [_normalize_mtproto_message(item, self._source, peer_id) for item in items]
+                items = self._call(client.iter_messages, peer_id, limit=bounded_limit, offset_id=offset_id)
+            return [_normalize_mtproto_message(item, self._source, peer_id) for item in _drain_iterable(items)]
         except Exception as exc:
             seconds = getattr(exc, "seconds", None) or getattr(exc, "value", None)
             if seconds is not None or "FloodWait" in type(exc).__name__:
                 raise TelegramFloodWaitError(int(seconds or 0)) from exc
-            raise
+            if isinstance(exc, TelegramGatewayError):
+                raise
+            raise TelegramGatewayError("BLOCKED", "Telegram MTProto read failed") from exc
+
+    def read_updates(self, peer_id: str, *, limit: int | None = None, marker: object = None, public: bool = False) -> list[Mapping[str, Any]]:
+        if public:
+            self._source.require(TelegramAccessMode.READ_PUBLIC)
+            peer_id = self._source.require_public_ref(peer_id)
+        else:
+            self._source.require(TelegramAccessMode.READ_ALLOWED_PRIVATE)
+            self._source.require_peer(peer_id)
+        client = self._client()
+        update_reader = getattr(client, "iter_updates", None) or getattr(client, "get_updates", None)
+        if update_reader is None:
+            return []
+        bounded_limit = self._source.bounded_limit(limit)
+        try:
+            updates = self._call(update_reader, peer_id, limit=bounded_limit, marker=marker)
+        except TypeError:
+            updates = self._call(update_reader, peer_id, limit=bounded_limit)
+        try:
+            return [_normalize_update(update, self._source, peer_id) for update in _drain_iterable(updates)]
+        except Exception as exc:
+            seconds = getattr(exc, "seconds", None) or getattr(exc, "value", None)
+            if seconds is not None or "FloodWait" in type(exc).__name__:
+                raise TelegramFloodWaitError(int(seconds or 0)) from exc
+            if isinstance(exc, TelegramGatewayError):
+                raise
+            raise TelegramGatewayError("BLOCKED", "Telegram MTProto update read failed") from exc
 
     def unavailable_write(self, *_args: object, **_kwargs: object) -> None:
         raise TelegramGatewayError("OPERATION_NOT_AVAILABLE", "Telegram user-account writes are unavailable")
@@ -83,8 +120,13 @@ class TelegramMTProtoFacade:
         raise AttributeError(name)
 
     def _client(self) -> MTProtoClient:
+        if self._client_instance is not None:
+            return self._client_instance
         if self._client_factory is not None:
-            return self._client_factory()
+            client = self._client_factory()
+            self._ensure_connected(client)
+            self._client_instance = client
+            return client
         self._require_credentials()
         try:
             from telethon import TelegramClient  # type: ignore[import-not-found]
@@ -94,7 +136,27 @@ class TelegramMTProtoFacade:
         api_id = self._resolve("telegram_api_id")
         api_hash = self._resolve("telegram_api_hash")
         session = self._resolve("telegram_mtproto_string_session")
-        return TelegramClient(StringSession(session), int(api_id), api_hash)
+        client = TelegramClient(StringSession(session), int(api_id), api_hash)
+        self._ensure_connected(client)
+        self._client_instance = client
+        return client
+
+    def _ensure_connected(self, client: object) -> None:
+        connected = getattr(client, "is_connected", None)
+        if callable(connected) and connected() is False:
+            connect = getattr(client, "connect", None)
+            if callable(connect):
+                self._call(connect)
+        elif not callable(connected):
+            connect = getattr(client, "connect", None)
+            if callable(connect):
+                self._call(connect)
+        authorized = getattr(client, "is_user_authorized", None)
+        if callable(authorized) and self._call(authorized) is False:
+            raise TelegramGatewayError("AUTH_REQUIRED", "Telegram MTProto session is not authorized")
+
+    def _call(self, func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        return _await_sync(func(*args, **kwargs))
 
     def _require_credentials(self) -> None:
         required = {"telegram_api_id", "telegram_api_hash", "telegram_mtproto_string_session"}
@@ -105,6 +167,9 @@ class TelegramMTProtoFacade:
         if self._secret_resolver is None:
             raise TelegramGatewayError("AUTH_REQUIRED", "MTProto credentials require Home Edge to Bitwarden resolution")
         value = self._secret_resolver(ref)
+        if not value and self._authorization_provider is not None and ref == "telegram_mtproto_string_session":
+            material = self._authorization_provider(self._source, tuple(self._source.secret_refs)) or {}
+            value = material.get(ref)
         if not value:
             raise TelegramGatewayError("AUTH_REQUIRED", "MTProto credential is unavailable")
         return value
@@ -150,6 +215,55 @@ def _normalize_mtproto_message(item: Any, source: TelegramSource, peer_id: str) 
             "media_class": type(media).__name__ if media is not None else None,
         },
     }
+
+
+def _normalize_update(update: Any, source: TelegramSource, peer_id: str) -> dict[str, Any]:
+    marker = getattr(update, "pts", None) or getattr(update, "marker", None)
+    deleted_ids = getattr(update, "deleted_ids", None) or getattr(update, "messages", None)
+    class_name = type(update).__name__.lower()
+    if deleted_ids is not None and "delete" in class_name:
+        ids = [int(value) for value in list(deleted_ids)]
+        return {"kind": "delete", "message_ids": ids, "marker": marker}
+    message = getattr(update, "message", None)
+    if message is None and hasattr(update, "id"):
+        message = update
+    if message is None:
+        return {"kind": "noop", "marker": marker}
+    kind = "edit" if "edit" in class_name else "new"
+    return {"kind": kind, "message": _normalize_mtproto_message(message, source, peer_id), "marker": marker}
+
+
+def _await_sync(value: Any) -> Any:
+    if not hasattr(value, "__await__"):
+        return value
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(value)
+    result: dict[str, Any] = {}
+
+    def runner() -> None:
+        try:
+            result["value"] = asyncio.run(value)
+        except BaseException as exc:  # pragma: no cover - exercised only inside active event loops
+            result["error"] = exc
+
+    thread = threading.Thread(target=runner, daemon=True)
+    thread.start()
+    thread.join()
+    if "error" in result:
+        raise result["error"]
+    return result.get("value")
+
+
+def _drain_iterable(items: Any) -> list[Any]:
+    items = _await_sync(items)
+    if hasattr(items, "__aiter__"):
+        async def collect() -> list[Any]:
+            return [item async for item in items]
+
+        return _await_sync(collect())
+    return list(items)
 
 
 def _media_metadata(media: object, *, caption: object = None) -> dict[str, object] | None:

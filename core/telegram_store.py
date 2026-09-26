@@ -74,6 +74,79 @@ class TelegramStore:
             )
             self._rebuild_fts(conn)
 
+    def apply_sync_batch(
+        self,
+        *,
+        source_id: str,
+        peer_id: str,
+        messages: Iterable[Mapping[str, object]],
+        deleted_message_ids: Iterable[int] = (),
+        deleted_at: str,
+        cursor_message_id: int,
+        updated_at: str,
+        state: Mapping[str, object] | None = None,
+    ) -> int:
+        stored = 0
+        with self._connect() as conn:
+            for message in messages:
+                conn.execute(
+                    """
+                    INSERT INTO telegram_messages (
+                        source_id, peer_id, message_id, peer_channel_id, username, title, text, sent_at, edited_at,
+                        deleted_at, sender_id, sender_username, sender_name, author, entities_json, urls_json,
+                        reply_to_message_id, thread_id, forward_json, media_kind, media_downloaded, media_caption,
+                        media_json, permalink, raw_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(source_id, peer_id, message_id) DO UPDATE SET
+                        peer_channel_id=COALESCE(excluded.peer_channel_id, telegram_messages.peer_channel_id),
+                        username=COALESCE(excluded.username, telegram_messages.username),
+                        title=COALESCE(excluded.title, telegram_messages.title),
+                        text=excluded.text,
+                        sent_at=COALESCE(excluded.sent_at, telegram_messages.sent_at),
+                        edited_at=excluded.edited_at,
+                        deleted_at=excluded.deleted_at,
+                        sender_id=excluded.sender_id,
+                        sender_username=excluded.sender_username,
+                        sender_name=excluded.sender_name,
+                        author=excluded.author,
+                        entities_json=excluded.entities_json,
+                        urls_json=excluded.urls_json,
+                        reply_to_message_id=excluded.reply_to_message_id,
+                        thread_id=excluded.thread_id,
+                        forward_json=excluded.forward_json,
+                        media_kind=excluded.media_kind,
+                        media_downloaded=excluded.media_downloaded,
+                        media_caption=excluded.media_caption,
+                        media_json=excluded.media_json,
+                        permalink=COALESCE(excluded.permalink, telegram_messages.permalink),
+                        raw_json=excluded.raw_json
+                    """,
+                    _row(message),
+                )
+                stored += 1
+            for message_id in deleted_message_ids:
+                conn.execute(
+                    """
+                    INSERT INTO telegram_messages (source_id, peer_id, message_id, text, deleted_at)
+                    VALUES (?, ?, ?, '', ?)
+                    ON CONFLICT(source_id, peer_id, message_id) DO UPDATE SET deleted_at=excluded.deleted_at
+                    """,
+                    (source_id, peer_id, int(message_id), deleted_at),
+                )
+            conn.execute(
+                """
+                INSERT INTO telegram_sync_cursors (source_id, peer_id, cursor_message_id, updated_at, state_json)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(source_id, peer_id) DO UPDATE SET
+                    cursor_message_id=excluded.cursor_message_id,
+                    updated_at=excluded.updated_at,
+                    state_json=excluded.state_json
+                """,
+                (source_id, peer_id, int(cursor_message_id), updated_at, _json(state or {})),
+            )
+            self._rebuild_fts(conn)
+        return stored
+
     def latest_message_id(self, *, source_id: str, peer_id: str) -> int:
         with self._connect() as conn:
             row = conn.execute(

@@ -38,6 +38,19 @@
     },
     "operator_secret_route": {
       "const": "home_edge_devices_secrets_tab_to_bitwarden"
+    },
+    "first_authorization_provider": {
+      "const": "home_edge_devices_secrets_tab_to_bitwarden"
+    },
+    "update_handling": {
+      "type": "array",
+      "items": {
+        "enum": ["new_message", "edit", "delete_tombstone", "cursor_marker"]
+      },
+      "uniqueItems": true
+    },
+    "integration_source": {
+      "const": "@midnightquantum"
     }
   }
 }

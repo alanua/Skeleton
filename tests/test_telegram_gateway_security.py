@@ -55,6 +55,53 @@ def test_mtproto_missing_dependency_or_secret_resolution_fails_closed() -> None:
     assert excinfo.value.reason_code == "AUTH_REQUIRED"
 
 
+def test_mtproto_uses_home_edge_authorization_provider_only_for_missing_session() -> None:
+    source = make_source()
+    calls = []
+
+    def resolver(ref: str) -> str | None:
+        return {"telegram_api_id": "1", "telegram_api_hash": "hash"}.get(ref)
+
+    def provider(src, refs):
+        calls.append((src.source_id, refs))
+        return {"telegram_mtproto_string_session": "session"}
+
+    facade = TelegramMTProtoFacade(source, secret_resolver=resolver, authorization_provider=provider)
+
+    assert facade._resolve("telegram_mtproto_string_session") == "session"
+    assert calls == [("midnight", source.secret_refs)]
+
+
+def test_mtproto_existing_session_does_not_reprompt_provider() -> None:
+    source = make_source()
+
+    def resolver(ref: str) -> str | None:
+        return "already-present" if ref == "telegram_mtproto_string_session" else None
+
+    def provider(_src, _refs):
+        raise AssertionError("provider should not be called")
+
+    facade = TelegramMTProtoFacade(source, secret_resolver=resolver, authorization_provider=provider)
+
+    assert facade._resolve("telegram_mtproto_string_session") == "already-present"
+
+
+def test_mtproto_unauthorized_session_fails_closed() -> None:
+    class UnauthorizedClient:
+        def iter_messages(self, peer_id: str, *, limit: int, offset_id: int = 0, min_id: int = 0):
+            return []
+
+        def is_user_authorized(self):
+            return False
+
+    facade = TelegramMTProtoFacade(make_source(), client_factory=lambda: UnauthorizedClient())
+
+    with pytest.raises(TelegramGatewayError) as excinfo:
+        facade.read_messages("@midnightquantum")
+
+    assert excinfo.value.reason_code == "AUTH_REQUIRED"
+
+
 @pytest.mark.parametrize(
     "operation",
     ["send_message", "edit_message", "delete_messages", "react", "forward_messages", "join_channel", "leave_channel", "invite_to_channel", "pin_message"],

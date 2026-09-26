@@ -19,18 +19,22 @@ session material, tokens, or secret values.
 
 The MTProto facade exposes read-only history access. `READ_PUBLIC` accepts only
 the configured source id, public handle, or stable peer id for that source.
-`READ_ALLOWED_PRIVATE` accepts only exact peers listed in `allowlisted_peer_ids`.
-There is no dialog enumeration, account-wide harvest, arbitrary peer search, or
-implicit private access.
+`READ_ALLOWED_PRIVATE` accepts only exact peers listed in
+`allowlisted_peer_ids`; stable peer ids work even when the public handle is not
+allowlisted. There is no dialog enumeration, account-wide harvest, arbitrary
+peer search, or implicit private access.
 
 User-account writes and account-management operations such as send, edit,
 delete, react, forward, join, leave, invite, and pin are unavailable through the
 gateway.
 
 Telethon is an optional runtime dependency. The import is lazy and happens only
-when a live MTProto read is attempted without an injected test facade. If
-Telethon, Home Edge secret resolution, or authorization material is unavailable,
-the gateway fails closed with `AUTH_REQUIRED` or `BLOCKED`.
+when a live MTProto read is attempted without an injected test facade. The
+facade connects an already-authenticated `StringSession`, supports Telethon
+awaitables and async iterators from the synchronous gateway API, and checks that
+the user session is authorized before any read. If Telethon, Home Edge secret
+resolution, session authorization, or bounded API access is unavailable, the
+gateway fails closed with `AUTH_REQUIRED`, `FLOOD_WAIT`, or `BLOCKED`.
 
 Secrets are provisioned only through the Home Edge app Devices -> Secrets tab,
 synchronized to Bitwarden. Source contracts may reference only these material
@@ -45,16 +49,27 @@ No direct ChatGPT, shell, environment, or plaintext MTProto secret-entry path is
 part of this gateway.
 
 First authorization is outside ChatGPT. If phone/code/2FA is needed, the gateway
-returns an auth-required boundary for the existing operator UI. After successful
-authorization, the StringSession is persisted only by the Home Edge -> Bitwarden
-provider and referenced as `telegram_mtproto_string_session`.
+may invoke only the narrow Home Edge Devices -> Secrets tab provider callback
+for the allowed material refs above. After successful authorization, the
+StringSession is persisted only by the Home Edge -> Bitwarden provider and
+referenced as `telegram_mtproto_string_session`; existing sessions read without
+prompting again.
 
 The local store is SQLite with FTS when available. It supports idempotent
 upserts, resume offsets, edit updates, delete tombstones, bounded pagination,
 lazy media metadata, and injectable semantic retrieval. Media metadata is stored
-without default downloads. `sync_source` keeps a durable per-source cursor and a
-small reconciliation overlap so restarts can observe edits without duplicate
-message rows. Flood waits are returned and audited without advancing the cursor.
+without default downloads. `sync_source` first consumes a fake or
+Telethon-compatible update seam for new messages, edits, and deleted-message
+tombstones, then falls back to bounded overlap reads for reconciliation. Cursor
+and update-marker writes happen with the imported rows/tombstones, so restarts
+retry safely and flood waits are returned and audited without advancing state.
+
+The `@midnightquantum` public integration harness must use the same public
+gateway path as production reads. With an injected deterministic client it
+resolves the configured source, imports a bounded recent set, stores normalized
+metadata, and proves search over the imported rows. Without live credentials or
+the optional dependency it returns `AUTH_REQUIRED` or `BLOCKED`; it does not
+claim `DONE` unless at least one message was read.
 
 Normalized message rows retain Telegram peer/channel id, username, title,
 message id, sent/edit/delete timestamps, sender or author metadata, text,

@@ -131,6 +131,15 @@ class TelegramGateway:
                 details={"peer_id_hash": provenance_hash(source_id, peer_id), "count": 0},
             )
             return {"status": "BLOCKED", "reason_code": exc.reason_code, "messages": []}
+        except Exception:
+            self.audit_log.record(
+                action="READ_ALLOWED_PRIVATE",
+                source_id=source_id,
+                status="BLOCKED",
+                reason_code="BLOCKED",
+                details={"peer_id_hash": provenance_hash(source_id, peer_id), "count": 0},
+            )
+            return {"status": "BLOCKED", "reason_code": "BLOCKED", "messages": []}
         self.store.upsert_messages(messages)
         self.audit_log.record(action="READ_ALLOWED_PRIVATE", source_id=source_id, status="DONE", details={"count": len(messages), "peer_id_hash": provenance_hash(source_id, peer_id)})
         return {"status": "DONE", "messages": messages, "resume_offset": max((int(item["message_id"]) for item in messages), default=offset_id)}
@@ -174,18 +183,48 @@ class TelegramGateway:
         except TelegramGatewayError as exc:
             self.audit_log.record(action=action, source_id=source.source_id, status="BLOCKED", reason_code=exc.reason_code, details={"count": 0, "peer_id_hash": provenance_hash(source.source_id, peer_id)})
             return {"status": "BLOCKED", "reason_code": exc.reason_code, "messages": []}
+        except Exception:
+            self.audit_log.record(action=action, source_id=source.source_id, status="BLOCKED", reason_code="BLOCKED", details={"count": 0, "peer_id_hash": provenance_hash(source.source_id, peer_id)})
+            return {"status": "BLOCKED", "reason_code": "BLOCKED", "messages": []}
         self.store.upsert_messages(messages)
         rows = self.store.get_history(source_id=source.source_id, peer_id=peer_id, limit=source.bounded_limit(limit), offset_id=offset_id, min_date=min_date, max_date=max_date)
         self.audit_log.record(action=action, source_id=source.source_id, status="DONE", details={"count": len(rows), "result": "history", "peer_id_hash": provenance_hash(source.source_id, peer_id)})
         return {"status": "DONE", "messages": rows, "resume_offset": max((int(item["message_id"]) for item in rows), default=offset_id)}
 
-    def get_message(self, source_ref: str, message_id: int, *, mode: TelegramAccessMode | str = TelegramAccessMode.READ_PUBLIC) -> dict[str, object]:
+    def get_message(
+        self,
+        source_ref: str,
+        message_id: int,
+        *,
+        mode: TelegramAccessMode | str = TelegramAccessMode.READ_PUBLIC,
+        mtproto: TelegramMTProtoFacade | None = None,
+    ) -> dict[str, object]:
         resolved = self._resolve_peer(source_ref, TelegramAccessMode(mode))
         if resolved["status"] != "DONE":
             return resolved
         source = resolved["source_obj"]
         peer_id = str(resolved["peer_id"])
         row = self.store.get_message(source_id=source.source_id, peer_id=peer_id, message_id=message_id)
+        if row is None and mtproto is not None:
+            access_mode = TelegramAccessMode(mode)
+            try:
+                messages = mtproto.read_messages(
+                    peer_id,
+                    limit=1,
+                    min_id=max(0, int(message_id) - 1),
+                    public=access_mode == TelegramAccessMode.READ_PUBLIC,
+                )
+            except TelegramFloodWaitError as exc:
+                self.audit_log.record(action="GET_MESSAGE", source_id=source.source_id, status="FLOOD_WAIT", reason_code="FLOOD_WAIT", details={"seconds": exc.seconds, "count": 0, "peer_id_hash": provenance_hash(source.source_id, peer_id)})
+                return {"status": "FLOOD_WAIT", "reason_code": "FLOOD_WAIT", "retry_after_seconds": exc.seconds, "message": None}
+            except TelegramGatewayError as exc:
+                self.audit_log.record(action="GET_MESSAGE", source_id=source.source_id, status="BLOCKED", reason_code=exc.reason_code, details={"count": 0, "peer_id_hash": provenance_hash(source.source_id, peer_id)})
+                return {"status": "BLOCKED", "reason_code": exc.reason_code, "message": None}
+            except Exception:
+                self.audit_log.record(action="GET_MESSAGE", source_id=source.source_id, status="BLOCKED", reason_code="BLOCKED", details={"count": 0, "peer_id_hash": provenance_hash(source.source_id, peer_id)})
+                return {"status": "BLOCKED", "reason_code": "BLOCKED", "message": None}
+            self.store.upsert_messages(item for item in messages if int(item["message_id"]) == int(message_id))
+            row = self.store.get_message(source_id=source.source_id, peer_id=peer_id, message_id=message_id)
         status = "DONE" if row else "NOT_FOUND"
         self.audit_log.record(action="GET_MESSAGE", source_id=source.source_id, status=status, details={"count": 1 if row else 0, "peer_id_hash": provenance_hash(source.source_id, peer_id)})
         return {"status": status, "message": row}
@@ -232,24 +271,57 @@ class TelegramGateway:
         source = resolved["source_obj"]
         peer_id = str(resolved["peer_id"])
         cursor = self.store.get_sync_cursor(source_id=source.source_id, peer_id=peer_id)
+        cursor_state = cursor["state"] if cursor and isinstance(cursor.get("state"), dict) else {}
         min_id = max(0, int(cursor["cursor_message_id"]) - max(0, overlap)) if cursor else 0
         facade = mtproto or TelegramMTProtoFacade(source)
         access_mode = TelegramAccessMode(mode)
         try:
-            messages = facade.read_messages(peer_id, limit=limit, min_id=min_id, public=access_mode == TelegramAccessMode.READ_PUBLIC)
+            updates = facade.read_updates(peer_id, limit=limit, marker=cursor_state.get("update_marker"), public=access_mode == TelegramAccessMode.READ_PUBLIC)
+            messages = []
+            deleted_message_ids: list[int] = []
+            update_marker = cursor_state.get("update_marker")
+            for update in updates:
+                if update.get("marker") is not None:
+                    update_marker = update.get("marker")
+                if update.get("kind") in {"new", "edit"} and isinstance(update.get("message"), Mapping):
+                    messages.append(update["message"])
+                elif update.get("kind") == "delete":
+                    deleted_message_ids.extend(int(value) for value in update.get("message_ids", []))
+            if not updates:
+                messages = facade.read_messages(peer_id, limit=limit, min_id=min_id, public=access_mode == TelegramAccessMode.READ_PUBLIC)
         except TelegramFloodWaitError as exc:
             self.audit_log.record(action="SYNC_SOURCE", source_id=source.source_id, status="FLOOD_WAIT", reason_code="FLOOD_WAIT", details={"seconds": exc.seconds, "count": 0, "peer_id_hash": provenance_hash(source.source_id, peer_id)})
             return {"status": "FLOOD_WAIT", "reason_code": "FLOOD_WAIT", "retry_after_seconds": exc.seconds, "messages": []}
         except TelegramGatewayError as exc:
             self.audit_log.record(action="SYNC_SOURCE", source_id=source.source_id, status="BLOCKED", reason_code=exc.reason_code, details={"count": 0, "peer_id_hash": provenance_hash(source.source_id, peer_id)})
             return {"status": "BLOCKED", "reason_code": exc.reason_code, "messages": []}
-        self.store.upsert_messages(messages)
+        except Exception:
+            self.audit_log.record(action="SYNC_SOURCE", source_id=source.source_id, status="BLOCKED", reason_code="BLOCKED", details={"count": 0, "peer_id_hash": provenance_hash(source.source_id, peer_id)})
+            return {"status": "BLOCKED", "reason_code": "BLOCKED", "messages": []}
         rows = [self.store.get_message(source_id=source.source_id, peer_id=peer_id, message_id=int(item["message_id"])) for item in messages]
         stored_messages = [row for row in rows if row is not None]
         next_cursor = max([int(item["message_id"]) for item in messages] + [int(cursor["cursor_message_id"]) if cursor else 0])
-        self.store.save_sync_cursor(source_id=source.source_id, peer_id=peer_id, cursor_message_id=next_cursor, updated_at=_now(), state={"overlap": overlap})
-        self.audit_log.record(action="SYNC_SOURCE", source_id=source.source_id, status="DONE", details={"count": len(stored_messages), "cursor_message_id": next_cursor, "peer_id_hash": provenance_hash(source.source_id, peer_id)})
-        return {"status": "DONE", "count": len(stored_messages), "cursor_message_id": next_cursor, "messages": stored_messages}
+        state = {"overlap": overlap}
+        if update_marker is not None:
+            state["update_marker"] = update_marker
+        now = _now()
+        self.store.apply_sync_batch(
+            source_id=source.source_id,
+            peer_id=peer_id,
+            messages=messages,
+            deleted_message_ids=deleted_message_ids,
+            deleted_at=now,
+            cursor_message_id=next_cursor,
+            updated_at=now,
+            state=state,
+        )
+        stored_messages = [
+            row
+            for row in (self.store.get_message(source_id=source.source_id, peer_id=peer_id, message_id=int(item["message_id"])) for item in messages)
+            if row is not None
+        ]
+        self.audit_log.record(action="SYNC_SOURCE", source_id=source.source_id, status="DONE", details={"count": len(stored_messages), "deleted_count": len(deleted_message_ids), "cursor_message_id": next_cursor, "peer_id_hash": provenance_hash(source.source_id, peer_id)})
+        return {"status": "DONE", "count": len(stored_messages), "deleted_count": len(deleted_message_ids), "cursor_message_id": next_cursor, "messages": stored_messages}
 
     def watch_source(self, source_ref: str, *, mode: TelegramAccessMode | str = TelegramAccessMode.READ_PUBLIC, min_message_id: int = 0) -> dict[str, object]:
         resolved = self._resolve_peer(source_ref, TelegramAccessMode(mode))
@@ -295,10 +367,26 @@ class TelegramGateway:
         }
         return self.memory_bridge.propose(fact=fact, recommendation=recommendation, provenance=provenance)
 
-    def run_public_integration_harness(self, source_id: str) -> dict[str, object]:
+    def run_public_integration_harness(self, source_id: str, *, mtproto: TelegramMTProtoFacade | None = None, limit: int | None = None, query: str = "quantum") -> dict[str, object]:
         source = self.allowlist.source(source_id)
         if source.handle != PUBLIC_INTEGRATION_SOURCE:
             raise TelegramGatewayError("INTEGRATION_SOURCE_MISMATCH", "integration source is not @midnightquantum")
+        if mtproto is not None:
+            history = self.get_history(PUBLIC_INTEGRATION_SOURCE, mode=TelegramAccessMode.READ_PUBLIC, limit=limit, mtproto=mtproto)
+            if history.get("status") != "DONE" or not history.get("messages"):
+                return {
+                    "status": "BLOCKED",
+                    "reason_code": "NO_PUBLIC_MESSAGES_READ",
+                    "source": PUBLIC_INTEGRATION_SOURCE,
+                    "messages": [],
+                }
+            search = self.search(query, source_ref=PUBLIC_INTEGRATION_SOURCE, mode=TelegramAccessMode.READ_PUBLIC, limit=source.bounded_limit(limit or source.max_page_size))
+            return {
+                "status": "DONE",
+                "source": PUBLIC_INTEGRATION_SOURCE,
+                "messages": history["messages"],
+                "search": search["messages"],
+            }
         if "telegram_mtproto_string_session" not in source.secret_refs:
             return {"status": "AUTH_REQUIRED", "source": PUBLIC_INTEGRATION_SOURCE}
         return {"status": "BLOCKED", "reason_code": "LIVE_AUTHORIZATION_REQUIRED", "source": PUBLIC_INTEGRATION_SOURCE}

@@ -92,6 +92,8 @@ class TelegramSource:
         self.require(TelegramAccessMode.READ_ALLOWED_PRIVATE)
         if source_ref in {self.source_id, self.handle, self.peer_id} and self.handle in self.allowlisted_peer_ids:
             return self.handle
+        if source_ref in {self.source_id, self.handle, self.peer_id} and self.peer_id in self.allowlisted_peer_ids:
+            return str(self.peer_id)
         if source_ref in self.allowlisted_peer_ids:
             return source_ref
         raise TelegramGatewayError("PEER_NOT_ALLOWLISTED", "private peer is not allowlisted")
