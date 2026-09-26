@@ -509,7 +509,7 @@ def _track_from_dict(value: object) -> Track:
         points=tuple(points),
         source_device_ref=str(value["source_device_ref"]),
         retention=TrackRetention(str(value["retention"])),
-        created_at=str(value.get("created_at")) if value.get("created_at") else Track.__dataclass_fields__["created_at"].default_factory(),
+        created_at=str(value.get("created_at")) if value.get("created_at") else utc_now(),
         derived_geometry=tuple(_coordinate(item) for item in value.get("derived_geometry", ()) if isinstance(item, Mapping)),
     )
 
@@ -543,7 +543,11 @@ def _serialize(value: object, *, include_private: bool) -> object:
             "provenance": value.provenance.to_dict(),
         }
     if isinstance(value, Mapping):
-        return {str(key): _serialize(item, include_private=include_private) for key, item in value.items()}
+        return {
+            str(key): _serialize(item, include_private=include_private)
+            for key, item in value.items()
+            if include_private or key != "navigation_url"
+        }
     if isinstance(value, (tuple, list)):
         return [_serialize(item, include_private=include_private) for item in value]
     return value

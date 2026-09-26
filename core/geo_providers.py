@@ -83,7 +83,9 @@ class GoogleMapsProviderAdapter:
         places = raw.get("places", ())
         if not isinstance(places, Sequence) or isinstance(places, (str, bytes)):
             raise ProviderNormalizationError()
-        return tuple(normalize_google_place(item) for item in places if isinstance(item, Mapping))
+        if any(not isinstance(item, Mapping) for item in places):
+            raise ProviderNormalizationError("PROVIDER_PLACE_RESULT_INVALID")
+        return tuple(normalize_google_place(item) for item in places)
 
     def place_details(self, provider_place_id: str) -> Place:
         raw = self._transport().place_details(provider_place_id)
@@ -110,7 +112,10 @@ class GoogleMapsProviderAdapter:
         distance = first.get("distanceMeters")
         duration = first.get("durationSeconds")
         if duration is None and isinstance(first.get("duration"), str) and first["duration"].endswith("s"):
-            duration = float(first["duration"][:-1])
+            try:
+                duration = float(first["duration"][:-1])
+            except ValueError as exc:
+                raise ProviderNormalizationError("PROVIDER_ROUTE_DURATION_INVALID") from exc
         return ProviderRouteResult(
             ordered_place_ids=tuple(str(item) for item in ordered),
             distance_m=float(distance) if distance is not None else None,

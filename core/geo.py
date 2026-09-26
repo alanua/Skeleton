@@ -532,7 +532,8 @@ class InMemoryGeoRepository:
         self._routes: dict[str, Route] = {}
         self._tracks: dict[str, Track] = {}
         self._visits: dict[str, VisitRecord] = {}
-        self._idempotency: dict[str, tuple[str, str]] = {}
+        self._place_idempotency: dict[str, tuple[str, str]] = {}
+        self._track_idempotency: dict[str, tuple[str, str]] = {}
         self.retention_seconds = dict(retention_seconds or {
             TrackRetention.RAW_SHORT: 7 * 24 * 60 * 60,
             TrackRetention.DERIVED_LONG: 365 * 24 * 60 * 60,
@@ -542,7 +543,7 @@ class InMemoryGeoRepository:
     def save_place(self, place: Place, *, idempotency_key: str | None = None) -> SaveResult:
         fingerprint = _fingerprint(place.to_dict())
         if idempotency_key is not None:
-            previous = self._idempotency.get(idempotency_key)
+            previous = self._place_idempotency.get(idempotency_key)
             if previous is not None:
                 if previous[1] != fingerprint:
                     raise GeoError("IDEMPOTENCY_KEY_REUSE_MISMATCH")
@@ -563,7 +564,7 @@ class InMemoryGeoRepository:
             self._places[place.place_id] = place
             result = SaveResult(place, "NEW")
         if idempotency_key is not None:
-            self._idempotency[idempotency_key] = (result.place.place_id, fingerprint)
+            self._place_idempotency[idempotency_key] = (result.place.place_id, fingerprint)
         return result
 
     def update_place(self, place: Place, *, idempotency_key: str | None = None) -> SaveResult:
@@ -639,12 +640,12 @@ class InMemoryGeoRepository:
     def ingest_track(self, track: Track, *, idempotency_key: str | None = None) -> Track:
         fingerprint = _fingerprint(track.to_dict())
         if idempotency_key is not None:
-            previous = self._idempotency.get(idempotency_key)
+            previous = self._track_idempotency.get(idempotency_key)
             if previous is not None:
                 if previous[1] != fingerprint:
                     raise GeoError("IDEMPOTENCY_KEY_REUSE_MISMATCH")
                 return self._tracks[previous[0]]
-            self._idempotency[idempotency_key] = (track.track_id, fingerprint)
+            self._track_idempotency[idempotency_key] = (track.track_id, fingerprint)
         self._tracks[track.track_id] = track
         return track
 
@@ -760,8 +761,15 @@ class GeoService:
                 kept.append(point)
         if len(track.points) > 1:
             kept.append(track.points[-1])
-        simplified = replace(track, points=tuple(kept), derived_geometry=tuple(point.coordinate for point in kept))
-        self.repository.ingest_track(simplified)
+        simplified = replace(
+            track,
+            track_id=f"{track.track_id}:simplified",
+            points=tuple(kept),
+            retention=TrackRetention.DERIVED_LONG,
+            created_at=utc_now(),
+            derived_geometry=tuple(point.coordinate for point in kept),
+        )
+        self.repository.ingest_track(simplified, idempotency_key=f"derived:{track.track_id}:{tolerance_m:g}")
         return simplified
 
     def detect_visit_candidate(self, *, track_id: str, place_id: str, radius_m: float = 100.0) -> VisitRecord:

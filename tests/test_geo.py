@@ -160,6 +160,8 @@ def test_track_retention_and_simplification_keep_raw_private() -> None:
     derived = GeoService(repository).simplify_track("raw-1", tolerance_m=2)
     assert len(derived.points) <= len(raw.points)
     assert derived.privacy_class == "PRIVATE_USER_GEO"
+    assert derived.track_id != raw.track_id
+    assert repository.get_track(raw.track_id).points == raw.points
     assert repository.purge_expired_tracks(now="2026-01-01T00:00:11Z") == ("raw-1",)
 
 
@@ -227,6 +229,17 @@ def test_public_receipts_never_include_raw_track_points_and_external_mutation_is
     blocked = dispatcher.call_tool("geo.provider.saved_list_mutate", {"action": "add"})
     assert blocked["status"] == "BLOCKED"
     assert blocked["reason_code"] == "EXTERNAL_MUTATION_REQUIRES_GATE"
+
+
+def test_public_navigation_projection_does_not_emit_private_destination_url() -> None:
+    dispatcher = GeoMcpDispatcher.synthetic(allow_private_read=False)
+    dispatcher.call_tool("geo.place.save", {"place": place(provider_id="nav-1").to_dict(), "idempotency_key": "nav-save"})
+    result = dispatcher.call_tool("geo.open.external_navigation", {"place_id": "place_synthetic_place", "provider": "google_maps"})
+    assert result["status"] == "OK"
+    assert "navigation_url" not in json.dumps(result)
+    private_dispatcher = GeoMcpDispatcher(dispatcher.service, allow_private_read=True)
+    private_result = private_dispatcher.call_tool("geo.open.external_navigation", {"place_id": "place_synthetic_place", "provider": "google_maps"})
+    assert "navigation_url" in private_result["payload"]
 
 
 def test_jsonrpc_lifecycle_uses_typed_dispatch() -> None:

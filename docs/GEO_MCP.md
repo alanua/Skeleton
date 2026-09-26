@@ -33,7 +33,7 @@ Tools are classified as:
 | Class | Examples | Rule |
 | --- | --- | --- |
 | `read_only` | search, nearby, geocode, route calculation, list/query | no canonical mutation |
-| `private_local_mutation` | save/update/archive/tag/rate, save route, ingest track | private state only; idempotency where applicable |
+| `private_local_mutation` | save/update/archive/tag/rate, save route, ingest track | private state only; place/track writes require idempotency keys; route IDs are stable save keys |
 | `external_mutation` | Google Saved List/My Maps changes | always separately gated; disabled in v1 |
 
 `save_place` remains a compatibility alias for `geo.place.save`, so the #3711 chat
