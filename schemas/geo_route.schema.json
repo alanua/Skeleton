@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://skeleton.invalid/schemas/geo_route.schema.json",
+  "title": "Skeleton Geo route",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["route_id", "route_kind", "stops", "travel_mode", "status", "provenance", "saved_at", "updated_at"],
+  "properties": {
+    "route_id": {"type": "string", "minLength": 1},
+    "route_kind": {"enum": ["planned", "provider_calculated"]},
+    "stops": {"type": "array", "minItems": 1, "items": {"type": "object", "additionalProperties": false, "required": ["place_id", "sequence", "dwell_seconds"], "properties": {"place_id": {"type": "string", "minLength": 1}, "sequence": {"type": "integer", "minimum": 0}, "dwell_seconds": {"type": "integer", "minimum": 0}}}},
+    "travel_mode": {"enum": ["driving", "walking", "bicycling", "transit"]},
+    "distance_m": {"type": ["number", "null"], "minimum": 0},
+    "duration_s": {"type": ["integer", "null"], "minimum": 0},
+    "provider": {"type": ["string", "null"]},
+    "provenance": {"$ref": "geo_provenance.schema.json"},
+    "status": {"enum": ["draft", "saved", "archived"]},
+    "associated_ref": {"type": ["string", "null"]},
+    "saved_at": {"type": "string", "minLength": 1},
+    "updated_at": {"type": "string", "minLength": 1}
+  }
+}
