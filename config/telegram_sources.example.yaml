@@ -1,0 +1,20 @@
+sources:
+  - source_id: midnightquantum_public_read
+    handle: "@midnightquantum"
+    peer_id: "-1000000000000"
+    title: "Midnight Quantum"
+    access_modes:
+      - READ_PUBLIC
+      - READ_ALLOWED_PRIVATE
+      - WRITE_BOT
+    secret_refs:
+      - telegram_api_id
+      - telegram_api_hash
+      - telegram_bot_token
+      - telegram_mtproto_string_session
+    allowlisted_peer_ids:
+      - "@midnightquantum"
+      - "-1000000000000"
+    max_page_size: 50
+    operator_secret_route: home_edge_devices_secrets_tab_to_bitwarden
+    media_downloads_default: false
