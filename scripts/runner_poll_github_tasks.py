@@ -20041,6 +20041,7 @@ def _skeleton_control_mcp_hetzner_receipt_valid(
     from core.runner_controller_privileged_gateway import (
         RECEIPT_SCHEMA_ID,
         SKELETON_CONTROL_MCP_HETZNER_SOURCE_BLOB,
+        SKELETON_CONTROL_MCP_HETZNER_SOURCE_SHA256,
     )
 
     status = receipt.get("status")
@@ -20085,45 +20086,57 @@ def _skeleton_control_mcp_hetzner_receipt_valid(
         )
     ):
         return False
+    installer_sha256 = receipt.get("installer_sha256")
+    if (
+        installer_sha256 is not None
+        and installer_sha256 != SKELETON_CONTROL_MCP_HETZNER_SOURCE_SHA256
+    ):
+        return False
     if status == "NEEDS_OPERATOR":
-        for key in (
-            "mutation_started",
-            "mutation_performed",
-            "external_side_effects_executed",
-        ):
-            if receipt.get(key) is not False:
-                return False
+        mutation_flags = (
+            receipt.get("mutation_started"),
+            receipt.get("mutation_performed"),
+            receipt.get("external_side_effects_executed"),
+        )
+        pre_dispatch_failure = mutation_flags == (False, False, False)
+        post_dispatch_failure = mutation_flags == (True, True, True)
+        if not pre_dispatch_failure and not post_dispatch_failure:
+            return False
         if reason == "SKELETON_CONTROL_MCP_HETZNER_LAUNCHER_VERIFIED":
             return False
-        for key in (
-            "activation_executed",
-            "protected_copy_verified",
-            "installed_artifacts_verified",
+        if (
+            "activation_executed" in receipt
+            and receipt.get("activation_executed") is not False
         ):
-            if key in receipt and receipt.get(key) is not False:
+            return False
+        if (
+            "installed_artifacts_verified" in receipt
+            and receipt.get("installed_artifacts_verified") is not False
+        ):
+            return False
+        if post_dispatch_failure and (
+            receipt.get("expected_main_sha") != expected_main_sha
+            or receipt.get("source_blob") != SKELETON_CONTROL_MCP_HETZNER_SOURCE_BLOB
+        ):
+            return False
+        if "protected_copy_verified" in receipt:
+            protected_copy_verified = receipt.get("protected_copy_verified")
+            if protected_copy_verified not in {True, False}:
+                return False
+            if pre_dispatch_failure and protected_copy_verified is True:
                 return False
         return True
     if (
-        receipt.get("expected_main_sha") != expected_main_sha
+        reason != "SKELETON_CONTROL_MCP_HETZNER_LAUNCHER_VERIFIED"
+        or receipt.get("expected_main_sha") != expected_main_sha
         or receipt.get("source_blob") != SKELETON_CONTROL_MCP_HETZNER_SOURCE_BLOB
+        or installer_sha256 != SKELETON_CONTROL_MCP_HETZNER_SOURCE_SHA256
+        or receipt.get("mutation_started") is not True
+        or receipt.get("mutation_performed") is not True
+        or receipt.get("external_side_effects_executed") is not True
+        or receipt.get("protected_copy_verified") is not True
+        or receipt.get("installed_artifacts_verified") is not True
         or receipt.get("activation_executed") is not False
-    ):
-        return False
-    for key in (
-        "stderr_exposed",
-        "env_exposed",
-        "private_paths_exposed",
-        "external_side_effects_executed",
-        "protected_copy_verified",
-        "installed_artifacts_verified",
-        "activation_executed",
-    ):
-        if key in receipt and receipt.get(key) not in {True, False}:
-            return False
-    installer_sha256 = receipt.get("installer_sha256")
-    if installer_sha256 is not None and (
-        not isinstance(installer_sha256, str)
-        or re.fullmatch(r"[0-9a-f]{64}", installer_sha256) is None
     ):
         return False
     return True
@@ -20220,6 +20233,8 @@ def skeleton_control_mcp_hetzner_activate_v1(body: str) -> str:
         f"gateway_status={gateway_status}",
         f"protected_copy_verified={str(receipt.get('protected_copy_verified') is True).lower()}",
         f"installed_artifacts_verified={str(receipt.get('installed_artifacts_verified') is True).lower()}",
+        f"mutation_started={str(receipt.get('mutation_started') is True).lower()}",
+        f"mutation_performed={str(receipt.get('mutation_performed') is True).lower()}",
         f"activation_executed={str(receipt.get('activation_executed') is True).lower()}",
         f"external_side_effects_executed={str(receipt.get('external_side_effects_executed') is True).lower()}",
         f"private_evidence_exposed={str(receipt.get('private_evidence_exposed') is True).lower()}",
