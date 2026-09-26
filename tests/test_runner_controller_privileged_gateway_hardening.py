@@ -844,3 +844,93 @@ def test_installer_live_account_is_locked_valid_shell_and_no_generic_root_shell(
     assert "systemctl reload" not in text
     assert "sudo bash" not in text
     assert "bash -c" not in text
+
+
+def test_fixed_git_root_drops_to_agent_with_fixed_clean_exec_chain(monkeypatch) -> None:
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def fake_run(
+        argv: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append((argv, kwargs))
+        return subprocess.CompletedProcess(argv, 0, "ok\n")
+
+    monkeypatch.setattr(gateway.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(gateway.subprocess, "run", fake_run)
+
+    checkout = Path("/home/agent/agent-dev/repos/Skeleton")
+    code, output = gateway._fixed_git(
+        checkout,
+        ("ls-tree", "a" * 40, "scripts/skeleton_control_mcp.py"),
+    )
+
+    assert code == 0
+    assert output == "ok\n"
+    assert len(calls) == 1
+    argv, kwargs = calls[0]
+    assert argv == [
+        "/usr/sbin/runuser",
+        "-u",
+        "agent",
+        "--",
+        "/usr/bin/env",
+        "-i",
+        "HOME=/nonexistent",
+        "LANG=C",
+        "LC_ALL=C",
+        "PATH=/usr/bin:/bin",
+        "GIT_CONFIG_GLOBAL=/dev/null",
+        "GIT_CONFIG_NOSYSTEM=1",
+        "GIT_TERMINAL_PROMPT=0",
+        "/usr/bin/git",
+        "ls-tree",
+        "a" * 40,
+        "scripts/skeleton_control_mcp.py",
+    ]
+    assert argv[0] != "/usr/bin/git"
+    assert kwargs["cwd"] == str(checkout)
+    assert kwargs["env"] == {
+        "HOME": "/nonexistent",
+        "LANG": "C",
+        "LC_ALL": "C",
+        "PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
+    }
+    assert kwargs["stderr"] == subprocess.DEVNULL
+    assert kwargs["stdout"] == subprocess.PIPE
+    assert kwargs["check"] is False
+
+
+def test_fixed_git_nonroot_keeps_direct_fixed_git_with_clean_env(monkeypatch) -> None:
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def fake_run(
+        argv: list[str], **kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append((argv, kwargs))
+        return subprocess.CompletedProcess(argv, 0, "blob\n")
+
+    monkeypatch.setattr(gateway.os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(gateway.subprocess, "run", fake_run)
+
+    checkout = Path("/tmp/synthetic-skeleton")
+    code, output = gateway._fixed_git(checkout, ("cat-file", "-t", "b" * 40))
+
+    assert code == 0
+    assert output == "blob\n"
+    assert len(calls) == 1
+    argv, kwargs = calls[0]
+    assert argv == ["/usr/bin/git", "cat-file", "-t", "b" * 40]
+    assert "/usr/sbin/runuser" not in argv
+    assert kwargs["cwd"] == str(checkout)
+    assert kwargs["env"] == {
+        "HOME": "/nonexistent",
+        "LANG": "C",
+        "LC_ALL": "C",
+        "PATH": "/usr/bin:/bin",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_TERMINAL_PROMPT": "0",
+    }
+    assert kwargs["stderr"] == subprocess.DEVNULL
+    assert kwargs["stdout"] == subprocess.PIPE
+    assert kwargs["check"] is False
