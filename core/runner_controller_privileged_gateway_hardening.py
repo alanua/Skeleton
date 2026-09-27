@@ -672,18 +672,39 @@ def _execute_runner_controller_refresh_trust_anchor_bundle(
 
 
 def _fixed_git(checkout_path: Path, args: tuple[str, ...]) -> tuple[int, str]:
-    completed = subprocess.run(
-        ["/usr/bin/git", *args],
-        cwd=str(checkout_path),
-        env={
+    git_env = {
+        "HOME": "/nonexistent",
+        "LANG": "C",
+        "LC_ALL": "C",
+        "PATH": "/usr/bin:/bin",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_TERMINAL_PROMPT": "0",
+    }
+    argv = ["/usr/bin/git", *args]
+    run_env = git_env
+    if os.geteuid() == 0:
+        argv = [
+            "/usr/sbin/runuser",
+            "-u",
+            "agent",
+            "--",
+            "/usr/bin/env",
+            "-i",
+            *(f"{key}={value}" for key, value in git_env.items()),
+            "/usr/bin/git",
+            *args,
+        ]
+        run_env = {
             "HOME": "/nonexistent",
             "LANG": "C",
             "LC_ALL": "C",
-            "PATH": "/usr/bin:/bin",
-            "GIT_CONFIG_GLOBAL": "/dev/null",
-            "GIT_CONFIG_NOSYSTEM": "1",
-            "GIT_TERMINAL_PROMPT": "0",
-        },
+            "PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
+        }
+    completed = subprocess.run(
+        argv,
+        cwd=str(checkout_path),
+        env=run_env,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
