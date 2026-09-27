@@ -123,7 +123,7 @@ def from_sleep_as_android_record(record: Mapping[str, Any]) -> SleepSession:
         start_ms=int(start_ms),
         end_ms=None if end_value in (None, "") else int(end_value),
         timezone_name=record.get("timezone"),
-        length_minutes=_optional_float(record.get("length")),
+        length_minutes=None,
         rating=_optional_float(record.get("rating")),
         quality=_optional_float(record.get("quality")),
         snore=_optional_float(record.get("snore")),
