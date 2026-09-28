@@ -100,6 +100,12 @@ _SENSITIVE_FRAGMENTS = frozenset(
     }
 )
 
+_DEFAULT_SKELETON_STATE_ROOT = Path("~/.local/state/skeleton")
+_MAX_PID = 4_194_304
+_RDC_AUTH_REQUIRED_FILE = "rdc-auth-required"
+_RDC_PID_FILE = "redmi-rdc-agent.pid"
+_SUPERVISOR_PID_FILE = "redmi-runtime-supervisor.pid"
+
 
 class AndroidGatewayError(ValueError):
     def __init__(self, reason_code: str, message: str) -> None:
@@ -311,6 +317,10 @@ class AndroidLocalCollector:
     disk_usage: Callable[[str], Any] = shutil.disk_usage
     uptime_reader: Callable[[], float | None] | None = None
     process_reader: Callable[[], Sequence[Mapping[str, Any]]] | None = None
+    pid_alive: Callable[[int], bool] | None = None
+    state_root: str | Path | None = None
+    state_file_exists: Callable[[Path], bool] | None = None
+    state_file_text: Callable[[Path], str | None] | None = None
     environ: Mapping[str, str] = field(default_factory=lambda: os.environ)
 
     def collect(self) -> list[AndroidObservation]:
@@ -412,32 +422,64 @@ class AndroidLocalCollector:
         )
 
     def collect_supervisor(self) -> AndroidObservation:
-        processes = list(self._read_processes())
-        names = {_safe_process_name(process.get("name")) for process in processes}
-        names.discard(None)
-        present = bool(names & {"skeleton-supervisor", "supervisord", "termux-wake-lock"})
-        return self._observation(
-            AndroidObservationKind.SUPERVISOR,
-            AndroidObservationQuality.OK if processes else AndroidObservationQuality.UNKNOWN,
-            0.7 if processes else 0.3,
-            {"state": "running" if present else "unknown", "process_count": min(len(processes), 512)},
-            {"collector": "local_process_scan", "bounded_process_evidence": True},
-        )
-
-    def collect_remote_desktop_state(self) -> AndroidObservation:
-        if _env_truthy(self.environ.get("SKELETON_RDC_AUTH_REQUIRED")):
-            state = RemoteDesktopState.AUTH_REQUIRED
+        state = "unknown"
+        quality = AndroidObservationQuality.UNKNOWN
+        confidence = 0.3
+        provenance: dict[str, Any] = {
+            "collector": "local_supervisor_state",
+            "registered_state_evidence": "unknown",
+        }
+        pid_evidence = self._registered_pid_evidence(_SUPERVISOR_PID_FILE)
+        if pid_evidence == "live":
+            state = "running"
+            quality = AndroidObservationQuality.OK
             confidence = 0.9
+            provenance["registered_state_evidence"] = "live"
+        elif pid_evidence in {"missing", "stale", "invalid"}:
+            state = "stopped"
+            quality = AndroidObservationQuality.OK
+            confidence = 0.75
+            provenance["registered_state_evidence"] = pid_evidence
         else:
             processes = list(self._read_processes())
             names = {_safe_process_name(process.get("name")) for process in processes}
             names.discard(None)
-            if names & {"rustdesk", "wayvnc", "x11vnc", "xrdp", "xrdp-sesman"}:
+            if "redmi-runtime-supervisor" in names:
+                state = "running"
+                quality = AndroidObservationQuality.DEGRADED
+                confidence = 0.45
+                provenance |= {
+                    "registered_state_evidence": "unevaluable",
+                    "bounded_process_evidence": True,
+                    "process_identity": "redmi-runtime-supervisor",
+                }
+        return self._observation(
+            AndroidObservationKind.SUPERVISOR,
+            quality,
+            confidence,
+            {"state": state},
+            provenance,
+        )
+
+    def collect_remote_desktop_state(self) -> AndroidObservation:
+        auth_hold = self._state_file_exists(_RDC_AUTH_REQUIRED_FILE)
+        if auth_hold is True or _env_truthy(self.environ.get("SKELETON_RDC_AUTH_REQUIRED")):
+            state = RemoteDesktopState.AUTH_REQUIRED
+            confidence = 0.9
+            evidence = "auth_required"
+        elif auth_hold is None:
+            state = RemoteDesktopState.UNKNOWN
+            confidence = 0.3
+            evidence = "unevaluable"
+        else:
+            pid_evidence = self._registered_pid_evidence(_RDC_PID_FILE)
+            evidence = pid_evidence
+            if pid_evidence == "live":
                 state = RemoteDesktopState.ONLINE
-                confidence = 0.7
-            elif processes:
+                confidence = 0.9
+            elif pid_evidence in {"missing", "stale", "invalid"}:
                 state = RemoteDesktopState.OFFLINE
-                confidence = 0.6
+                confidence = 0.75
             else:
                 state = RemoteDesktopState.UNKNOWN
                 confidence = 0.3
@@ -446,7 +488,11 @@ class AndroidLocalCollector:
             AndroidObservationQuality.OK if state != RemoteDesktopState.UNKNOWN else AndroidObservationQuality.UNKNOWN,
             confidence,
             {"state": state.value},
-            {"collector": "local_rdc_state", "local_hold_checked": True, "bounded_process_evidence": True},
+            {
+                "collector": "local_rdc_state",
+                "hold_checked": True,
+                "registered_state_evidence": evidence,
+            },
         )
 
     def _observation(
@@ -493,6 +539,53 @@ class AndroidLocalCollector:
         if self.process_reader is not None:
             return list(self.process_reader())[:128]
         return _default_process_reader()
+
+    def _state_root(self) -> Path:
+        root = self.state_root if self.state_root is not None else _DEFAULT_SKELETON_STATE_ROOT
+        return Path(root).expanduser()
+
+    def _state_path(self, filename: str) -> Path:
+        return self._state_root() / filename
+
+    def _state_file_exists(self, filename: str) -> bool | None:
+        path = self._state_path(filename)
+        try:
+            if self.state_file_exists is not None:
+                return bool(self.state_file_exists(path))
+            return path.exists()
+        except OSError:
+            return None
+
+    def _read_state_text(self, filename: str) -> str | None:
+        path = self._state_path(filename)
+        try:
+            if self.state_file_text is not None:
+                return self.state_file_text(path)
+            return path.read_text(encoding="utf-8")
+        except OSError:
+            return None
+
+    def _registered_pid_evidence(self, filename: str) -> str:
+        exists = self._state_file_exists(filename)
+        if exists is None:
+            return "unevaluable"
+        if exists is False:
+            return "missing"
+        raw = self._read_state_text(filename)
+        if raw is None:
+            return "unevaluable"
+        pid = _parse_registered_pid(raw)
+        if pid is None:
+            return "invalid"
+        return "live" if self._pid_alive(pid) else "stale"
+
+    def _pid_alive(self, pid: int) -> bool:
+        if self.pid_alive is not None:
+            try:
+                return bool(self.pid_alive(pid))
+            except OSError:
+                return False
+        return _default_pid_alive(pid)
 
 
 def normalize_observation(observation: AndroidObservation | Mapping[str, Any]) -> AndroidObservation:
@@ -703,6 +796,20 @@ def _default_process_reader() -> list[Mapping[str, Any]]:
     return processes
 
 
+def _default_pid_alive(pid: int) -> bool:
+    if _parse_registered_pid(str(pid)) is None:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
 def _safe_status(value: Any) -> str:
     if not isinstance(value, str):
         return "unknown"
@@ -724,6 +831,14 @@ def _safe_process_name(value: Any) -> str | None:
         return None
     name = Path(value).name.strip().lower()
     return name if re.fullmatch(r"[a-z0-9_.+-]{1,64}", name) else None
+
+
+def _parse_registered_pid(value: str) -> int | None:
+    text = value.strip()
+    if re.fullmatch(r"[0-9]{1,10}", text) is None:
+        return None
+    pid = int(text)
+    return pid if 1 <= pid <= _MAX_PID else None
 
 
 def _env_truthy(value: str | None) -> bool:

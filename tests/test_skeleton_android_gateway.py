@@ -25,6 +25,44 @@ from core.skeleton_android_gateway import (
 OBSERVED_AT = "2026-09-28T00:00:00Z"
 
 
+def _state_access(files: dict[str, str], *, unreadable: bool = False):
+    def exists(path: Path) -> bool:
+        if unreadable:
+            raise OSError("state unavailable")
+        return path.name in files
+
+    def read_text(path: Path) -> str | None:
+        if unreadable:
+            raise OSError("state unavailable")
+        if path.name not in files:
+            raise OSError("missing")
+        return files[path.name]
+
+    return exists, read_text
+
+
+def _collector_with_state(
+    files: dict[str, str],
+    *,
+    live_pids: set[int] | None = None,
+    unreadable: bool = False,
+    process_reader=lambda: [],
+    environ: dict[str, str] | None = None,
+) -> AndroidLocalCollector:
+    exists, read_text = _state_access(files, unreadable=unreadable)
+    return AndroidLocalCollector(
+        node_id="android-node",
+        clock=lambda: OBSERVED_AT,
+        run_command=lambda command, timeout: (_ for _ in ()).throw(FileNotFoundError(command[0])),
+        process_reader=process_reader,
+        state_root=Path("state-root-not-emitted"),
+        state_file_exists=exists,
+        state_file_text=read_text,
+        pid_alive=lambda pid: pid in (live_pids or set()),
+        environ=environ or {},
+    )
+
+
 def _observation(**overrides: object) -> AndroidObservation:
     values = {
         "source": "termux.local",
@@ -149,7 +187,10 @@ def test_collector_normalizes_battery_storage_runtime_network_supervisor_and_rdc
         run_command=run_command,
         disk_usage=lambda path: usage,
         uptime_reader=lambda: 123.456,
-        process_reader=lambda: [{"name": "skeleton-supervisor"}, {"name": "xrdp"}],
+        process_reader=lambda: [{"name": "xrdp"}],
+        state_file_exists=lambda path: path.name in {"redmi-runtime-supervisor.pid", "redmi-rdc-agent.pid"},
+        state_file_text=lambda path: "31337",
+        pid_alive=lambda pid: pid == 31337,
     )
 
     by_kind = {observation.kind: observation for observation in collector.collect()}
@@ -177,10 +218,9 @@ def test_collector_normalizes_battery_storage_runtime_network_supervisor_and_rdc
 
 
 def test_remote_desktop_auth_required_hold_uses_enum() -> None:
-    collector = AndroidLocalCollector(
-        node_id="android-node",
-        clock=lambda: OBSERVED_AT,
-        run_command=lambda command, timeout: (_ for _ in ()).throw(FileNotFoundError(command[0])),
+    collector = _collector_with_state(
+        {"redmi-rdc-agent.pid": "31337"},
+        live_pids={31337},
         process_reader=lambda: [{"name": "xrdp"}],
         environ={"SKELETON_RDC_AUTH_REQUIRED": "true"},
     )
@@ -189,6 +229,93 @@ def test_remote_desktop_auth_required_hold_uses_enum() -> None:
 
     assert observation.kind == AndroidObservationKind.REMOTE_DESKTOP_STATE
     assert observation.payload == {"state": RemoteDesktopState.AUTH_REQUIRED.value}
+
+
+def test_remote_desktop_auth_hold_file_overrides_live_registered_pid() -> None:
+    collector = _collector_with_state({"rdc-auth-required": "", "redmi-rdc-agent.pid": "31337"}, live_pids={31337})
+
+    observation = collector.collect_remote_desktop_state()
+
+    assert observation.payload == {"state": RemoteDesktopState.AUTH_REQUIRED.value}
+    assert observation.provenance["registered_state_evidence"] == "auth_required"
+
+
+def test_remote_desktop_live_registered_pid_is_online() -> None:
+    collector = _collector_with_state({"redmi-rdc-agent.pid": "31337"}, live_pids={31337})
+
+    observation = collector.collect_remote_desktop_state()
+
+    assert observation.payload == {"state": RemoteDesktopState.ONLINE.value}
+    assert observation.provenance["registered_state_evidence"] == "live"
+
+
+def test_remote_desktop_stale_registered_pid_is_offline() -> None:
+    collector = _collector_with_state({"redmi-rdc-agent.pid": "31337"}, live_pids=set())
+
+    observation = collector.collect_remote_desktop_state()
+
+    assert observation.payload == {"state": RemoteDesktopState.OFFLINE.value}
+    assert observation.provenance["registered_state_evidence"] == "stale"
+
+
+def test_remote_desktop_missing_registered_pid_with_readable_state_is_offline() -> None:
+    collector = _collector_with_state({})
+
+    observation = collector.collect_remote_desktop_state()
+
+    assert observation.payload == {"state": RemoteDesktopState.OFFLINE.value}
+    assert observation.provenance["registered_state_evidence"] == "missing"
+
+
+def test_remote_desktop_unreadable_local_state_is_unknown() -> None:
+    collector = _collector_with_state({}, unreadable=True)
+
+    observation = collector.collect_remote_desktop_state()
+
+    assert observation.payload == {"state": RemoteDesktopState.UNKNOWN.value}
+    assert observation.quality == AndroidObservationQuality.UNKNOWN
+    assert observation.provenance["registered_state_evidence"] == "unevaluable"
+
+
+def test_supervisor_live_registered_pid_is_running() -> None:
+    collector = _collector_with_state({"redmi-runtime-supervisor.pid": "31337"}, live_pids={31337})
+
+    observation = collector.collect_supervisor()
+
+    assert observation.payload == {"state": "running"}
+    assert observation.provenance["registered_state_evidence"] == "live"
+
+
+@pytest.mark.parametrize("files", [{"redmi-runtime-supervisor.pid": "31337"}, {}])
+def test_supervisor_stale_or_missing_registered_pid_is_not_running(files: dict[str, str]) -> None:
+    collector = _collector_with_state(files, live_pids=set(), process_reader=lambda: [{"name": "xrdp"}])
+
+    observation = collector.collect_supervisor()
+
+    assert observation.payload == {"state": "stopped"}
+    assert observation.provenance["registered_state_evidence"] in {"stale", "missing"}
+
+
+def test_state_evidence_does_not_emit_pid_path_or_auth_material() -> None:
+    collector = _collector_with_state(
+        {"rdc-auth-required": "", "redmi-rdc-agent.pid": "31337", "redmi-runtime-supervisor.pid": "31338"},
+        live_pids={31337, 31338},
+    )
+
+    encoded = json.dumps(
+        [
+            collector.collect_remote_desktop_state().to_mapping(),
+            collector.collect_supervisor().to_mapping(),
+        ],
+        sort_keys=True,
+    )
+
+    assert "31337" not in encoded
+    assert "31338" not in encoded
+    assert "state-root-not-emitted" not in encoded
+    assert "rdc-auth-required" not in encoded
+    assert "redmi-rdc-agent.pid" not in encoded
+    assert "redmi-runtime-supervisor.pid" not in encoded
 
 
 def test_missing_termux_commands_degrade_without_crashing() -> None:

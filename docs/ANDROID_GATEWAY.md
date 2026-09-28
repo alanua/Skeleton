@@ -51,10 +51,12 @@ The collector only uses explicit allowlisted local evidence:
 - local filesystem APIs for storage capacity and usage
 - local uptime/basic process health for runtime
 - coarse network availability only
-- bounded local process evidence for supervisor state
-- local hold/process evidence for remote desktop state
+- registered local state evidence for supervisor state via `redmi-runtime-supervisor.pid`
+- registered local state evidence for remote desktop state via `rdc-auth-required` and `redmi-rdc-agent.pid`
 
 Missing Termux commands degrade to unavailable or unknown observations instead of crashing.
+
+The collector resolves its local Skeleton state root from the production default and may be pointed at a test/operator state root. Observations only report bounded evidence classes such as `live`, `stale`, `missing`, or `unevaluable`; they do not include PID values, command lines, auth material, or absolute state paths.
 
 ## Privacy Boundary
 
