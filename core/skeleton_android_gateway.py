@@ -19,7 +19,7 @@ from typing import Any
 
 ANDROID_OBSERVATION_SCHEMA = "skeleton.android.observation.v1"
 ANDROID_SNAPSHOT_SCHEMA = "skeleton.android.snapshot.v1"
-ANDROID_GATEWAY_CONTRACT_VERSION = "1.0.0"
+ANDROID_GATEWAY_CONTRACT_VERSION = "1.1.0"
 ANDROID_GATEWAY_PRIVACY_BOUNDARY = "local_first_bounded_android_observations"
 
 _MAX_DEPTH = 6
@@ -118,6 +118,8 @@ class AndroidObservationKind(StrEnum):
     STORAGE = "storage"
     RUNTIME = "runtime"
     NETWORK = "network"
+    SENSOR_CAPABILITIES = "sensor_capabilities"
+    STEP_ACTIVITY = "step_activity"
     SUPERVISOR = "supervisor"
     REMOTE_DESKTOP_STATE = "remote_desktop_state"
 
@@ -329,6 +331,8 @@ class AndroidLocalCollector:
             self.collect_storage(),
             self.collect_runtime(),
             self.collect_network(),
+            self.collect_sensor_capabilities(),
+            self.collect_step_activity(),
             self.collect_supervisor(),
             self.collect_remote_desktop_state(),
         ]
@@ -419,6 +423,76 @@ class AndroidLocalCollector:
             0.6,
             {"network_available": connected, "transport": "wifi" if connected else "unknown"},
             evidence | {"termux_network_available": True},
+        )
+
+
+    def collect_sensor_capabilities(self) -> AndroidObservation:
+        evidence = {
+            "collector": "termux-sensor-list",
+            "raw_names_discarded": True,
+            "timeout_seconds": 3.0,
+        }
+        result = self._run(["termux-sensor", "-l"], timeout=3.0)
+        if result is None or result.returncode != 0:
+            return self._observation(
+                AndroidObservationKind.SENSOR_CAPABILITIES,
+                AndroidObservationQuality.UNAVAILABLE,
+                0.2,
+                {"capability_count": None, "sensor_types": []},
+                evidence | {"available": False},
+            )
+        try:
+            raw = json.loads(result.stdout or "{}")
+        except json.JSONDecodeError:
+            raw = {}
+        names = raw.get("sensors") if isinstance(raw, Mapping) else None
+        capabilities: set[str] = set()
+        if isinstance(names, Sequence) and not isinstance(names, bytes | bytearray | str):
+            for name in names[:_MAX_ITEMS]:
+                capability = _sensor_capability_type(name)
+                if capability is not None:
+                    capabilities.add(capability)
+        normalized = sorted(capabilities)
+        quality = AndroidObservationQuality.OK if normalized else AndroidObservationQuality.DEGRADED
+        return self._observation(
+            AndroidObservationKind.SENSOR_CAPABILITIES,
+            quality,
+            0.9 if normalized else 0.4,
+            {"capability_count": len(normalized), "sensor_types": normalized},
+            evidence | {"available": True},
+        )
+
+    def collect_step_activity(self) -> AndroidObservation:
+        evidence = {
+            "collector": "termux-sensor-step-counter",
+            "semantic": "counter_since_boot",
+            "timeout_seconds": 4.0,
+        }
+        result = self._run(["termux-sensor", "-s", "STEP_COUNTER", "-n", "1"], timeout=4.0)
+        if result is None or result.returncode != 0:
+            return self._observation(
+                AndroidObservationKind.STEP_ACTIVITY,
+                AndroidObservationQuality.UNAVAILABLE,
+                0.2,
+                {"counter_since_boot": None},
+                evidence | {"available": False},
+            )
+        try:
+            raw = json.loads(result.stdout or "{}")
+        except json.JSONDecodeError:
+            raw = {}
+        record = raw.get("STEP_COUNTER") if isinstance(raw, Mapping) else None
+        values = record.get("values") if isinstance(record, Mapping) else None
+        counter: int | None = None
+        if isinstance(values, Sequence) and not isinstance(values, bytes | bytearray | str) and values:
+            counter = _bounded_number(values[0], minimum=0, maximum=1_000_000_000, as_int=True)
+        quality = AndroidObservationQuality.OK if counter is not None else AndroidObservationQuality.DEGRADED
+        return self._observation(
+            AndroidObservationKind.STEP_ACTIVITY,
+            quality,
+            0.9 if counter is not None else 0.4,
+            {"counter_since_boot": counter},
+            evidence | {"available": True},
         )
 
     def collect_supervisor(self) -> AndroidObservation:
@@ -770,6 +844,54 @@ def _contains_sensitive_identifier(value: str) -> bool:
         if all(0 <= int(part) <= 255 for part in parts):
             return True
     return False
+
+
+
+def _sensor_capability_type(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    name = re.sub(r"[^a-z0-9]+", "_", value.strip().lower()).strip("_")
+    if not name or len(name) > 128:
+        return None
+    if "step_counter" in name:
+        return "step_counter"
+    if "step_detector" in name:
+        return "step_detector"
+    if "significant_motion" in name:
+        return "significant_motion"
+    if "geomagnetic_rotation_vector" in name:
+        return "geomagnetic_rotation_vector"
+    if "game_rotation_vector" in name:
+        return "game_rotation_vector"
+    if "rotation_vector" in name:
+        return "rotation_vector"
+    if "linearaccel" in name or "linear_accel" in name:
+        return "linear_acceleration"
+    if "accelerometer" in name or "uncali_acc" in name:
+        return "accelerometer"
+    if "magnetometer" in name or "uncali_mag" in name:
+        return "magnetometer"
+    if "gyroscope" in name:
+        return "gyroscope"
+    if "proximity" in name or "prox" in name:
+        return "proximity"
+    if "gravity" in name:
+        return "gravity"
+    if "tilt" in name:
+        return "tilt"
+    if "pickup" in name:
+        return "pickup"
+    if "device_orientation" in name:
+        return "device_orientation"
+    if "orientation" in name:
+        return "orientation"
+    if "light" in name:
+        return "light"
+    if "touch" in name:
+        return "touch"
+    if "sar" in name:
+        return "sar"
+    return None
 
 
 def _default_run_command(command: Sequence[str], timeout: float) -> subprocess.CompletedProcess[str]:
