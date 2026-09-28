@@ -4,54 +4,42 @@ import argparse
 import json
 import sys
 from collections.abc import Sequence
-from json import JSONDecodeError
 from pathlib import Path
-from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from core.skeleton_android_gateway import SkeletonAndroidGateway
-
-_DEFAULT_GENERATED_AT = "1970-01-01T00:00:00Z"
+from core.skeleton_android_gateway import AndroidLocalCollector, AndroidObservationStore, snapshot_from_observations
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
-    gateway = SkeletonAndroidGateway(clock=lambda: args.generated_at)
-    for path in args.event:
-        event = _load_json(path)
-        gateway.try_ingest(event)
-    print(json.dumps(gateway.snapshot(), indent=2, sort_keys=True))
+    collector = AndroidLocalCollector(node_id=args.node_id, source=args.source)
+    observations = collector.collect()
+    snapshot = snapshot_from_observations(observations)
+    encoded = json.dumps(snapshot, indent=2, sort_keys=True) + "\n"
+
+    if args.sqlite:
+        with AndroidObservationStore(args.sqlite) as store:
+            for observation in observations:
+                store.ingest(observation)
+
+    if args.output:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(encoded, encoding="utf-8")
+
+    sys.stdout.write(encoded)
     return 0
 
 
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Render a public-safe provider-neutral Android telemetry gateway snapshot."
-    )
-    parser.add_argument(
-        "--event",
-        action="append",
-        type=Path,
-        default=[],
-        help="Path to a JSON telemetry event. May be passed more than once.",
-    )
-    parser.add_argument(
-        "--generated-at",
-        default=_DEFAULT_GENERATED_AT,
-        help="Snapshot timestamp to embed. Defaults to a fixed value for deterministic output.",
-    )
+    parser = argparse.ArgumentParser(description="Collect a local-first Android Gateway v1 snapshot.")
+    parser.add_argument("--output", type=Path, help="Optional path that receives the snapshot JSON.")
+    parser.add_argument("--sqlite", type=Path, help="Optional local SQLite path for explicit observation persistence.")
+    parser.add_argument("--node-id", default="local-android", help="Bounded local node identifier.")
+    parser.add_argument("--source", default="termux.local", help="Bounded local observation source identifier.")
     return parser.parse_args(argv)
-
-
-def _load_json(path: Path) -> Any:
-    try:
-        with path.open("r", encoding="utf-8") as handle:
-            return json.load(handle)
-    except (OSError, JSONDecodeError) as exc:
-        raise SystemExit(f"failed to load event JSON: {path}") from exc
 
 
 if __name__ == "__main__":

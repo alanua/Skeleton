@@ -2,136 +2,103 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
-from collections.abc import Mapping, Sequence
+import shutil
+import sqlite3
+import subprocess
+import time
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 from hashlib import sha256
+from pathlib import Path
 from typing import Any
-from uuid import uuid4
 
 
-ANDROID_GATEWAY_EVENT_SCHEMA = "skeleton.android_gateway.telemetry_event.v1"
-ANDROID_GATEWAY_RECEIPT_SCHEMA = "skeleton.android_gateway.receipt.v1"
-ANDROID_GATEWAY_SNAPSHOT_SCHEMA = "skeleton.android_gateway.snapshot.v1"
+ANDROID_OBSERVATION_SCHEMA = "skeleton.android.observation.v1"
+ANDROID_SNAPSHOT_SCHEMA = "skeleton.android.snapshot.v1"
 ANDROID_GATEWAY_CONTRACT_VERSION = "1.0.0"
-ANDROID_GATEWAY_PRIVACY_BOUNDARY = "public_safe_metadata_only"
-ANDROID_GATEWAY_RUNTIME_MUTATION = False
+ANDROID_GATEWAY_PRIVACY_BOUNDARY = "local_first_bounded_android_observations"
 
-_SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
-_SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
-_KEY_TOKEN_RE = re.compile(r"[_.:-]+")
-_MAX_EVENTS = 500
-_MAX_KEY_DEPTH = 4
+_MAX_DEPTH = 6
+_MAX_ITEMS = 128
 _MAX_STRING_LENGTH = 512
+_MAX_KEY_LENGTH = 96
+_SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
+_IPV4_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
+_IPV6_RE = re.compile(r"\b(?:[0-9A-Fa-f]{1,4}:){2,}[0-9A-Fa-f:]{1,4}\b")
+_MAC_RE = re.compile(r"\b[0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5}\b")
+_CAMEL_RE = re.compile(r"(?<!^)(?=[A-Z])")
 
-_SENSITIVE_KEY_PARTS = frozenset(
+_SENSITIVE_TOKENS = frozenset(
     {
-        "account",
+        "2fa",
         "address",
+        "audio",
         "auth",
+        "bank",
+        "banking",
         "body",
+        "bssid",
+        "call",
+        "calls",
         "clipboard",
         "contact",
+        "contacts",
         "cookie",
+        "cookies",
         "credential",
-        "email",
-        "fcm",
-        "hostname",
-        "imei",
-        "imsi",
+        "credentials",
+        "file",
+        "files",
+        "finance",
+        "financial",
+        "intent",
+        "intents",
+        "ip",
         "lat",
+        "latitude",
         "location",
+        "logcat",
         "lon",
+        "longitude",
         "mac",
         "message",
+        "messages",
+        "messenger",
+        "microphone",
+        "mutation",
+        "mutations",
         "notification",
+        "notifications",
         "password",
-        "phone",
-        "private",
-        "secret",
-        "serial",
+        "passwords",
+        "photo",
+        "photos",
         "sms",
         "ssid",
-        "subject",
         "text",
         "token",
-        "user",
+        "tokens",
     }
 )
 
-_FORBIDDEN_PAYLOAD_KEYS = frozenset(
-    {
-        "app_content",
-        "content",
-        "device_runtime",
-        "files",
-        "intents",
-        "mutations",
-        "raw_logcat",
-        "runtime",
-    }
-)
-
-_ALLOWED_EVENT_KEYS = frozenset({"schema", "event_id", "provider", "event_type", "observed_at", "payload"})
-
-_FORBIDDEN_KEY_PARTS = frozenset(
-    {
-        "content",
-        "files",
-        "intents",
-        "mutations",
-        "runtime",
-    }
-)
-
-_FORBIDDEN_KEY_FRAGMENTS = frozenset(
+_SENSITIVE_FRAGMENTS = frozenset(
     {
         "appcontent",
-        "deviceruntime",
-        "intent",
-        "mutation",
-        "rawlogcat",
-    }
-)
-
-_SENSITIVE_EXACT_KEYS = frozenset(
-    {
-        "access_token",
-        "android_id",
-        "exact_alarm",
-    }
-)
-
-_SENSITIVE_KEY_FRAGMENTS = frozenset(
-    {
-        "androidid",
+        "authtoken",
+        "bssid",
         "clipboard",
-        "cookie",
         "credential",
-        "email",
-        "exactalarm",
-        "imei",
-        "imsi",
-        "location",
-        "message",
-        "notification",
+        "messagebody",
+        "notificationbody",
         "password",
-        "phone",
         "rawlogcat",
-        "secret",
-        "serial",
-        "sms",
-        "ssid",
-        "token",
+        "smsbody",
     }
 )
-
-
-class AndroidGatewayDecision(StrEnum):
-    ACCEPTED = "accepted"
-    REJECTED = "rejected"
 
 
 class AndroidGatewayError(ValueError):
@@ -140,222 +107,624 @@ class AndroidGatewayError(ValueError):
         self.reason_code = reason_code
 
 
+class AndroidObservationKind(StrEnum):
+    BATTERY = "battery"
+    STORAGE = "storage"
+    RUNTIME = "runtime"
+    NETWORK = "network"
+    SUPERVISOR = "supervisor"
+    REMOTE_DESKTOP_STATE = "remote_desktop_state"
+
+
+class RemoteDesktopState(StrEnum):
+    ONLINE = "ONLINE"
+    OFFLINE = "OFFLINE"
+    AUTH_REQUIRED = "AUTH_REQUIRED"
+    UNKNOWN = "UNKNOWN"
+
+
+class AndroidObservationQuality(StrEnum):
+    OK = "ok"
+    DEGRADED = "degraded"
+    UNAVAILABLE = "unavailable"
+    UNKNOWN = "unknown"
+
+
 @dataclass(frozen=True)
-class AndroidTelemetryEvent:
-    provider: str
-    event_type: str
+class AndroidObservation:
+    source: str
+    node_id: str
+    observed_at: str
+    kind: AndroidObservationKind | str
+    quality: AndroidObservationQuality | str
+    confidence: float
     payload: Mapping[str, Any] = field(default_factory=dict)
-    observed_at: str | None = None
-    event_id: str = field(default_factory=lambda: f"android-telemetry-{uuid4()}")
-    schema: str = ANDROID_GATEWAY_EVENT_SCHEMA
+    provenance: Mapping[str, Any] = field(default_factory=dict)
+    observation_id: str | None = None
 
-    def to_mapping(self) -> dict[str, Any]:
-        return {
-            "schema": self.schema,
-            "event_id": self.event_id,
-            "provider": self.provider,
-            "event_type": self.event_type,
+    def __post_init__(self) -> None:
+        normalized = normalize_observation_mapping(self.to_mapping(include_id=False))
+        expected_id = observation_id_for(normalized)
+        if self.observation_id is not None and self.observation_id != expected_id:
+            raise AndroidGatewayError("INVALID_OBSERVATION_ID", "observation_id does not match canonical content")
+        object.__setattr__(self, "source", normalized["source"])
+        object.__setattr__(self, "node_id", normalized["node_id"])
+        object.__setattr__(self, "observed_at", normalized["observed_at"])
+        object.__setattr__(self, "kind", AndroidObservationKind(normalized["kind"]))
+        object.__setattr__(self, "quality", AndroidObservationQuality(normalized["quality"]))
+        object.__setattr__(self, "confidence", normalized["confidence"])
+        object.__setattr__(self, "payload", normalized["payload"])
+        object.__setattr__(self, "provenance", normalized["provenance"])
+        object.__setattr__(self, "observation_id", expected_id)
+
+    @classmethod
+    def from_mapping(cls, raw: Mapping[str, Any]) -> AndroidObservation:
+        normalized = normalize_observation_mapping(raw)
+        expected_id = observation_id_for(normalized)
+        if raw.get("observation_id") is not None and raw["observation_id"] != expected_id:
+            raise AndroidGatewayError("INVALID_OBSERVATION_ID", "observation_id does not match canonical content")
+        return cls(
+            source=normalized["source"],
+            node_id=normalized["node_id"],
+            observed_at=normalized["observed_at"],
+            kind=normalized["kind"],
+            quality=normalized["quality"],
+            confidence=normalized["confidence"],
+            payload=normalized["payload"],
+            provenance=normalized["provenance"],
+            observation_id=expected_id,
+        )
+
+    def to_mapping(self, *, include_id: bool = True) -> dict[str, Any]:
+        result = {
+            "schema": ANDROID_OBSERVATION_SCHEMA,
+            "source": self.source,
+            "node_id": self.node_id,
             "observed_at": self.observed_at,
+            "kind": str(self.kind),
+            "quality": str(self.quality),
+            "confidence": self.confidence,
             "payload": dict(self.payload),
+            "provenance": dict(self.provenance),
         }
+        if include_id and self.observation_id is not None:
+            result["observation_id"] = self.observation_id
+        return result
 
 
-class SkeletonAndroidGateway:
-    """Provider-neutral Android telemetry intake with a public-safe boundary."""
+class AndroidObservationStore:
+    def __init__(self, path: str | Path) -> None:
+        self.path = Path(path)
+        self._conn = sqlite3.connect(str(self.path))
+        self._conn.row_factory = sqlite3.Row
+        self._create_schema()
 
-    def __init__(self, *, clock: Any | None = None, max_events: int = _MAX_EVENTS) -> None:
-        if max_events < 1:
-            raise ValueError("max_events must be at least 1")
-        self._clock = clock or (lambda: datetime.now(UTC))
-        self._max_events = max_events
-        self._events: list[dict[str, Any]] = []
-        self._rejections: list[dict[str, Any]] = []
+    def close(self) -> None:
+        self._conn.close()
 
-    def ingest(self, event: AndroidTelemetryEvent | Mapping[str, Any]) -> dict[str, Any]:
-        normalized = _normalize_event(event, now=self._now_iso())
-        receipt = {
-            "schema": ANDROID_GATEWAY_RECEIPT_SCHEMA,
-            "contract_version": ANDROID_GATEWAY_CONTRACT_VERSION,
-            "decision": AndroidGatewayDecision.ACCEPTED.value,
-            "event_id": normalized["event_id"],
-            "provider": normalized["provider"],
-            "event_type": normalized["event_type"],
-            "observed_at": normalized["observed_at"],
-            "digest": normalized["digest"],
-            "privacy_boundary": ANDROID_GATEWAY_PRIVACY_BOUNDARY,
-            "runtime_mutation": ANDROID_GATEWAY_RUNTIME_MUTATION,
-            "reason": "public_safe_provider_neutral_telemetry",
-        }
-        if len(self._events) >= self._max_events:
-            self._events.pop(0)
-        self._events.append(normalized)
-        return receipt
+    def __enter__(self) -> AndroidObservationStore:
+        return self
 
-    def try_ingest(self, event: AndroidTelemetryEvent | Mapping[str, Any]) -> dict[str, Any]:
-        try:
-            return self.ingest(event)
-        except AndroidGatewayError as exc:
-            now = self._now_iso()
-            rejection = {
-                "schema": ANDROID_GATEWAY_RECEIPT_SCHEMA,
-                "contract_version": ANDROID_GATEWAY_CONTRACT_VERSION,
-                "decision": AndroidGatewayDecision.REJECTED.value,
-                "event_id": _safe_event_id(event),
-                "provider": _safe_optional_string(event, "provider", pattern=_SAFE_ID_RE),
-                "event_type": _safe_optional_string(event, "event_type", pattern=_SAFE_NAME_RE),
-                "observed_at": now,
-                "privacy_boundary": ANDROID_GATEWAY_PRIVACY_BOUNDARY,
-                "runtime_mutation": ANDROID_GATEWAY_RUNTIME_MUTATION,
-                "reason": exc.reason_code,
-            }
-            self._rejections.append(rejection)
-            return rejection
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        self.close()
+
+    def ingest(self, observation: AndroidObservation | Mapping[str, Any]) -> AndroidObservation:
+        normalized = normalize_observation(observation)
+        with self._conn:
+            self._conn.execute(
+                """
+                INSERT OR IGNORE INTO android_observations (
+                    observation_id, schema, source, node_id, observed_at, kind,
+                    quality, confidence, payload_json, provenance_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    normalized.observation_id,
+                    ANDROID_OBSERVATION_SCHEMA,
+                    normalized.source,
+                    normalized.node_id,
+                    normalized.observed_at,
+                    normalized.kind.value,
+                    normalized.quality.value,
+                    normalized.confidence,
+                    canonical_json(normalized.payload),
+                    canonical_json(normalized.provenance),
+                ),
+            )
+        return normalized
+
+    def latest(self, kind: AndroidObservationKind | str | None = None) -> AndroidObservation | None:
+        if kind is None:
+            row = self._conn.execute(
+                "SELECT * FROM android_observations ORDER BY observed_at DESC, rowid DESC LIMIT 1"
+            ).fetchone()
+        else:
+            row = self._conn.execute(
+                """
+                SELECT * FROM android_observations
+                WHERE kind = ?
+                ORDER BY observed_at DESC, rowid DESC
+                LIMIT 1
+                """,
+                (AndroidObservationKind(kind).value,),
+            ).fetchone()
+        return _row_to_observation(row) if row is not None else None
+
+    def by_kind(self, kind: AndroidObservationKind | str, *, limit: int = 50) -> list[AndroidObservation]:
+        rows = self._conn.execute(
+            """
+            SELECT * FROM android_observations
+            WHERE kind = ?
+            ORDER BY observed_at DESC, rowid DESC
+            LIMIT ?
+            """,
+            (AndroidObservationKind(kind).value, _bounded_limit(limit)),
+        ).fetchall()
+        return [_row_to_observation(row) for row in rows]
+
+    def recent(self, *, limit: int = 50) -> list[AndroidObservation]:
+        rows = self._conn.execute(
+            "SELECT * FROM android_observations ORDER BY observed_at DESC, rowid DESC LIMIT ?",
+            (_bounded_limit(limit),),
+        ).fetchall()
+        return [_row_to_observation(row) for row in rows]
+
+    def _create_schema(self) -> None:
+        with self._conn:
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS android_observations (
+                    observation_id TEXT PRIMARY KEY,
+                    schema TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    node_id TEXT NOT NULL,
+                    observed_at TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    quality TEXT NOT NULL,
+                    confidence REAL NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    provenance_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            self._conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_android_observations_kind_time
+                ON android_observations(kind, observed_at DESC)
+                """
+            )
+            self._conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_android_observations_time
+                ON android_observations(observed_at DESC)
+                """
+            )
+
+
+@dataclass(frozen=True)
+class AndroidLocalCollector:
+    node_id: str = "local-android"
+    source: str = "termux.local"
+    clock: Callable[[], datetime | str] = lambda: datetime.now(UTC)
+    run_command: Callable[[Sequence[str], float], subprocess.CompletedProcess[str]] | None = None
+    disk_usage: Callable[[str], Any] = shutil.disk_usage
+    uptime_reader: Callable[[], float | None] | None = None
+    process_reader: Callable[[], Sequence[Mapping[str, Any]]] | None = None
+    environ: Mapping[str, str] = field(default_factory=lambda: os.environ)
+
+    def collect(self) -> list[AndroidObservation]:
+        return [
+            self.collect_battery(),
+            self.collect_storage(),
+            self.collect_runtime(),
+            self.collect_network(),
+            self.collect_supervisor(),
+            self.collect_remote_desktop_state(),
+        ]
 
     def snapshot(self) -> dict[str, Any]:
-        provider_counts: dict[str, int] = {}
-        event_type_counts: dict[str, int] = {}
-        for event in self._events:
-            provider_counts[event["provider"]] = provider_counts.get(event["provider"], 0) + 1
-            event_type_counts[event["event_type"]] = event_type_counts.get(event["event_type"], 0) + 1
+        return snapshot_from_observations(self.collect(), generated_at=self._now_iso())
 
-        return {
-            "schema": ANDROID_GATEWAY_SNAPSHOT_SCHEMA,
-            "contract_version": ANDROID_GATEWAY_CONTRACT_VERSION,
-            "generated_at": self._now_iso(),
-            "privacy_boundary": ANDROID_GATEWAY_PRIVACY_BOUNDARY,
-            "runtime_mutation": ANDROID_GATEWAY_RUNTIME_MUTATION,
-            "event_count": len(self._events),
-            "rejection_count": len(self._rejections),
-            "providers": dict(sorted(provider_counts.items())),
-            "event_types": dict(sorted(event_type_counts.items())),
-            "events": list(self._events),
-            "rejections": list(self._rejections),
+    def collect_battery(self) -> AndroidObservation:
+        evidence = {"collector": "termux-battery-status", "timeout_seconds": 2.0}
+        result = self._run(["termux-battery-status"], timeout=2.0)
+        if result is None or result.returncode != 0:
+            return self._observation(
+                AndroidObservationKind.BATTERY,
+                AndroidObservationQuality.UNAVAILABLE,
+                0.2,
+                {"level_percent": None, "status": "unknown", "charging": None, "temperature_c": None},
+                evidence | {"available": False},
+            )
+        try:
+            raw = json.loads(result.stdout or "{}")
+        except json.JSONDecodeError:
+            raw = {}
+        status = _safe_status(raw.get("status"))
+        payload = {
+            "level_percent": _bounded_number(raw.get("percentage"), minimum=0, maximum=100, as_int=True),
+            "status": status,
+            "charging": status in {"charging", "full"} if status != "unknown" else None,
+            "temperature_c": _bounded_number(raw.get("temperature"), minimum=-20, maximum=90),
         }
+        quality = AndroidObservationQuality.OK if payload["level_percent"] is not None else AndroidObservationQuality.DEGRADED
+        return self._observation(AndroidObservationKind.BATTERY, quality, 0.9, payload, evidence | {"available": True})
+
+    def collect_storage(self) -> AndroidObservation:
+        evidence = {"collector": "local_filesystem", "path": "home"}
+        try:
+            usage = self.disk_usage(str(Path.home()))
+        except OSError:
+            return self._observation(
+                AndroidObservationKind.STORAGE,
+                AndroidObservationQuality.UNAVAILABLE,
+                0.2,
+                {"total_bytes": None, "used_bytes": None, "free_bytes": None, "used_percent": None},
+                evidence | {"available": False},
+            )
+        used = int(usage.total) - int(usage.free)
+        payload = {
+            "total_bytes": int(usage.total),
+            "used_bytes": used,
+            "free_bytes": int(usage.free),
+            "used_percent": round((used / int(usage.total)) * 100, 2) if int(usage.total) else None,
+        }
+        return self._observation(AndroidObservationKind.STORAGE, AndroidObservationQuality.OK, 0.95, payload, evidence | {"available": True})
+
+    def collect_runtime(self) -> AndroidObservation:
+        uptime = self._read_uptime()
+        payload = {
+            "uptime_seconds": round(uptime, 3) if uptime is not None else None,
+            "python_process_pid_present": True,
+            "health": "ok" if uptime is not None else "unknown",
+        }
+        quality = AndroidObservationQuality.OK if uptime is not None else AndroidObservationQuality.UNKNOWN
+        return self._observation(
+            AndroidObservationKind.RUNTIME,
+            quality,
+            0.8 if uptime is not None else 0.3,
+            payload,
+            {"collector": "local_runtime", "pid_evidence": "self"},
+        )
+
+    def collect_network(self) -> AndroidObservation:
+        evidence = {"collector": "coarse_network_state", "sensitive_fields_discarded": True, "timeout_seconds": 2.0}
+        result = self._run(["termux-wifi-connectioninfo"], timeout=2.0)
+        if result is None or result.returncode != 0:
+            return self._observation(
+                AndroidObservationKind.NETWORK,
+                AndroidObservationQuality.UNKNOWN,
+                0.3,
+                {"network_available": None, "transport": "unknown"},
+                evidence | {"termux_network_available": False},
+            )
+        try:
+            connected = bool(json.loads(result.stdout or "{}"))
+        except json.JSONDecodeError:
+            connected = bool((result.stdout or "").strip())
+        return self._observation(
+            AndroidObservationKind.NETWORK,
+            AndroidObservationQuality.OK,
+            0.6,
+            {"network_available": connected, "transport": "wifi" if connected else "unknown"},
+            evidence | {"termux_network_available": True},
+        )
+
+    def collect_supervisor(self) -> AndroidObservation:
+        processes = list(self._read_processes())
+        names = {_safe_process_name(process.get("name")) for process in processes}
+        names.discard(None)
+        present = bool(names & {"skeleton-supervisor", "supervisord", "termux-wake-lock"})
+        return self._observation(
+            AndroidObservationKind.SUPERVISOR,
+            AndroidObservationQuality.OK if processes else AndroidObservationQuality.UNKNOWN,
+            0.7 if processes else 0.3,
+            {"state": "running" if present else "unknown", "process_count": min(len(processes), 512)},
+            {"collector": "local_process_scan", "bounded_process_evidence": True},
+        )
+
+    def collect_remote_desktop_state(self) -> AndroidObservation:
+        if _env_truthy(self.environ.get("SKELETON_RDC_AUTH_REQUIRED")):
+            state = RemoteDesktopState.AUTH_REQUIRED
+            confidence = 0.9
+        else:
+            processes = list(self._read_processes())
+            names = {_safe_process_name(process.get("name")) for process in processes}
+            names.discard(None)
+            if names & {"rustdesk", "wayvnc", "x11vnc", "xrdp", "xrdp-sesman"}:
+                state = RemoteDesktopState.ONLINE
+                confidence = 0.7
+            elif processes:
+                state = RemoteDesktopState.OFFLINE
+                confidence = 0.6
+            else:
+                state = RemoteDesktopState.UNKNOWN
+                confidence = 0.3
+        return self._observation(
+            AndroidObservationKind.REMOTE_DESKTOP_STATE,
+            AndroidObservationQuality.OK if state != RemoteDesktopState.UNKNOWN else AndroidObservationQuality.UNKNOWN,
+            confidence,
+            {"state": state.value},
+            {"collector": "local_rdc_state", "local_hold_checked": True, "bounded_process_evidence": True},
+        )
+
+    def _observation(
+        self,
+        kind: AndroidObservationKind,
+        quality: AndroidObservationQuality,
+        confidence: float,
+        payload: Mapping[str, Any],
+        provenance: Mapping[str, Any],
+    ) -> AndroidObservation:
+        return AndroidObservation(
+            source=self.source,
+            node_id=self.node_id,
+            observed_at=self._now_iso(),
+            kind=kind,
+            quality=quality,
+            confidence=confidence,
+            payload=payload,
+            provenance=provenance,
+        )
 
     def _now_iso(self) -> str:
-        value = self._clock()
-        if isinstance(value, datetime):
-            if value.tzinfo is None:
-                value = value.replace(tzinfo=UTC)
-            return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
-        return str(value)
+        return _coerce_observed_at(self.clock())
+
+    def _run(self, command: Sequence[str], *, timeout: float) -> subprocess.CompletedProcess[str] | None:
+        runner = self.run_command or _default_run_command
+        try:
+            return runner(command, timeout)
+        except (FileNotFoundError, OSError, subprocess.SubprocessError):
+            return None
+
+    def _read_uptime(self) -> float | None:
+        if self.uptime_reader is not None:
+            value = self.uptime_reader()
+            return float(value) if value is not None and math.isfinite(float(value)) and float(value) >= 0 else None
+        try:
+            with open("/proc/uptime", "r", encoding="utf-8") as handle:
+                return float(handle.read().split()[0])
+        except (OSError, ValueError, IndexError):
+            value = time.monotonic()
+            return value if math.isfinite(value) and value >= 0 else None
+
+    def _read_processes(self) -> Sequence[Mapping[str, Any]]:
+        if self.process_reader is not None:
+            return list(self.process_reader())[:128]
+        return _default_process_reader()
 
 
-def snapshot_from_events(events: Sequence[AndroidTelemetryEvent | Mapping[str, Any]]) -> dict[str, Any]:
-    gateway = SkeletonAndroidGateway()
-    for event in events:
-        gateway.try_ingest(event)
-    return gateway.snapshot()
+def normalize_observation(observation: AndroidObservation | Mapping[str, Any]) -> AndroidObservation:
+    if isinstance(observation, AndroidObservation):
+        return observation
+    return AndroidObservation.from_mapping(observation)
 
 
-def event_digest(event: Mapping[str, Any]) -> str:
-    encoded = json.dumps(event, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
-    return sha256(encoded).hexdigest()
-
-
-def _normalize_event(event: AndroidTelemetryEvent | Mapping[str, Any], *, now: str) -> dict[str, Any]:
-    raw = event.to_mapping() if isinstance(event, AndroidTelemetryEvent) else dict(event)
-    if raw.get("schema") != ANDROID_GATEWAY_EVENT_SCHEMA:
-        raise AndroidGatewayError("INVALID_SCHEMA", "event schema is invalid")
-    unknown_keys = set(raw) - _ALLOWED_EVENT_KEYS
-    if unknown_keys:
-        raise AndroidGatewayError("UNSUPPORTED_EVENT_FIELD", "event contains fields outside the v1 metadata contract")
-
-    event_id = _safe_required_string(raw, "event_id", pattern=_SAFE_ID_RE)
-    provider = _safe_required_string(raw, "provider", pattern=_SAFE_ID_RE)
-    event_type = _safe_required_string(raw, "event_type", pattern=_SAFE_NAME_RE)
-    payload = raw.get("payload", {})
-    if not isinstance(payload, Mapping):
-        raise AndroidGatewayError("INVALID_PAYLOAD", "payload must be an object")
-
-    sanitized_payload = _sanitize_payload(payload)
-    observed_at = raw.get("observed_at") or now
-    if not isinstance(observed_at, str) or len(observed_at) > _MAX_STRING_LENGTH:
-        raise AndroidGatewayError("INVALID_OBSERVED_AT", "observed_at must be a bounded string")
-
+def normalize_observation_mapping(raw: Mapping[str, Any]) -> dict[str, Any]:
+    allowed = {
+        "schema",
+        "observation_id",
+        "source",
+        "node_id",
+        "observed_at",
+        "kind",
+        "quality",
+        "confidence",
+        "payload",
+        "provenance",
+    }
+    if set(raw) - allowed:
+        raise AndroidGatewayError("UNSUPPORTED_OBSERVATION_FIELD", "observation contains unsupported fields")
+    if raw.get("schema") != ANDROID_OBSERVATION_SCHEMA:
+        raise AndroidGatewayError("INVALID_SCHEMA", "observation schema is invalid")
+    try:
+        kind = AndroidObservationKind(raw.get("kind"))
+        quality = AndroidObservationQuality(raw.get("quality"))
+    except ValueError as exc:
+        raise AndroidGatewayError("UNSUPPORTED_OBSERVATION_KIND", "observation kind or quality is unsupported") from exc
+    payload = raw.get("payload")
+    provenance = raw.get("provenance")
+    if not isinstance(payload, Mapping) or not isinstance(provenance, Mapping):
+        raise AndroidGatewayError("INVALID_OBSERVATION_JSON", "payload and provenance must be JSON objects")
     return {
-        "schema": ANDROID_GATEWAY_EVENT_SCHEMA,
-        "event_id": event_id,
-        "provider": provider,
-        "event_type": event_type,
-        "observed_at": observed_at,
-        "payload": sanitized_payload,
-        "digest": event_digest(
-            {
-                "event_id": event_id,
-                "provider": provider,
-                "event_type": event_type,
-                "observed_at": observed_at,
-                "payload": sanitized_payload,
-            }
-        ),
+        "schema": ANDROID_OBSERVATION_SCHEMA,
+        "source": _safe_required_string(raw.get("source"), "source"),
+        "node_id": _safe_required_string(raw.get("node_id"), "node_id"),
+        "observed_at": _coerce_observed_at(raw.get("observed_at")),
+        "kind": kind.value,
+        "quality": quality.value,
+        "confidence": _normalize_confidence(raw.get("confidence")),
+        "payload": validate_public_json(payload, label="payload"),
+        "provenance": validate_public_json(provenance, label="provenance"),
     }
 
 
-def _sanitize_payload(payload: Mapping[str, Any], *, depth: int = 0) -> dict[str, Any]:
-    if depth > _MAX_KEY_DEPTH:
-        raise AndroidGatewayError("PAYLOAD_TOO_DEEP", "payload nesting is too deep")
-    sanitized: dict[str, Any] = {}
-    for key, value in sorted(payload.items(), key=lambda item: str(item[0])):
-        if not isinstance(key, str) or not _SAFE_NAME_RE.fullmatch(key):
-            raise AndroidGatewayError("INVALID_PAYLOAD_KEY", "payload keys must be safe bounded identifiers")
-        if _is_sensitive_payload_key(key):
-            raise AndroidGatewayError("SENSITIVE_PAYLOAD_REJECTED", "payload contains sensitive app or device content")
-        sanitized[key] = _sanitize_value(value, depth=depth)
-    return sanitized
+def observation_id_for(normalized_without_id: Mapping[str, Any]) -> str:
+    canonical = {key: normalized_without_id[key] for key in sorted(normalized_without_id) if key != "observation_id"}
+    return f"android-observation-{sha256(canonical_json(canonical).encode('utf-8')).hexdigest()}"
 
 
-def _sanitize_value(value: Any, *, depth: int) -> Any:
-    if depth > _MAX_KEY_DEPTH:
-        raise AndroidGatewayError("PAYLOAD_TOO_DEEP", "payload nesting is too deep")
-    if value is None or isinstance(value, bool | int):
+def snapshot_from_observations(
+    observations: Sequence[AndroidObservation | Mapping[str, Any]], *, generated_at: str | datetime | None = None
+) -> dict[str, Any]:
+    normalized = [normalize_observation(observation).to_mapping() for observation in observations]
+    kind_counts: dict[str, int] = {}
+    for observation in normalized:
+        kind_counts[observation["kind"]] = kind_counts.get(observation["kind"], 0) + 1
+    return {
+        "schema": ANDROID_SNAPSHOT_SCHEMA,
+        "contract_version": ANDROID_GATEWAY_CONTRACT_VERSION,
+        "generated_at": _coerce_observed_at(generated_at or datetime.now(UTC)),
+        "privacy_boundary": ANDROID_GATEWAY_PRIVACY_BOUNDARY,
+        "local_first": True,
+        "observation_count": len(normalized),
+        "kinds": dict(sorted(kind_counts.items())),
+        "observations": sorted(normalized, key=lambda item: (item["kind"], item["observation_id"])),
+    }
+
+
+def validate_public_json(value: Any, *, label: str = "value", depth: int = 0) -> Any:
+    if depth > _MAX_DEPTH:
+        raise AndroidGatewayError("JSON_TOO_DEEP", f"{label} is too deeply nested")
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, int) and not isinstance(value, bool):
         return value
     if isinstance(value, float):
         if not math.isfinite(value):
-            raise AndroidGatewayError("UNSUPPORTED_PAYLOAD_VALUE", "payload numbers must be finite")
+            raise AndroidGatewayError("NON_FINITE_JSON_NUMBER", f"{label} contains a non-finite number")
         return value
     if isinstance(value, str):
         if len(value) > _MAX_STRING_LENGTH:
-            raise AndroidGatewayError("PAYLOAD_STRING_TOO_LONG", "payload strings must be bounded")
+            raise AndroidGatewayError("JSON_STRING_TOO_LONG", f"{label} contains an overlong string")
+        if _contains_sensitive_identifier(value):
+            raise AndroidGatewayError("SENSITIVE_JSON_REJECTED", f"{label} contains sensitive identifier content")
         return value
     if isinstance(value, Mapping):
-        return _sanitize_payload(value, depth=depth + 1)
-    if isinstance(value, list | tuple):
-        if len(value) > 100:
-            raise AndroidGatewayError("PAYLOAD_LIST_TOO_LONG", "payload lists must be bounded")
-        return [_sanitize_value(item, depth=depth + 1) for item in value]
-    raise AndroidGatewayError("UNSUPPORTED_PAYLOAD_VALUE", "payload values must be JSON-safe primitives")
+        if len(value) > _MAX_ITEMS:
+            raise AndroidGatewayError("JSON_OBJECT_TOO_LARGE", f"{label} contains too many keys")
+        normalized: dict[str, Any] = {}
+        for key, item in sorted(value.items(), key=lambda pair: str(pair[0])):
+            if not isinstance(key, str) or not key or len(key) > _MAX_KEY_LENGTH:
+                raise AndroidGatewayError("INVALID_JSON_KEY", f"{label} contains an invalid key")
+            if _is_sensitive_key(key):
+                raise AndroidGatewayError("SENSITIVE_JSON_REJECTED", f"{label} contains sensitive keys")
+            normalized[key] = validate_public_json(item, label=label, depth=depth + 1)
+        return normalized
+    if isinstance(value, Sequence) and not isinstance(value, bytes | bytearray | str):
+        if len(value) > _MAX_ITEMS:
+            raise AndroidGatewayError("JSON_ARRAY_TOO_LARGE", f"{label} contains too many items")
+        return [validate_public_json(item, label=label, depth=depth + 1) for item in value]
+    raise AndroidGatewayError("UNSUPPORTED_JSON_VALUE", f"{label} contains unsupported JSON values")
 
 
-def _safe_required_string(raw: Mapping[str, Any], key: str, *, pattern: re.Pattern[str]) -> str:
-    value = raw.get(key)
-    if not isinstance(value, str) or pattern.fullmatch(value) is None:
-        raise AndroidGatewayError(f"INVALID_{key.upper()}", f"{key} must be a safe bounded string")
+def canonical_json(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False)
+
+
+def _row_to_observation(row: sqlite3.Row) -> AndroidObservation:
+    return AndroidObservation(
+        observation_id=row["observation_id"],
+        source=row["source"],
+        node_id=row["node_id"],
+        observed_at=row["observed_at"],
+        kind=row["kind"],
+        quality=row["quality"],
+        confidence=float(row["confidence"]),
+        payload=json.loads(row["payload_json"]),
+        provenance=json.loads(row["provenance_json"]),
+    )
+
+
+def _bounded_limit(limit: int) -> int:
+    if not isinstance(limit, int) or limit < 1:
+        raise ValueError("limit must be a positive integer")
+    return min(limit, 500)
+
+
+def _safe_required_string(value: Any, field_name: str) -> str:
+    if not isinstance(value, str) or _SAFE_ID_RE.fullmatch(value) is None:
+        raise AndroidGatewayError(f"INVALID_{field_name.upper()}", f"{field_name} must be a safe bounded string")
+    if _contains_sensitive_identifier(value):
+        raise AndroidGatewayError(f"SENSITIVE_{field_name.upper()}", f"{field_name} contains sensitive identifier content")
     return value
 
 
-def _is_sensitive_payload_key(key: str) -> bool:
-    lowered = key.lower()
-    if lowered in _FORBIDDEN_PAYLOAD_KEYS or lowered in _SENSITIVE_EXACT_KEYS:
+def _normalize_confidence(value: Any) -> float:
+    if not isinstance(value, int | float) or isinstance(value, bool) or not math.isfinite(float(value)):
+        raise AndroidGatewayError("INVALID_CONFIDENCE", "confidence must be a finite number")
+    confidence = float(value)
+    if confidence < 0 or confidence > 1:
+        raise AndroidGatewayError("INVALID_CONFIDENCE", "confidence must be in [0, 1]")
+    return confidence
+
+
+def _coerce_observed_at(value: Any) -> str:
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=UTC)
+        return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
+    if not isinstance(value, str) or len(value) > _MAX_STRING_LENGTH:
+        raise AndroidGatewayError("INVALID_OBSERVED_AT", "observed_at must be a bounded string")
+    if _contains_sensitive_identifier(value):
+        raise AndroidGatewayError("INVALID_OBSERVED_AT", "observed_at contains sensitive content")
+    return value
+
+
+def _is_sensitive_key(key: str) -> bool:
+    normalized = _normalize_key(key)
+    if any(fragment in normalized for fragment in _SENSITIVE_FRAGMENTS):
         return True
-    compact = re.sub(r"[_.:-]+", "", lowered)
-    if any(fragment in compact for fragment in _FORBIDDEN_KEY_FRAGMENTS):
+    return any(token in _SENSITIVE_TOKENS for token in _key_tokens(key))
+
+
+def _key_tokens(key: str) -> set[str]:
+    split_camel = _CAMEL_RE.sub("_", key).lower()
+    return {token for token in re.split(r"[^a-z0-9]+", split_camel) if token}
+
+
+def _normalize_key(key: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", _CAMEL_RE.sub("_", key).lower())
+
+
+def _contains_sensitive_identifier(value: str) -> bool:
+    if _MAC_RE.search(value) or _IPV6_RE.search(value):
         return True
-    if any(fragment in compact for fragment in _SENSITIVE_KEY_FRAGMENTS):
-        return True
-    parts = _KEY_TOKEN_RE.split(lowered)
-    return any(part in _FORBIDDEN_KEY_PARTS or part in _SENSITIVE_KEY_PARTS for part in parts)
+    match = _IPV4_RE.search(value)
+    if match:
+        parts = match.group(0).split(".")
+        if all(0 <= int(part) <= 255 for part in parts):
+            return True
+    return False
 
 
-def _safe_event_id(event: AndroidTelemetryEvent | Mapping[str, Any]) -> str | None:
-    raw = event.to_mapping() if isinstance(event, AndroidTelemetryEvent) else event
-    value = raw.get("event_id") if isinstance(raw, Mapping) else None
-    return value if isinstance(value, str) and _SAFE_ID_RE.fullmatch(value) else None
+def _default_run_command(command: Sequence[str], timeout: float) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(list(command), check=False, capture_output=True, text=True, timeout=timeout)
 
 
-def _safe_optional_string(
-    event: AndroidTelemetryEvent | Mapping[str, Any], key: str, *, pattern: re.Pattern[str]
-) -> str | None:
-    raw = event.to_mapping() if isinstance(event, AndroidTelemetryEvent) else event
-    value = raw.get(key) if isinstance(raw, Mapping) else None
-    return value if isinstance(value, str) and pattern.fullmatch(value) else None
+def _default_process_reader() -> list[Mapping[str, Any]]:
+    proc = Path("/proc")
+    processes: list[Mapping[str, Any]] = []
+    if not proc.exists():
+        return processes
+    try:
+        children = list(proc.iterdir())
+    except OSError:
+        return processes
+    for child in children:
+        if not child.name.isdigit() or len(processes) >= 128:
+            continue
+        try:
+            name = (child / "comm").read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        processes.append({"name": name})
+    return processes
+
+
+def _safe_status(value: Any) -> str:
+    if not isinstance(value, str):
+        return "unknown"
+    normalized = value.strip().lower().replace("_", "-")
+    return normalized if normalized in {"charging", "discharging", "full", "not-charging", "unknown"} else "unknown"
+
+
+def _bounded_number(value: Any, *, minimum: float, maximum: float, as_int: bool = False) -> int | float | None:
+    if not isinstance(value, int | float) or isinstance(value, bool) or not math.isfinite(float(value)):
+        return None
+    number = float(value)
+    if number < minimum or number > maximum:
+        return None
+    return int(number) if as_int else round(number, 3)
+
+
+def _safe_process_name(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    name = Path(value).name.strip().lower()
+    return name if re.fullmatch(r"[a-z0-9_.+-]{1,64}", name) else None
+
+
+def _env_truthy(value: str | None) -> bool:
+    return value is not None and value.strip().lower() in {"1", "true", "yes", "on", "hold", "required"}

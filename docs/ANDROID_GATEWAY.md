@@ -1,48 +1,79 @@
 # Android Gateway
 
-`core/skeleton_android_gateway.py` defines the first provider-neutral Android telemetry gateway slice. It is intentionally a public-safe metadata contract, not an Android runtime integration.
+`core/skeleton_android_gateway.py` defines the shared local-first Android Gateway v1. It is not a second control plane, remote executor, upload path, or Android runtime mutation surface.
 
 ## Contract
 
-- Event schema: `skeleton.android_gateway.telemetry_event.v1`
-- Receipt schema: `skeleton.android_gateway.receipt.v1`
-- Snapshot schema: `skeleton.android_gateway.snapshot.v1`
+- Observation schema: `skeleton.android.observation.v1`
+- Snapshot schema: `skeleton.android.snapshot.v1`
 - Contract version: `1.0.0`
 
-The gateway accepts bounded JSON metadata with:
+Each observation is a typed `AndroidObservation` with:
 
-- `event_id`
-- `provider`
-- `event_type`
+- `observation_id`
+- `source`
+- `node_id`
 - `observed_at`
+- `kind`
+- `quality`
+- `confidence`
 - `payload`
+- `provenance`
 
-Events fail closed when they contain fields outside this schema. Android runtime details, raw app content, mutation requests, logs, files, intents, and device identifiers must not be supplied as adjacent top-level fields or nested payload keys.
+`observation_id` is deterministic from canonical normalized content. The gateway does not use UUIDs or random IDs for observation identity.
 
-Providers are opaque identifiers. The gateway does not import provider SDKs, call Android APIs, open device connections, deploy apps, mutate runtime state, or collect private topology.
+The v1 kind set is intentionally strict:
 
-Accepted receipts include the normalized event digest, `privacy_boundary: public_safe_metadata_only`, and `runtime_mutation: false` so callers can audit that the gateway stayed inside the v1 public-safe metadata contract.
+- `battery`
+- `storage`
+- `runtime`
+- `network`
+- `supervisor`
+- `remote_desktop_state`
+
+Arbitrary provider/app events such as `screen.rendered`, `app.started`, and generic provider event types are not accepted. Remote desktop state is limited to `ONLINE`, `OFFLINE`, `AUTH_REQUIRED`, and `UNKNOWN`.
+
+## Local Collection
+
+`scripts/android_gateway_snapshot.py` runs the local collector and emits a `skeleton.android.snapshot.v1` JSON snapshot to stdout. It also supports `--output PATH` for writing the same snapshot to disk.
+
+Observation persistence is optional and local-only:
+
+```bash
+python3 scripts/android_gateway_snapshot.py --sqlite android_gateway.sqlite3
+```
+
+The store uses Python `sqlite3`, creates its local schema safely, and uses `observation_id` as the primary key so re-ingesting the same normalized observation is idempotent. Query helpers expose `latest(kind=None)`, `by_kind(kind, limit=...)`, and `recent(limit=...)`.
+
+The collector only uses explicit allowlisted local evidence:
+
+- `termux-battery-status` for battery level, status, charging state, and temperature when available
+- local filesystem APIs for storage capacity and usage
+- local uptime/basic process health for runtime
+- coarse network availability only
+- bounded local process evidence for supervisor state
+- local hold/process evidence for remote desktop state
+
+Missing Termux commands degrade to unavailable or unknown observations instead of crashing.
 
 ## Privacy Boundary
 
-Payloads are rejected when keys indicate sensitive device identifiers, credentials, contact details, location, notification or message text, raw logs, app content, runtime details, intents, files, or mutation requests. The key checks are case-insensitive and cover common delimiter and camelCase forms such as `raw_logcat`, `rawLogcat`, `app_content`, and `appContent`. Public-safe metric names such as `latency_ms` remain valid; location fields such as `lat`, `lon`, and `location` fail closed. Non-finite numbers and over-deep objects or arrays are rejected because accepted payloads must be bounded JSON-safe metadata.
+Payload and provenance are recursively validated and fail closed. The gateway rejects SSID, BSSID, IP/MAC identifiers, location fields, clipboard data, SMS/call/contact material, notification/message bodies, credentials, auth/2FA/token/cookie/password material, finance/banking data, messenger content, microphone/audio/photo references, raw logcat, files, intents, mutations, and arbitrary app content.
 
-Accepted snapshots include:
+Accepted JSON must be bounded, finite, deterministic, and canonicalizable. Network collection may inspect local Termux network data internally, but SSID/BSSID/IP/MAC fields are discarded and must not appear in emitted payload or provenance.
 
-- aggregate provider counts
-- aggregate event-type counts
-- accepted public-safe events
-- rejected receipt summaries
-- `runtime_mutation: false`
+The gateway does not perform SSH, HTTP, uploads, remote execution, clipboard reads, notification reads, app-private scraping, MemoryGate writes, or network persistence.
 
-## Snapshot CLI
+## Adapter Direction
 
-Render a deterministic JSON snapshot from one or more event files:
+The Home APK is a future adapter surface only. It should feed this shared local-first gateway when that adapter exists; it should not become a separate control plane.
 
-```bash
-python3 scripts/android_gateway_snapshot.py --event event.json
-```
+Future adapters explicitly include:
 
-The CLI defaults `generated_at` to `1970-01-01T00:00:00Z` so repeated runs over the same event files produce identical output. Pass `--generated-at` to embed a specific review timestamp.
+- Health Connect
+- Sleep as Android
+- Reading
+- Media
+- Calendar
 
-Invalid or sensitive events are represented as rejected receipts in the snapshot rather than being routed anywhere.
+Raw and high-frequency observations stay local. MemoryGate may later receive only separately bounded derived summaries under explicit domain policy.
