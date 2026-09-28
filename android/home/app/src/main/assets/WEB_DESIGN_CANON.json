@@ -1,0 +1,275 @@
+{
+  "schema": "skeleton.home.web_design_canon.v1",
+  "created_at": "2026-08-13T08:24:10.041341+00:00",
+  "policy": "Native Home must preserve the live web application design one-for-one. Web DOM/CSS/assets are the design source of truth; native architecture may differ but visible design, geometry, icons, adaptive behavior and control states may not.",
+  "source_files": {
+    "phone.html": "c69398c8b96821cf0d0778a84e745d0af9bfcb2bb39a4071d8c067f208cadf32",
+    "video.html": "9a837d957aaaeebc47873f93f651297786f280a54f9edea7f935e3942d40f70c",
+    "devices.html": "6f457acb75dabb4e4d403131380776a9f18b8c073a7a609ec6a321522c1869c9",
+    "remote.html": "67f2a89ec9f49751df5928e77c01e3c90c3d03950a81206ea074093c83115563",
+    "app-shell.html": "7fcb9866f53226187e05d0f9472cff4da003e5b6d1123b4e4cde58887e24236d",
+    "static/ui.css": "18350186be380ee971e7ee0f0714dcdd9f666088609ccc20d9e7ac703cf7dd44",
+    "static/home-shell.js": "c6667f8690cfa5a0de0133d10c000e138ec2970c98db57b424c8aa3175cdaf4c"
+  },
+  "colors": {
+    "background": "#0a0d10",
+    "card": "#151a1f",
+    "input": "#11161a",
+    "action": "#171d23",
+    "line": "#2e363e",
+    "accent": "#ff6a00",
+    "text": "#edf1f4",
+    "muted": "#98a1aa",
+    "online": "#55d979"
+  },
+  "global_geometry": {
+    "header_height_dp": 74,
+    "bottom_nav_height_dp": 70,
+    "bottom_label_sp": 9,
+    "bottom_label_weight": 600,
+    "bottom_label_active_weight": 700,
+    "mode_height_dp": 64,
+    "mode_label_sp": 10,
+    "mode_label_weight": 600,
+    "card_radius_dp": 16
+  },
+  "home": {
+    "outer_horizontal_dp": 13,
+    "player_card_padding_dp": [
+      12,
+      10,
+      12,
+      12
+    ],
+    "player_card_top_gap_dp": 6,
+    "youtube": {
+      "poster_ratio": "16:9",
+      "nav_columns_dp": [
+        56,
+        "1fr",
+        56
+      ],
+      "gap_dp": 6,
+      "dpad": "min(72vw,292px)",
+      "side_key_dp": 52,
+      "low_height_le_780": {
+        "columns_dp": [
+          52,
+          "1fr",
+          52
+        ],
+        "dpad": "min(64vw,250px)",
+        "side_key_dp": 48
+      },
+      "narrow_width_le_360": {
+        "columns_dp": [
+          48,
+          "1fr",
+          48
+        ],
+        "gap_dp": 3,
+        "dpad": "min(70vw,244px)",
+        "side_key_dp": 46
+      },
+      "sector_pct": {
+        "up_down": [
+          0.25,
+          0.5,
+          0.32
+        ],
+        "left_right": [
+          0.25,
+          0.32,
+          0.5
+        ],
+        "ok": [
+          0.31,
+          0.31,
+          0.38
+        ]
+      },
+      "transport_hidden": true
+    },
+    "cast": {
+      "poster_ratio": "2:3",
+      "transport": [
+        "rewind-15",
+        "play/pause",
+        "fast-forward-15",
+        "mute"
+      ],
+      "timeline": true,
+      "volume": true
+    },
+    "tv": {
+      "timeline": false,
+      "seek": false,
+      "transport": [
+        "mute"
+      ],
+      "channel_rows_visible": 7
+    }
+  },
+  "video": {
+    "catalog_min_height_dp": 148,
+    "catalog_poster_dp": [
+      78,
+      117
+    ],
+    "catalog_gap_dp": 13,
+    "catalog_padding_dp": 11,
+    "selector_row_min_height_dp": 56,
+    "selector_icon_col_dp": 28,
+    "selector_gap_dp": 8,
+    "selector_label_sp": 10,
+    "selector_value_sp": 14,
+    "provider_buttons": "round installed app icons above apply/reset",
+    "actions_narrow_width_le_360": {
+      "apply_dp": 52,
+      "reset_dp": 52,
+      "gap_dp": 8
+    }
+  },
+  "icons": {
+    "account-voice": {
+      "path": "/home/oleksii/.local/lib/skeleton-cast/static/icons/mdi/account-voice.svg",
+      "sha256": "58387f34e036d12056fc1dd95614033dc8dcc3e2b7c1cef5ebd97961a708ba48"
+    },
+    "arrow-left": {
+      "path": "/home/oleksii/.local/lib/skeleton-cast/static/icons/mdi/arrow-left.svg",
+      "sha256": "5799133c32979c5da4f13a2cf301d5ac17a093dfc25b2f5c2ee5cd3c9cb52e4e"
+    },
+    "autoplay-repeat": {
+      "path": "/home/oleksii/.local/lib/skeleton-cast/static/icons/mdi/autoplay-repeat.svg",
+      "sha256": "bd04fc37895d21369f851164d97dd14d9caa551d594fddbeb8f4ce39c2d1e36f"
+    },
+    "cast-connected": {
+      "path": "/home/oleksii/.local/lib/skeleton-cast/static/icons/mdi/cast-connected.svg",
+      "sha256": "4f647729e8ed21bdddfbf7ae5879d75cde0424e4eb50054a2bd29f1b35bef4fb"
+    },
+    "chevron-down": {
+      "path": "/home/oleksii/.local/lib/skeleton-cast/static/icons/mdi/chevron-down.svg",
+      "sha256": "07debe65109ed17516b489d94e4568036ce12dee25de25308f88195c78fd0c8e"
+    },
+    "chevron-left": {
+      "path": "/home/oleksii/.local/lib/skeleton-cast/static/icons/mdi/chevron-left.svg",
+      "sha256": "86069a7dce8642cf702379949d6338a25f04098903e27dd260008b8956eb979a"
+    },
+    "chevron-right": {
+      "path": "/home/oleksii/.local/lib/skeleton-cast/static/icons/mdi/chevron-right.svg",
+      "sha256": "391f6b0267c48b1dbb4197cde4ab7637084a34eadb1746571809f743ef0903aa"
+    },
+    "chevron-up": {
+      "path": "/home/oleksii/.local/lib/skeleton-cast/static/icons/mdi/chevron-up.svg",
+      "sha256": "4fcb49ff5911b934cc724c5f1455dbf0be859100bb31fdd4d7a32a5fca0fb0c4"
+    },
+    "close-circle-outline": {
+      "path": "/home/oleksii/.local/lib/skeleton-cast/static/icons/mdi/close-circle-outline.svg",
+      "sha256": "5b9e63c4f0f1d1e3d0cc0d07190e1d288f86e191b98256bda262871a39965cab"
+    },
+    "closed-caption-outline": {
+      "path": "/home/oleksii/.local/lib/skeleton-cast/static/icons/mdi/closed-caption-outline.svg",
+      "sha256": "b2ea716fe85d5892e2a4f740b13d6b7b1d550c4cd6b88b9758c396a02833e49d"
+    },
+    "devices": {
+      "path": "/home/oleksii/.local/lib/skeleton-cast/static/icons/mdi/devices.svg",
+      "sha256": "8f56fa610caac9c000f8268eef35416085a847f25840ade94018f03e9854c057"
+    },
+    "fast-forward-15": {
+      "path": "/home/oleksii/.local/lib/skeleton-cast/static/icons/mdi/fast-forward-15.svg",
+      "sha256": "6a744babf9f073a96fe3c75f953b32b59a79730ee4e5edc6610f2c9db560ec30"
+    },
+    "gamepad-variant": {
+      "path": "/home/oleksii/.local/lib/skeleton-cast/static/icons/mdi/gamepad-variant.svg",
+      "sha256": "582674a7f638c5e3f733173832188e230b3c74d3f9f4af3c98e4da4f4aafd225"
+    },
+    "history": {
+      "path": "/home/oleksii/.local/lib/skeleton-cast/static/icons/mdi/history.svg",
+      "sha256": "82cfad4e8774f603a42bd37a751d2ddb0e6fc7e3e15b6c2f4ee6d36383364fb2"
+    },
+    "home": {
+      "path": "/home/oleksii/.local/lib/skeleton-cast/static/icons/mdi/home.svg",
+      "sha256": "5eca2121c84b90b747888a662364bba5a2dc21b1c995bd0adb87ac039efaeddd"
+    },
+    "keyboard-return": {
+      "path": "/home/oleksii/.local/lib/skeleton-cast/static/icons/mdi/keyboard-return.svg",
+      "sha256": "e98ea0f48ac93eda156098495aa1a0e089d0b5d8c8f1ae16e040a2c2972aab1b"
+    },
+    "magnify": {
+      "path": "/home/oleksii/.local/lib/skeleton-cast/static/icons/mdi/magnify.svg",
+      "sha256": "b124fa65c6c54b96b595f76f24ef2de114866a81cb2a5b75beaf86af964eff91"
+    },
+    "monitor-dashboard": {
+      "path": "/home/oleksii/.local/lib/skeleton-cast/static/icons/mdi/monitor-dashboard.svg",
+      "sha256": "417bc8c05694cc0dbce1b75698ca21d3f12bb8f6bb0abe36739962610524bd0a"
+    },
+    "movie-open": {
+      "path": "/home/oleksii/.local/lib/skeleton-cast/static/icons/mdi/movie-open.svg",
+      "sha256": "f5a8ec1a4ebca6a546a0face4490e239508d3131214552ff5a0a0e519b342013"
+    },
+    "play": {
+      "path": "/home/oleksii/.local/lib/skeleton-cast/static/icons/mdi/play.svg",
+      "sha256": "0688f0a9315f57f31445e3bc4d55604e0bd5243a85de3944a668079a3e58f8ee"
+    },
+    "play-pause": {
+      "path": "/home/oleksii/.local/lib/skeleton-cast/static/icons/mdi/play-pause.svg",
+      "sha256": "d4b8947edd363a50d54e7df16e97187aec8a5f7908f40d0e2c1b38f687f71dea"
+    },
+    "playlist-play": {
+      "path": "/home/oleksii/.local/lib/skeleton-cast/static/icons/mdi/playlist-play.svg",
+      "sha256": "d718603f668c0d8d4d6ca2a58eec0d8a4c41390bdd29312bca8d2def7fce11ef"
+    },
+    "quality-high": {
+      "path": "/home/oleksii/.local/lib/skeleton-cast/static/icons/mdi/quality-high.svg",
+      "sha256": "ab20a6f4f5215275ef8d0cd704ad091a98b0e2a92e812045c87e2af50651b608"
+    },
+    "refresh": {
+      "path": "/home/oleksii/.local/lib/skeleton-cast/static/icons/mdi/refresh.svg",
+      "sha256": "6d9544dbd768dcabe41bc1e58eee213e88461024d1f72496cf0a90dcb3e250b6"
+    },
+    "rewind-15": {
+      "path": "/home/oleksii/.local/lib/skeleton-cast/static/icons/mdi/rewind-15.svg",
+      "sha256": "c372a8921efb9dbb490b3b2ae70a19ebe020ee0b9e1a9a370d0776e301d8cb1c"
+    },
+    "stop": {
+      "path": "/home/oleksii/.local/lib/skeleton-cast/static/icons/mdi/stop.svg",
+      "sha256": "9ac24aacc1cfd3e7f74c9fed6203a067bd37e45abaff6ddf171b6a52bc62f9ad"
+    },
+    "subtitles": {
+      "path": "/home/oleksii/.local/lib/skeleton-cast/static/icons/mdi/subtitles.svg",
+      "sha256": "7a6086c533a29af9d2dd0b576042fa82b66a852878d3a5f46970e8b29e79a951"
+    },
+    "television": {
+      "path": "/home/oleksii/.local/lib/skeleton-cast/static/icons/mdi/television.svg",
+      "sha256": "989bf58def2d1eb9285cc324eda6e0668a3d2481c0de00e04da90ab867fb1be4"
+    },
+    "television-play": {
+      "path": "/home/oleksii/.local/lib/skeleton-cast/static/icons/mdi/television-play.svg",
+      "sha256": "27886656901708170d6f274aeb081fcc37a5385f43f8144974ea98270e012247"
+    },
+    "touchpad": {
+      "path": "/home/oleksii/.local/lib/skeleton-cast/static/icons/mdi/touchpad.svg",
+      "sha256": "1373fb7830eb3d145642856b80eb7b39a06c538f7b79338d2cc11db664b192de"
+    },
+    "volume-high": {
+      "path": "/home/oleksii/.local/lib/skeleton-cast/static/icons/mdi/volume-high.svg",
+      "sha256": "21d6b4495ff69fc423653f2801a422e0291dd0549cd3a4f9ee34df6a718917da"
+    },
+    "volume-off": {
+      "path": "/home/oleksii/.local/lib/skeleton-cast/static/icons/mdi/volume-off.svg",
+      "sha256": "9f6a0f38bbcc6cb1804c48b7107f0f92222fb00683a5243330f2a52a22a6b308"
+    },
+    "youtube": {
+      "path": "/home/oleksii/.local/lib/skeleton-cast/static/icons/mdi/youtube.svg",
+      "sha256": "a06f2a1c32c10d6425c7eddd2e61eadde07b6407950df21c840da7d833e0cfb4"
+    }
+  },
+  "release_gates": [
+    "no Unicode substitute icons",
+    "all visible app icons originate from the same web MDI SVG assets or installed provider app icons",
+    "no extra native-only controls on Home",
+    "no missing web controls",
+    "responsive geometry must fit the actual inner card width",
+    "SK content is blocked until the canonical Skeleton Dashboard task/spec is recovered; only its visual shell may reuse the web design system"
+  ]
+}
