@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -15,19 +16,20 @@ ANDROID_GATEWAY_EVENT_SCHEMA = "skeleton.android_gateway.telemetry_event.v1"
 ANDROID_GATEWAY_RECEIPT_SCHEMA = "skeleton.android_gateway.receipt.v1"
 ANDROID_GATEWAY_SNAPSHOT_SCHEMA = "skeleton.android_gateway.snapshot.v1"
 ANDROID_GATEWAY_CONTRACT_VERSION = "1.0.0"
+ANDROID_GATEWAY_PRIVACY_BOUNDARY = "public_safe_metadata_only"
+ANDROID_GATEWAY_RUNTIME_MUTATION = False
 
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
+_KEY_TOKEN_RE = re.compile(r"[_.:-]+")
 _MAX_EVENTS = 500
 _MAX_KEY_DEPTH = 4
 _MAX_STRING_LENGTH = 512
 
-_SENSITIVE_KEY_FRAGMENTS = frozenset(
+_SENSITIVE_KEY_PARTS = frozenset(
     {
-        "access_token",
         "account",
         "address",
-        "android_id",
         "auth",
         "body",
         "clipboard",
@@ -35,7 +37,6 @@ _SENSITIVE_KEY_FRAGMENTS = frozenset(
         "cookie",
         "credential",
         "email",
-        "exact_alarm",
         "fcm",
         "hostname",
         "imei",
@@ -70,6 +71,60 @@ _FORBIDDEN_PAYLOAD_KEYS = frozenset(
         "mutations",
         "raw_logcat",
         "runtime",
+    }
+)
+
+_ALLOWED_EVENT_KEYS = frozenset({"schema", "event_id", "provider", "event_type", "observed_at", "payload"})
+
+_FORBIDDEN_KEY_PARTS = frozenset(
+    {
+        "content",
+        "files",
+        "intents",
+        "mutations",
+        "runtime",
+    }
+)
+
+_FORBIDDEN_KEY_FRAGMENTS = frozenset(
+    {
+        "appcontent",
+        "deviceruntime",
+        "intent",
+        "mutation",
+        "rawlogcat",
+    }
+)
+
+_SENSITIVE_EXACT_KEYS = frozenset(
+    {
+        "access_token",
+        "android_id",
+        "exact_alarm",
+    }
+)
+
+_SENSITIVE_KEY_FRAGMENTS = frozenset(
+    {
+        "androidid",
+        "clipboard",
+        "cookie",
+        "credential",
+        "email",
+        "exactalarm",
+        "imei",
+        "imsi",
+        "location",
+        "message",
+        "notification",
+        "password",
+        "phone",
+        "rawlogcat",
+        "secret",
+        "serial",
+        "sms",
+        "ssid",
+        "token",
     }
 )
 
@@ -109,6 +164,8 @@ class SkeletonAndroidGateway:
     """Provider-neutral Android telemetry intake with a public-safe boundary."""
 
     def __init__(self, *, clock: Any | None = None, max_events: int = _MAX_EVENTS) -> None:
+        if max_events < 1:
+            raise ValueError("max_events must be at least 1")
         self._clock = clock or (lambda: datetime.now(UTC))
         self._max_events = max_events
         self._events: list[dict[str, Any]] = []
@@ -123,6 +180,10 @@ class SkeletonAndroidGateway:
             "event_id": normalized["event_id"],
             "provider": normalized["provider"],
             "event_type": normalized["event_type"],
+            "observed_at": normalized["observed_at"],
+            "digest": normalized["digest"],
+            "privacy_boundary": ANDROID_GATEWAY_PRIVACY_BOUNDARY,
+            "runtime_mutation": ANDROID_GATEWAY_RUNTIME_MUTATION,
             "reason": "public_safe_provider_neutral_telemetry",
         }
         if len(self._events) >= self._max_events:
@@ -134,11 +195,17 @@ class SkeletonAndroidGateway:
         try:
             return self.ingest(event)
         except AndroidGatewayError as exc:
+            now = self._now_iso()
             rejection = {
                 "schema": ANDROID_GATEWAY_RECEIPT_SCHEMA,
                 "contract_version": ANDROID_GATEWAY_CONTRACT_VERSION,
                 "decision": AndroidGatewayDecision.REJECTED.value,
                 "event_id": _safe_event_id(event),
+                "provider": _safe_optional_string(event, "provider", pattern=_SAFE_ID_RE),
+                "event_type": _safe_optional_string(event, "event_type", pattern=_SAFE_NAME_RE),
+                "observed_at": now,
+                "privacy_boundary": ANDROID_GATEWAY_PRIVACY_BOUNDARY,
+                "runtime_mutation": ANDROID_GATEWAY_RUNTIME_MUTATION,
                 "reason": exc.reason_code,
             }
             self._rejections.append(rejection)
@@ -155,8 +222,8 @@ class SkeletonAndroidGateway:
             "schema": ANDROID_GATEWAY_SNAPSHOT_SCHEMA,
             "contract_version": ANDROID_GATEWAY_CONTRACT_VERSION,
             "generated_at": self._now_iso(),
-            "privacy_boundary": "public_safe_metadata_only",
-            "runtime_mutation": False,
+            "privacy_boundary": ANDROID_GATEWAY_PRIVACY_BOUNDARY,
+            "runtime_mutation": ANDROID_GATEWAY_RUNTIME_MUTATION,
             "event_count": len(self._events),
             "rejection_count": len(self._rejections),
             "providers": dict(sorted(provider_counts.items())),
@@ -190,6 +257,9 @@ def _normalize_event(event: AndroidTelemetryEvent | Mapping[str, Any], *, now: s
     raw = event.to_mapping() if isinstance(event, AndroidTelemetryEvent) else dict(event)
     if raw.get("schema") != ANDROID_GATEWAY_EVENT_SCHEMA:
         raise AndroidGatewayError("INVALID_SCHEMA", "event schema is invalid")
+    unknown_keys = set(raw) - _ALLOWED_EVENT_KEYS
+    if unknown_keys:
+        raise AndroidGatewayError("UNSUPPORTED_EVENT_FIELD", "event contains fields outside the v1 metadata contract")
 
     event_id = _safe_required_string(raw, "event_id", pattern=_SAFE_ID_RE)
     provider = _safe_required_string(raw, "provider", pattern=_SAFE_ID_RE)
@@ -226,18 +296,23 @@ def _sanitize_payload(payload: Mapping[str, Any], *, depth: int = 0) -> dict[str
     if depth > _MAX_KEY_DEPTH:
         raise AndroidGatewayError("PAYLOAD_TOO_DEEP", "payload nesting is too deep")
     sanitized: dict[str, Any] = {}
-    for key, value in payload.items():
+    for key, value in sorted(payload.items(), key=lambda item: str(item[0])):
         if not isinstance(key, str) or not _SAFE_NAME_RE.fullmatch(key):
             raise AndroidGatewayError("INVALID_PAYLOAD_KEY", "payload keys must be safe bounded identifiers")
-        lowered = key.lower()
-        if key in _FORBIDDEN_PAYLOAD_KEYS or any(fragment in lowered for fragment in _SENSITIVE_KEY_FRAGMENTS):
+        if _is_sensitive_payload_key(key):
             raise AndroidGatewayError("SENSITIVE_PAYLOAD_REJECTED", "payload contains sensitive app or device content")
         sanitized[key] = _sanitize_value(value, depth=depth)
     return sanitized
 
 
 def _sanitize_value(value: Any, *, depth: int) -> Any:
-    if value is None or isinstance(value, bool | int | float):
+    if depth > _MAX_KEY_DEPTH:
+        raise AndroidGatewayError("PAYLOAD_TOO_DEEP", "payload nesting is too deep")
+    if value is None or isinstance(value, bool | int):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise AndroidGatewayError("UNSUPPORTED_PAYLOAD_VALUE", "payload numbers must be finite")
         return value
     if isinstance(value, str):
         if len(value) > _MAX_STRING_LENGTH:
@@ -259,7 +334,28 @@ def _safe_required_string(raw: Mapping[str, Any], key: str, *, pattern: re.Patte
     return value
 
 
+def _is_sensitive_payload_key(key: str) -> bool:
+    lowered = key.lower()
+    if lowered in _FORBIDDEN_PAYLOAD_KEYS or lowered in _SENSITIVE_EXACT_KEYS:
+        return True
+    compact = re.sub(r"[_.:-]+", "", lowered)
+    if any(fragment in compact for fragment in _FORBIDDEN_KEY_FRAGMENTS):
+        return True
+    if any(fragment in compact for fragment in _SENSITIVE_KEY_FRAGMENTS):
+        return True
+    parts = _KEY_TOKEN_RE.split(lowered)
+    return any(part in _FORBIDDEN_KEY_PARTS or part in _SENSITIVE_KEY_PARTS for part in parts)
+
+
 def _safe_event_id(event: AndroidTelemetryEvent | Mapping[str, Any]) -> str | None:
     raw = event.to_mapping() if isinstance(event, AndroidTelemetryEvent) else event
     value = raw.get("event_id") if isinstance(raw, Mapping) else None
     return value if isinstance(value, str) and _SAFE_ID_RE.fullmatch(value) else None
+
+
+def _safe_optional_string(
+    event: AndroidTelemetryEvent | Mapping[str, Any], key: str, *, pattern: re.Pattern[str]
+) -> str | None:
+    raw = event.to_mapping() if isinstance(event, AndroidTelemetryEvent) else event
+    value = raw.get(key) if isinstance(raw, Mapping) else None
+    return value if isinstance(value, str) and pattern.fullmatch(value) else None

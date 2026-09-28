@@ -14,10 +14,12 @@ if str(ROOT) not in sys.path:
 
 from core.skeleton_android_gateway import SkeletonAndroidGateway
 
+_DEFAULT_GENERATED_AT = "1970-01-01T00:00:00Z"
+
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
-    gateway = SkeletonAndroidGateway()
+    gateway = SkeletonAndroidGateway(clock=lambda: args.generated_at)
     for path in args.event:
         event = _load_json(path)
         gateway.try_ingest(event)
@@ -35,6 +37,11 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         type=Path,
         default=[],
         help="Path to a JSON telemetry event. May be passed more than once.",
+    )
+    parser.add_argument(
+        "--generated-at",
+        default=_DEFAULT_GENERATED_AT,
+        help="Snapshot timestamp to embed. Defaults to a fixed value for deterministic output.",
     )
     return parser.parse_args(argv)
 
