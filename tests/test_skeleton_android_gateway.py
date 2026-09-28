@@ -217,6 +217,130 @@ def test_collector_normalizes_battery_storage_runtime_network_supervisor_and_rdc
     assert '"mac"' not in encoded.lower()
 
 
+
+
+def test_sensor_capabilities_are_normalized_and_vendor_names_are_discarded() -> None:
+    def run_command(command: list[str] | tuple[str, ...], timeout: float) -> subprocess.CompletedProcess[str]:
+        assert command == ["termux-sensor", "-l"]
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=json.dumps(
+                {
+                    "sensors": [
+                        "BMA253 ACCELEROMETER",
+                        "MMC5603 MAGNETOMETER",
+                        "VIRTUAL GYROSCOPE",
+                        "Virtual_Prox Wakeup",
+                        "STEP_DETECTOR",
+                        "STEP_COUNTER",
+                        "camera_light_Sensor",
+                        "Touch Sensor",
+                    ]
+                }
+            ),
+            stderr="",
+        )
+
+    observation = AndroidLocalCollector(
+        node_id="android-node",
+        clock=lambda: OBSERVED_AT,
+        run_command=run_command,
+    ).collect_sensor_capabilities()
+
+    assert observation.kind == AndroidObservationKind.SENSOR_CAPABILITIES
+    assert observation.quality == AndroidObservationQuality.OK
+    assert observation.payload == {
+        "capability_count": 8,
+        "sensor_types": [
+            "accelerometer",
+            "gyroscope",
+            "light",
+            "magnetometer",
+            "proximity",
+            "step_counter",
+            "step_detector",
+            "touch",
+        ],
+    }
+    encoded = json.dumps(observation.to_mapping(), sort_keys=True)
+    assert "BMA253" not in encoded
+    assert "MMC5603" not in encoded
+    assert "camera_light_Sensor" not in encoded
+
+
+def test_step_activity_is_explicitly_counter_since_boot() -> None:
+    def run_command(command: list[str] | tuple[str, ...], timeout: float) -> subprocess.CompletedProcess[str]:
+        assert command == ["termux-sensor", "-s", "STEP_COUNTER", "-n", "1"]
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=json.dumps({"STEP_COUNTER": {"values": [5189]}}),
+            stderr="",
+        )
+
+    observation = AndroidLocalCollector(
+        node_id="android-node",
+        clock=lambda: OBSERVED_AT,
+        run_command=run_command,
+    ).collect_step_activity()
+
+    assert observation.kind == AndroidObservationKind.STEP_ACTIVITY
+    assert observation.quality == AndroidObservationQuality.OK
+    assert observation.payload == {"counter_since_boot": 5189}
+    assert observation.provenance["semantic"] == "counter_since_boot"
+    assert "today" not in json.dumps(observation.to_mapping()).lower()
+
+
+@pytest.mark.parametrize(
+    ("method_name", "expected_kind", "expected_payload"),
+    [
+        (
+            "collect_sensor_capabilities",
+            AndroidObservationKind.SENSOR_CAPABILITIES,
+            {"capability_count": None, "sensor_types": []},
+        ),
+        (
+            "collect_step_activity",
+            AndroidObservationKind.STEP_ACTIVITY,
+            {"counter_since_boot": None},
+        ),
+    ],
+)
+def test_sensor_collectors_degrade_when_termux_api_is_unavailable(
+    method_name: str,
+    expected_kind: AndroidObservationKind,
+    expected_payload: dict[str, object],
+) -> None:
+    collector = AndroidLocalCollector(
+        node_id="android-node",
+        clock=lambda: OBSERVED_AT,
+        run_command=lambda command, timeout: (_ for _ in ()).throw(FileNotFoundError(command[0])),
+    )
+
+    observation = getattr(collector, method_name)()
+
+    assert observation.kind == expected_kind
+    assert observation.quality == AndroidObservationQuality.UNAVAILABLE
+    assert observation.payload == expected_payload
+
+
+def test_sensor_collectors_handle_malformed_json_without_crashing() -> None:
+    collector = AndroidLocalCollector(
+        node_id="android-node",
+        clock=lambda: OBSERVED_AT,
+        run_command=lambda command, timeout: subprocess.CompletedProcess(command, 0, stdout="{bad-json", stderr=""),
+    )
+
+    capabilities = collector.collect_sensor_capabilities()
+    steps = collector.collect_step_activity()
+
+    assert capabilities.quality == AndroidObservationQuality.DEGRADED
+    assert capabilities.payload == {"capability_count": 0, "sensor_types": []}
+    assert steps.quality == AndroidObservationQuality.DEGRADED
+    assert steps.payload == {"counter_since_boot": None}
+
+
 def test_remote_desktop_auth_required_hold_uses_enum() -> None:
     collector = _collector_with_state(
         {"redmi-rdc-agent.pid": "31337"},
@@ -403,12 +527,14 @@ def test_snapshot_cli_writes_output_and_emits_snapshot(tmp_path: Path) -> None:
     file_snapshot = json.loads(output_path.read_text(encoding="utf-8"))
     assert stdout_snapshot == file_snapshot
     assert stdout_snapshot["schema"] == "skeleton.android.snapshot.v1"
-    assert stdout_snapshot["observation_count"] == 6
+    assert stdout_snapshot["observation_count"] == 8
     assert set(stdout_snapshot["kinds"]) == {
         "battery",
         "network",
         "remote_desktop_state",
         "runtime",
+        "sensor_capabilities",
+        "step_activity",
         "storage",
         "supervisor",
     }
