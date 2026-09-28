@@ -527,12 +527,14 @@ def test_snapshot_cli_writes_output_and_emits_snapshot(tmp_path: Path) -> None:
     file_snapshot = json.loads(output_path.read_text(encoding="utf-8"))
     assert stdout_snapshot == file_snapshot
     assert stdout_snapshot["schema"] == "skeleton.android.snapshot.v1"
-    assert stdout_snapshot["observation_count"] == 6
+    assert stdout_snapshot["observation_count"] == 8
     assert set(stdout_snapshot["kinds"]) == {
         "battery",
         "network",
         "remote_desktop_state",
         "runtime",
+        "sensor_capabilities",
+        "step_activity",
         "storage",
         "supervisor",
     }
