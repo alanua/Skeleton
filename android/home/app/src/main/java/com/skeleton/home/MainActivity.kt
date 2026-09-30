@@ -451,6 +451,206 @@ private fun JSONArray.strings(): List<String> = (0 until length()).mapNotNull { 
 private fun JSONObject.cleanText(key:String, fallback:String=""):String { val v=opt(key); if(v==null || v==JSONObject.NULL) return fallback; val out=v.toString().trim(); return if(out.isBlank() || out.equals("null",true)) fallback else out }
 private fun String.ellipsize(n:Int=90)=if(length<=n)this else take(n-1)+"…"
 
+
+private data class FamilySecurityDevice(
+    val id:String,
+    val name:String,
+    val role:String,
+    val platform:String,
+    val status:String,
+    val lostAt:Long,
+    val providers:List<String>,
+)
+private fun parseFamilySecurityDevice(j:JSONObject)=FamilySecurityDevice(
+    id=j.cleanText("device_id"),
+    name=j.cleanText("name",j.cleanText("device_id")),
+    role=j.cleanText("role"),
+    platform=j.cleanText("platform"),
+    status=j.cleanText("status","normal"),
+    lostAt=j.optLong("lost_at",0L),
+    providers=j.optJSONArray("recovery_providers")?.strings().orEmpty(),
+)
+private fun familySecurityRoleLabel(role:String)=when(role){
+    "android_phone","ios_phone"->"Телефон"
+    "tablet_kiosk"->"Планшет"
+    else->"Пристрій"
+}
+private fun recoveryProviderLabel(id:String)=when(id){
+    "google_find_hub"->"Google Find Hub"
+    "xiaomi_find_device"->"Xiaomi Find Device"
+    "apple_find_my"->"Apple Find My"
+    "samsung_find"->"Samsung Find"
+    else->id
+}
+
+@Composable
+private fun FamilySecurityDialog(api:HomeApi,isFullProfile:Boolean,onDismiss:()->Unit){
+    val scope=rememberCoroutineScope()
+    var devices by remember{mutableStateOf<List<FamilySecurityDevice>>(emptyList())}
+    var loaded by remember{mutableStateOf(false)}
+    var busyId by remember{mutableStateOf("")}
+    var confirmLost by remember{mutableStateOf<FamilySecurityDevice?>(null)}
+    var statusText by remember{mutableStateOf("")}
+    var canRecover by remember{mutableStateOf(isFullProfile)}
+
+    fun refresh(){
+        scope.launch{
+            runCatching{api.get("/api/native/security/family-devices")}.onSuccess{j->
+                devices=j.optJSONArray("items")?.objects().orEmpty().map(::parseFamilySecurityDevice)
+                canRecover=j.optBoolean("can_recover",isFullProfile)
+                loaded=true
+            }.onFailure{
+                loaded=true
+                statusText=it.message?:"Не вдалося отримати сімейні пристрої"
+            }
+        }
+    }
+    LaunchedEffect(api.server){if(api.server!=null)refresh()}
+
+    Dialog(
+        onDismissRequest=onDismiss,
+        properties=DialogProperties(usePlatformDefaultWidth=false)
+    ){
+        Column(Modifier.fillMaxSize().background(Bg).statusBarsPadding()){
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal=14.dp,vertical=10.dp),
+                verticalAlignment=Alignment.CenterVertically
+            ){
+                IconButton(onClick=onDismiss){Mdi("chevron-left",24.dp,Text)}
+                Column(Modifier.weight(1f).padding(start=4.dp)){
+                    Text("Безпека сім’ї",fontSize=20.sp,fontWeight=FontWeight.Bold,color=Text)
+                    Text("Втрачені телефони та планшети",fontSize=10.sp,color=Muted,modifier=Modifier.padding(top=2.dp))
+                }
+                Mdi("radar",24.dp,Accent)
+            }
+
+            if(!loaded){
+                Box(Modifier.fillMaxSize(),contentAlignment=Alignment.Center){
+                    CircularProgressIndicator(color=Accent,strokeWidth=2.dp,modifier=Modifier.size(28.dp))
+                }
+            }else{
+                LazyColumn(
+                    Modifier.weight(1f).padding(horizontal=13.dp),
+                    contentPadding=PaddingValues(bottom=28.dp),
+                    verticalArrangement=Arrangement.spacedBy(10.dp)
+                ){
+                    item{
+                        Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(15.dp)).background(Card).border(1.dp,Line,RoundedCornerShape(15.dp)).padding(14.dp)){
+                            Text("Аварійний режим",fontSize=14.sp,fontWeight=FontWeight.Bold,color=Text)
+                            Text(
+                                "«Телефон втрачено» лише вмикає LOST MODE. Дані не стираються. Повне стирання буде окремою операторською дією з повторним підтвердженням.",
+                                fontSize=10.sp,lineHeight=15.sp,color=Muted,modifier=Modifier.padding(top=6.dp)
+                            )
+                        }
+                    }
+                    items(devices,key={it.id}){d->
+                        val lost=d.status=="lost"
+                        Column(
+                            Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp))
+                                .background(if(lost)Color(0xFF241719) else Card)
+                                .border(1.dp,if(lost)Color(0xFF6A3138) else Line,RoundedCornerShape(16.dp))
+                                .padding(14.dp)
+                        ){
+                            Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically){
+                                Box(
+                                    Modifier.size(38.dp).clip(RoundedCornerShape(11.dp))
+                                        .background(if(lost)Color(0xFF4B2228) else Action),
+                                    contentAlignment=Alignment.Center
+                                ){
+                                    Mdi(if(d.role=="tablet_kiosk")"devices" else "radar",20.dp,if(lost)Color(0xFFFF777F) else Accent)
+                                }
+                                Column(Modifier.weight(1f).padding(start=11.dp)){
+                                    Text(d.name,fontSize=14.sp,fontWeight=FontWeight.SemiBold,color=Text,maxLines=2,overflow=TextOverflow.Ellipsis)
+                                    Text(
+                                        familySecurityRoleLabel(d.role)+" · "+if(lost)"LOST MODE" else "Нормально",
+                                        fontSize=10.sp,color=if(lost)Color(0xFFFF8C93) else Green,modifier=Modifier.padding(top=3.dp)
+                                    )
+                                }
+                            }
+                            if(d.providers.isNotEmpty()){
+                                Text(
+                                    "Пошук/блокування: "+d.providers.joinToString(" · "){recoveryProviderLabel(it)},
+                                    fontSize=9.sp,lineHeight=13.sp,color=Muted,modifier=Modifier.padding(top=9.dp)
+                                )
+                            }
+                            if(!lost){
+                                Button(
+                                    onClick={confirmLost=d},
+                                    enabled=busyId.isBlank(),
+                                    modifier=Modifier.fillMaxWidth().height(46.dp).padding(top=10.dp),
+                                    shape=RoundedCornerShape(12.dp),
+                                    colors=ButtonDefaults.buttonColors(containerColor=Color(0xFF692E35))
+                                ){
+                                    Text(if(d.role=="tablet_kiosk")"Пристрій втрачено" else "Телефон втрачено",fontWeight=FontWeight.Bold,color=Color.White)
+                                }
+                            }else{
+                                Text(
+                                    "LOST MODE активний. Сам пристрій не може скасувати цей стан.",
+                                    fontSize=10.sp,lineHeight=14.sp,color=Color(0xFFFFA1A6),modifier=Modifier.padding(top=9.dp)
+                                )
+                                if(canRecover){
+                                    Button(
+                                        onClick={
+                                            busyId=d.id
+                                            scope.launch{
+                                                runCatching{api.post("/api/native/security/family-devices/"+d.id+"/recover",JSONObject())}
+                                                    .onSuccess{statusText=d.name+": повернуто у NORMAL";refresh()}
+                                                    .onFailure{statusText=it.message?:"Не вдалося скасувати LOST MODE"}
+                                                busyId=""
+                                            }
+                                        },
+                                        enabled=busyId.isBlank(),
+                                        modifier=Modifier.fillMaxWidth().height(44.dp).padding(top=9.dp),
+                                        shape=RoundedCornerShape(12.dp),
+                                        colors=ButtonDefaults.buttonColors(containerColor=Action)
+                                    ){Text("Пристрій знайдено",fontWeight=FontWeight.SemiBold,color=Text)}
+                                }
+                            }
+                        }
+                    }
+                    if(statusText.isNotBlank())item{
+                        Text(statusText,fontSize=11.sp,lineHeight=16.sp,color=Muted,modifier=Modifier.padding(horizontal=3.dp,vertical=4.dp))
+                    }
+                }
+            }
+        }
+
+        val target=confirmLost
+        if(target!=null){
+            AlertDialog(
+                onDismissRequest={if(busyId.isBlank())confirmLost=null},
+                containerColor=Card,
+                title={Text(if(target.role=="tablet_kiosk")"Пристрій втрачено?" else "Телефон втрачено?",color=Text,fontWeight=FontWeight.Bold)},
+                text={
+                    Column{
+                        Text(target.name,color=Text,fontSize=14.sp,fontWeight=FontWeight.SemiBold)
+                        Text(
+                            "Буде ввімкнено LOST MODE. Це НЕ стирає дані. Стан зможе скасувати лише операторський профіль.",
+                            color=Muted,fontSize=11.sp,lineHeight=16.sp,modifier=Modifier.padding(top=8.dp)
+                        )
+                    }
+                },
+                confirmButton={
+                    Button(
+                        onClick={
+                            busyId=target.id
+                            scope.launch{
+                                runCatching{api.post("/api/native/security/family-devices/"+target.id+"/lost",JSONObject())}
+                                    .onSuccess{statusText=target.name+": LOST MODE увімкнено";confirmLost=null;refresh()}
+                                    .onFailure{statusText=it.message?:"Не вдалося ввімкнути LOST MODE"}
+                                busyId=""
+                            }
+                        },
+                        enabled=busyId.isBlank(),
+                        colors=ButtonDefaults.buttonColors(containerColor=Color(0xFF7A3038))
+                    ){Text("Увімкнути LOST MODE",color=Color.White,fontWeight=FontWeight.Bold)}
+                },
+                dismissButton={TextButton(onClick={confirmLost=null},enabled=busyId.isBlank()){Text("Скасувати",color=Muted)}}
+            )
+        }
+    }
+}
+
 private data class NavDef(val title:String,val icon:String)
 private data class HomeClientProfile(val name:String,val hasSk:Boolean)
 private val fullOperatorNav = listOf(NavDef("Головна","home"),NavDef("Відео","movie-open"),NavDef("Пристрої","devices"),NavDef("СК","monitor-dashboard"))
@@ -495,6 +695,7 @@ private fun HomeComposeApp(sharedUrl:String?, consumeShare:()->Unit) {
     var channelEditor by remember { mutableStateOf(false) }
     var deviceOrderEditor by remember { mutableStateOf(false) }
     var screensaver by remember { mutableStateOf(false) }
+    var familySecurity by remember { mutableStateOf(false) }
     var updateInfo by remember { mutableStateOf<HomeUpdateInfo?>(null) }
     var updateBusy by remember { mutableStateOf(false) }
     var updateProgress by remember { mutableIntStateOf(0) }
@@ -594,6 +795,7 @@ private fun HomeComposeApp(sharedUrl:String?, consumeShare:()->Unit) {
                 OverflowMenuItem("history",ui("Редагувати історію")) { menu=false; historyEditor=true }
                 OverflowMenuItem("television",ui("Редагувати канали")) { menu=false; channelEditor=true }
                 if(tab==2 && profile?.hasSk==true) OverflowMenuItem("sort",ui("Редагувати порядок пристроїв")) { menu=false; deviceOrderEditor=true }
+                OverflowMenuItem("radar",ui("Безпека сім’ї")) { menu=false; familySecurity=true }
                 OverflowMenuItem("monitor-dashboard",ui("Скрінсейвер")) { menu=false; screensaver=true }
                 OverflowMenuItem("account-voice",ui("Мова інтерфейсу")+" · "+languageNativeLabel(uiLanguage)) { menu=false; languageDialog="interface" }
                 OverflowMenuItem("subtitles",ui("Переклад")+" · "+languageNativeLabel(contentLanguage)) { menu=false; languageDialog="content" }
@@ -610,6 +812,7 @@ private fun HomeComposeApp(sharedUrl:String?, consumeShare:()->Unit) {
             }
         }
     }
+    if(familySecurity) FamilySecurityDialog(api, profile?.hasSk==true){familySecurity=false}
     if(languageDialog.isNotBlank()) LanguageChoiceDialog(
         title=ui(if(languageDialog=="interface")"Вибір мови інтерфейсу" else "Переклад"),
         selected=if(languageDialog=="interface")uiLanguage else contentLanguage,
