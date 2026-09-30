@@ -2455,6 +2455,8 @@ private fun shareMfpPdf(context:Context,api:HomeApi,doc:JSONObject){
     var healthStatus by remember{mutableStateOf("")}
     var healthBusy by remember{mutableStateOf(false)}
     var trackingEnabled by remember{mutableStateOf(LocationTrackingService.isTrackingEnabled(context))}
+    var trackingBackgroundGranted by remember{mutableStateOf(LocationTrackingService.hasBackgroundLocation(context))}
+    var trackingRestartNeeded by remember{mutableStateOf(LocationTrackingService.isRestartNeeded(context))}
     var trackingStatus by remember{mutableStateOf("")}
     var secretText by rememberSaveable{mutableStateOf("")};var gmailCallbackUrl by rememberSaveable{mutableStateOf("")};var gmailExpectedState by rememberSaveable{mutableStateOf("")};var status by remember{mutableStateOf("")};var busy by remember{mutableStateOf(false)};var gmailConfigured by remember{mutableStateOf(false)};var gmailAuthorized by remember{mutableStateOf(false)};var bitwardenBackup by remember{mutableStateOf("not_needed")}
     fun refresh(){scope.launch{runCatching{api.get("/api/native/home-edge/secrets/status")}.onSuccess{gmailConfigured=it.optBoolean("gmail_oauth_client_configured");gmailAuthorized=it.optBoolean("gmail_authorized");bitwardenBackup=it.optString("bitwarden_backup","not_needed")}}}
@@ -2486,6 +2488,17 @@ private fun shareMfpPdf(context:Context,api:HomeApi,doc:JSONObject){
         }else{
             trackingEnabled=false
             trackingStatus="Доступ до місцезнаходження не надано"
+        }
+    }
+    val trackingSettingsLauncher=rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()){
+        trackingBackgroundGranted=LocationTrackingService.hasBackgroundLocation(context)
+        trackingRestartNeeded=LocationTrackingService.isRestartNeeded(context)
+        if(trackingEnabled&&trackingBackgroundGranted){
+            runCatching{LocationTrackingService.start(context)}
+                .onSuccess{trackingRestartNeeded=false;trackingStatus="Фоновий тракінг відновлено"}
+                .onFailure{trackingStatus=it.message?:"Не вдалося відновити фоновий тракінг"}
+        }else if(trackingEnabled&&!trackingBackgroundGranted){
+            trackingStatus="Для відновлення після перезавантаження виберіть «Дозволити завжди» для місцезнаходження"
         }
     }
     val filePicker=rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()){uri->if(uri!=null){scope.launch{busy=true;status="Перевіряю файл…";runCatching{api.uploadSecretFile(context,uri)}.onSuccess{status="Секрет прийнято · ${it.optString("label","готово")}";refresh()}.onFailure{status=it.message?:"Не вдалося додати секрет"};busy=false}}}
@@ -2534,6 +2547,26 @@ private fun shareMfpPdf(context:Context,api:HomeApi,doc:JSONObject){
                     )
                 }
                 Text("Під час роботи Home тримає foreground-service: не частіше ніж раз на 5 хв або після переміщення ≈100 м. Сирі координати зберігаються лише локально на Home Edge й не потрапляють у GitHub або MemoryGate.",fontSize=10.sp,lineHeight=15.sp,color=Muted,modifier=Modifier.padding(top=9.dp))
+                Row(Modifier.padding(top=8.dp),verticalAlignment=Alignment.CenterVertically){
+                    val bgColor=if(trackingBackgroundGranted)Green else Warn
+                    Box(Modifier.size(8.dp).clip(CircleShape).background(bgColor))
+                    Spacer(Modifier.width(8.dp))
+                    Text(if(trackingBackgroundGranted)"Фоновий доступ: надано" else "Фоновий доступ: потрібен для reboot/update recovery",fontSize=10.sp,color=bgColor)
+                }
+                if(!trackingBackgroundGranted&&Build.VERSION.SDK_INT>=Build.VERSION_CODES.Q){
+                    OutlinedButton(
+                        onClick={
+                            trackingSettingsLauncher.launch(
+                                Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,Uri.parse("package:"+context.packageName))
+                            )
+                        },
+                        modifier=Modifier.fillMaxWidth().height(44.dp).padding(top=8.dp),
+                        shape=RoundedCornerShape(12.dp),
+                        border=BorderStroke(1.dp,Warn)
+                    ){Text("Надати фоновий доступ до місцезнаходження",fontSize=11.sp,fontWeight=FontWeight.SemiBold,color=Warn)}
+                    Text("У Android: Дозволи → Місцезнаходження → Дозволити завжди.",fontSize=9.sp,lineHeight=13.sp,color=Muted,modifier=Modifier.padding(top=5.dp))
+                }
+                if(trackingRestartNeeded)Text("Після оновлення/перезавантаження tracker потребує відновлення.",fontSize=10.sp,color=Warn,modifier=Modifier.padding(top=7.dp))
                 val buffered=LocationTrackingService.bufferedCount(context)
                 val lastObserved=LocationTrackingService.lastObservedAt(context)
                 if(buffered>0)Text("Очікують відправлення: $buffered точ.",fontSize=10.sp,color=Warn,modifier=Modifier.padding(top=7.dp))
