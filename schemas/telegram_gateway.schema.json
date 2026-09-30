@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.telegram_gateway.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "source_id", "access_modes"],
+  "properties": {
+    "schema": {
+      "const": "skeleton.telegram_gateway.v1"
+    },
+    "source_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "access_modes": {
+      "type": "array",
+      "items": {
+        "enum": ["READ_PUBLIC", "READ_ALLOWED_PRIVATE", "WRITE_BOT"]
+      },
+      "minItems": 1,
+      "uniqueItems": true
+    },
+    "actions": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "resolve_source",
+          "get_history",
+          "get_message",
+          "search",
+          "sync_source",
+          "list_allowed_sources",
+          "watch_source",
+          "write_bot"
+        ]
+      },
+      "uniqueItems": true
+    },
+    "operator_secret_route": {
+      "const": "home_edge_devices_secrets_tab_to_bitwarden"
+    },
+    "first_authorization_provider": {
+      "const": "home_edge_devices_secrets_tab_to_bitwarden"
+    },
+    "update_handling": {
+      "type": "array",
+      "items": {
+        "enum": ["new_message", "edit", "delete_tombstone", "cursor_marker"]
+      },
+      "uniqueItems": true
+    },
+    "integration_source": {
+      "const": "@midnightquantum"
+    }
+  }
+}
