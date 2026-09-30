@@ -5,6 +5,7 @@
   <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>
   <uses-permission android:name="android.permission.TRANSMIT_IR"/>
   <uses-feature android:name="android.hardware.consumerir" android:required="false"/>
+  <queries><package android:name="com.google.android.apps.healthdata"/></queries>
   <application android:theme="@style/AppTheme" android:label="Home" android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher" android:usesCleartextTraffic="true" android:allowBackup="false" android:supportsRtl="true">
     <activity android:name=".MainActivity" android:exported="true" android:screenOrientation="unspecified">
       <intent-filter>
@@ -14,6 +15,12 @@
         <action android:name="android.intent.action.SEND"/><category android:name="android.intent.category.DEFAULT"/><data android:mimeType="text/plain"/>
       </intent-filter>
     </activity>
+    <activity android:name=".HealthPermissionsRationaleActivity" android:exported="true">
+      <intent-filter><action android:name="androidx.health.ACTION_SHOW_PERMISSIONS_RATIONALE"/></intent-filter>
+    </activity>
+    <activity-alias android:name=".HealthPermissionsUsageActivity" android:exported="true" android:targetActivity=".HealthPermissionsRationaleActivity" android:permission="android.permission.START_VIEW_PERMISSION_USAGE">
+      <intent-filter><action android:name="android.intent.action.VIEW_PERMISSION_USAGE"/><category android:name="android.intent.category.HEALTH_PERMISSIONS"/></intent-filter>
+    </activity-alias>
     <provider android:name="androidx.core.content.FileProvider" android:authorities="${applicationId}.files" android:exported="false" android:grantUriPermissions="true"><meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/file_paths"/></provider>
     <receiver android:name=".InstallStatusReceiver" android:exported="false"/>
     <receiver android:name=".IrReceiver" android:exported="true"><intent-filter><action android:name="com.skeleton.home.IR_TRANSMIT"/></intent-filter></receiver>
