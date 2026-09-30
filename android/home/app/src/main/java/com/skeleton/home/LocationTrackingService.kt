@@ -12,6 +12,7 @@ import android.location.Location
 import android.location.LocationListener
 import android.location.LocationManager
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import androidx.core.app.NotificationCompat
@@ -35,6 +36,7 @@ class LocationTrackingService : Service(), LocationListener {
         private const val ACTION_START = "com.skeleton.home.geo.START"
         private const val MIN_TIME_MS = 5 * 60 * 1000L
         private const val MIN_DISTANCE_M = 100f
+        private const val HEARTBEAT_MS = 15 * 60 * 1000L
         private const val MAX_BUFFER_LINES = 2000
 
         fun isTrackingEnabled(context: Context): Boolean =
@@ -45,6 +47,17 @@ class LocationTrackingService : Service(), LocationListener {
 
         fun lastObservedAt(context: Context): String =
             context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_LAST_OBSERVED_AT, "").orEmpty()
+
+        fun hasBackgroundLocation(context: Context): Boolean =
+            Build.VERSION.SDK_INT < Build.VERSION_CODES.Q ||
+                ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_BACKGROUND_LOCATION) == PackageManager.PERMISSION_GRANTED
+
+        fun markRestartNeeded(context: Context, needed: Boolean) {
+            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean("restart_needed", needed).apply()
+        }
+
+        fun isRestartNeeded(context: Context): Boolean =
+            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean("restart_needed", false)
 
         fun start(context: Context) {
             context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean(KEY_ENABLED, true).apply()
@@ -61,8 +74,17 @@ class LocationTrackingService : Service(), LocationListener {
     }
 
     private val io = Executors.newSingleThreadExecutor()
+    private val heartbeatHandler = Handler(Looper.getMainLooper())
     private lateinit var locationManager: LocationManager
     private val bufferFile by lazy { File(filesDir, "geo-track-buffer.jsonl") }
+    private val heartbeatRunnable = object : Runnable {
+        override fun run() {
+            if (isTrackingEnabled(this@LocationTrackingService)) {
+                io.execute { sendHeartbeat() }
+                heartbeatHandler.postDelayed(this, HEARTBEAT_MS)
+            }
+        }
+    }
 
     override fun onCreate() {
         super.onCreate()
@@ -84,6 +106,9 @@ class LocationTrackingService : Service(), LocationListener {
             return START_NOT_STICKY
         }
         requestUpdates()
+        markRestartNeeded(this, false)
+        heartbeatHandler.removeCallbacks(heartbeatRunnable)
+        heartbeatHandler.post(heartbeatRunnable)
         io.execute { flushBuffer() }
         return START_STICKY
     }
@@ -91,6 +116,7 @@ class LocationTrackingService : Service(), LocationListener {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
+        heartbeatHandler.removeCallbacks(heartbeatRunnable)
         stopTracking()
         io.shutdown()
         super.onDestroy()
@@ -198,10 +224,22 @@ class LocationTrackingService : Service(), LocationListener {
         updateBufferedCount()
     }
 
-    private fun send(body: String): Boolean {
+    private fun sendHeartbeat(): Boolean {
+        val body = JSONObject()
+            .put("schema", "skeleton.geo.track_heartbeat.v1")
+            .put("observed_at", Instant.now().toString())
+            .put("tracking_enabled", isTrackingEnabled(this))
+            .toString()
+        return postJson("/api/native/home-edge/geo/track/heartbeat", body, updateLastUpload = false)
+    }
+
+    private fun send(body: String): Boolean =
+        postJson("/api/native/home-edge/geo/track", body, updateLastUpload = true)
+
+    private fun postJson(path: String, body: String, updateLastUpload: Boolean): Boolean {
         for (base in BuildConfig.HOME_EDGE_BASE_URLS.split(',').map { it.trim().trimEnd('/') }.filter { it.startsWith("http://") || it.startsWith("https://") }.distinct()) {
             val ok = runCatching {
-                val c = URL(base + "/api/native/home-edge/geo/track").openConnection() as HttpURLConnection
+                val c = URL(base + path).openConnection() as HttpURLConnection
                 c.connectTimeout = 3500
                 c.readTimeout = 7000
                 c.requestMethod = "POST"
@@ -215,9 +253,11 @@ class LocationTrackingService : Service(), LocationListener {
                 code in 200..299
             }.getOrDefault(false)
             if (ok) {
-                getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-                    .putString(KEY_LAST_UPLOAD_AT, Instant.now().toString())
-                    .apply()
+                if (updateLastUpload) {
+                    getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+                        .putString(KEY_LAST_UPLOAD_AT, Instant.now().toString())
+                        .apply()
+                }
                 return true
             }
         }
