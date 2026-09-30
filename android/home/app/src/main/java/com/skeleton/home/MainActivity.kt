@@ -1,9 +1,11 @@
 package com.skeleton.home
 
 import android.app.Activity
+import android.Manifest
 import android.app.DownloadManager
 import android.app.PendingIntent
 import android.content.pm.PackageInstaller
+import android.content.pm.PackageManager
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
@@ -90,6 +92,7 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
+import androidx.core.content.ContextCompat
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -2205,6 +2208,8 @@ private fun shareMfpPdf(context:Context,api:HomeApi,doc:JSONObject){
     var healthGranted by remember{mutableStateOf(false)}
     var healthStatus by remember{mutableStateOf("")}
     var healthBusy by remember{mutableStateOf(false)}
+    var trackingEnabled by remember{mutableStateOf(LocationTrackingService.isTrackingEnabled(context))}
+    var trackingStatus by remember{mutableStateOf("")}
     var secretText by rememberSaveable{mutableStateOf("")};var gmailCallbackUrl by rememberSaveable{mutableStateOf("")};var gmailExpectedState by rememberSaveable{mutableStateOf("")};var status by remember{mutableStateOf("")};var busy by remember{mutableStateOf(false)};var gmailConfigured by remember{mutableStateOf(false)};var gmailAuthorized by remember{mutableStateOf(false)};var bitwardenBackup by remember{mutableStateOf("not_needed")}
     fun refresh(){scope.launch{runCatching{api.get("/api/native/home-edge/secrets/status")}.onSuccess{gmailConfigured=it.optBoolean("gmail_oauth_client_configured");gmailAuthorized=it.optBoolean("gmail_authorized");bitwardenBackup=it.optString("bitwarden_backup","not_needed")}}}
     suspend fun syncHealth(){
@@ -2226,6 +2231,17 @@ private fun shareMfpPdf(context:Context,api:HomeApi,doc:JSONObject){
         healthGranted=granted.containsAll(SkeletonHealthConnectAdapter.readPermissions)
         if(healthGranted&&api.server!=null)scope.launch{syncHealth()} else if(!healthGranted)healthStatus="Доступ до сну/кроків не надано"
     }
+    val trackingPermissionLauncher=rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()){grants->
+        val granted=(grants[Manifest.permission.ACCESS_FINE_LOCATION]==true)||(grants[Manifest.permission.ACCESS_COARSE_LOCATION]==true)
+        if(granted){
+            LocationTrackingService.start(context)
+            trackingEnabled=true
+            trackingStatus="Тракінг увімкнено"
+        }else{
+            trackingEnabled=false
+            trackingStatus="Доступ до місцезнаходження не надано"
+        }
+    }
     val filePicker=rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()){uri->if(uri!=null){scope.launch{busy=true;status="Перевіряю файл…";runCatching{api.uploadSecretFile(context,uri)}.onSuccess{status="Секрет прийнято · ${it.optString("label","готово")}";refresh()}.onFailure{status=it.message?:"Не вдалося додати секрет"};busy=false}}}
     Column(Modifier.fillMaxSize().background(Bg)){
         Header("Home Edge",api.server!=null,hyperion,onHyperion,outputTarget,onOutputTarget,onMenu,subtitle="Керування вузлом")
@@ -2243,6 +2259,40 @@ private fun shareMfpPdf(context:Context,api:HomeApi,doc:JSONObject){
                     Button(onClick={scope.launch{syncHealth()}},enabled=!healthBusy&&api.server!=null,shape=RoundedCornerShape(12.dp),colors=ButtonDefaults.buttonColors(containerColor=Action),modifier=Modifier.fillMaxWidth().height(46.dp).padding(top=10.dp)){Text(if(healthBusy)"Синхронізація…" else "Синхронізувати зараз",fontWeight=FontWeight.SemiBold,color=Text)}
                 }
                 if(healthStatus.isNotBlank())Text(healthStatus,fontSize=11.sp,lineHeight=16.sp,color=if(healthStatus.startsWith("Синхронізовано"))Green else Muted,modifier=Modifier.padding(top=9.dp))
+            }}
+            item{Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(Card).border(1.dp,Line,RoundedCornerShape(16.dp)).padding(16.dp)){
+                Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically){
+                    Column(Modifier.weight(1f)){
+                        Text("Тракінг",fontSize=17.sp,fontWeight=FontWeight.Bold,color=Text)
+                        Text(if(trackingEnabled)"Активний · приватний Geo-контур" else "Вимкнено",fontSize=11.sp,color=if(trackingEnabled)Green else Muted,modifier=Modifier.padding(top=4.dp))
+                    }
+                    Switch(
+                        checked=trackingEnabled,
+                        onCheckedChange={enabled->
+                            if(enabled){
+                                val fine=ContextCompat.checkSelfPermission(context,Manifest.permission.ACCESS_FINE_LOCATION)==PackageManager.PERMISSION_GRANTED
+                                val coarse=ContextCompat.checkSelfPermission(context,Manifest.permission.ACCESS_COARSE_LOCATION)==PackageManager.PERMISSION_GRANTED
+                                if(fine||coarse){
+                                    LocationTrackingService.start(context)
+                                    trackingEnabled=true
+                                    trackingStatus="Тракінг увімкнено"
+                                }else{
+                                    trackingPermissionLauncher.launch(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION,Manifest.permission.ACCESS_COARSE_LOCATION))
+                                }
+                            }else{
+                                LocationTrackingService.stop(context)
+                                trackingEnabled=false
+                                trackingStatus="Тракінг вимкнено"
+                            }
+                        }
+                    )
+                }
+                Text("Під час роботи Home тримає foreground-service: не частіше ніж раз на 5 хв або після переміщення ≈100 м. Сирі координати зберігаються лише локально на Home Edge й не потрапляють у GitHub або MemoryGate.",fontSize=10.sp,lineHeight=15.sp,color=Muted,modifier=Modifier.padding(top=9.dp))
+                val buffered=LocationTrackingService.bufferedCount(context)
+                val lastObserved=LocationTrackingService.lastObservedAt(context)
+                if(buffered>0)Text("Очікують відправлення: $buffered точ.",fontSize=10.sp,color=Warn,modifier=Modifier.padding(top=7.dp))
+                if(lastObserved.isNotBlank())Text("Остання точка: $lastObserved",fontSize=10.sp,color=Muted,modifier=Modifier.padding(top=5.dp))
+                if(trackingStatus.isNotBlank())Text(trackingStatus,fontSize=11.sp,color=if(trackingEnabled)Green else Muted,modifier=Modifier.padding(top=7.dp))
             }}
             item{Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(Card).padding(16.dp)){
                 Text("Секрети",fontSize=17.sp,fontWeight=FontWeight.Bold,color=Text)
