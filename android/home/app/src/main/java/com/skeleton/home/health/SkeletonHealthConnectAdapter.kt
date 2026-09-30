@@ -10,6 +10,8 @@ import androidx.health.connect.client.request.ReadRecordsRequest
 import androidx.health.connect.client.time.TimeRangeFilter
 import java.time.Duration
 import java.time.Instant
+import org.json.JSONArray
+import org.json.JSONObject
 
 data class HealthStepsSummary(
     val windowStart: Instant,
@@ -144,3 +146,44 @@ class SkeletonHealthConnectAdapter(
             else -> "other"
         }
 }
+
+fun HealthConnectSummary.toSkeletonJson(): JSONObject =
+    JSONObject()
+        .put("schema", "skeleton.android.health_summary.v1")
+        .put("collected_at", collectedAt.toString())
+        .put(
+            "steps",
+            steps?.let {
+                JSONObject()
+                    .put("window_start", it.windowStart.toString())
+                    .put("window_end", it.windowEnd.toString())
+                    .put("total_steps", it.totalSteps)
+                    .put("record_count", it.recordCount)
+            } ?: JSONObject.NULL,
+        )
+        .put(
+            "sleep_sessions",
+            JSONArray().apply {
+                sleepSessions.forEach { session ->
+                    put(
+                        JSONObject()
+                            .put("start", session.start.toString())
+                            .put("end", session.end.toString())
+                            .put("duration_seconds", session.durationSeconds)
+                            .put(
+                                "stages",
+                                JSONArray().apply {
+                                    session.stages.forEach { stage ->
+                                        put(
+                                            JSONObject()
+                                                .put("stage", stage.stage)
+                                                .put("duration_seconds", stage.durationSeconds)
+                                        )
+                                    }
+                                },
+                            )
+                    )
+                }
+            },
+        )
+
