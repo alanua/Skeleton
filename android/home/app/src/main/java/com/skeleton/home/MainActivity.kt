@@ -31,6 +31,7 @@ import com.skeleton.home.health.HealthConnectAvailability
 import com.skeleton.home.health.SkeletonHealthConnectAdapter
 import com.skeleton.home.health.toSkeletonJson
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
