@@ -452,6 +452,11 @@ private fun JSONObject.cleanText(key:String, fallback:String=""):String { val v=
 private fun String.ellipsize(n:Int=90)=if(length<=n)this else take(n-1)+"…"
 
 
+private data class FamilyRecoveryAction(
+    val id:String,
+    val label:String,
+    val url:String,
+)
 private data class FamilySecurityDevice(
     val id:String,
     val name:String,
@@ -460,6 +465,7 @@ private data class FamilySecurityDevice(
     val status:String,
     val lostAt:Long,
     val providers:List<String>,
+    val recoveryActions:List<FamilyRecoveryAction>,
 )
 private fun parseFamilySecurityDevice(j:JSONObject)=FamilySecurityDevice(
     id=j.cleanText("device_id"),
@@ -469,6 +475,13 @@ private fun parseFamilySecurityDevice(j:JSONObject)=FamilySecurityDevice(
     status=j.cleanText("status","normal"),
     lostAt=j.optLong("lost_at",0L),
     providers=j.optJSONArray("recovery_providers")?.strings().orEmpty(),
+    recoveryActions=j.optJSONArray("recovery_actions")?.objects().orEmpty().map{
+        FamilyRecoveryAction(
+            id=it.cleanText("id"),
+            label=it.cleanText("label"),
+            url=it.cleanText("url"),
+        )
+    }.filter{it.label.isNotBlank()&&it.url.startsWith("https://")},
 )
 private fun familySecurityRoleLabel(role:String)=when(role){
     "android_phone","ios_phone"->"Телефон"
@@ -486,6 +499,7 @@ private fun recoveryProviderLabel(id:String)=when(id){
 @Composable
 private fun FamilySecurityDialog(api:HomeApi,isFullProfile:Boolean,onDismiss:()->Unit){
     val scope=rememberCoroutineScope()
+    val context=LocalContext.current
     var devices by remember{mutableStateOf<List<FamilySecurityDevice>>(emptyList())}
     var loaded by remember{mutableStateOf(false)}
     var busyId by remember{mutableStateOf("")}
@@ -572,6 +586,34 @@ private fun FamilySecurityDialog(api:HomeApi,isFullProfile:Boolean,onDismiss:()-
                                     "Пошук/блокування: "+d.providers.joinToString(" · "){recoveryProviderLabel(it)},
                                     fontSize=9.sp,lineHeight=13.sp,color=Muted,modifier=Modifier.padding(top=9.dp)
                                 )
+                            }
+                            if(d.recoveryActions.isNotEmpty()){
+                                Column(
+                                    Modifier.fillMaxWidth().padding(top=8.dp),
+                                    verticalArrangement=Arrangement.spacedBy(6.dp)
+                                ){
+                                    d.recoveryActions.forEach{action->
+                                        OutlinedButton(
+                                            onClick={
+                                                runCatching{
+                                                    context.startActivity(
+                                                        Intent(Intent.ACTION_VIEW,Uri.parse(action.url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                                    )
+                                                }.onFailure{
+                                                    Toast.makeText(context,"Не вдалося відкрити "+action.label,Toast.LENGTH_LONG).show()
+                                                }
+                                            },
+                                            modifier=Modifier.fillMaxWidth().height(42.dp),
+                                            shape=RoundedCornerShape(11.dp),
+                                            border=BorderStroke(1.dp,Line),
+                                            colors=ButtonDefaults.outlinedButtonColors(contentColor=Text)
+                                        ){
+                                            Mdi("open-in-new",16.dp,Accent)
+                                            Spacer(Modifier.width(7.dp))
+                                            Text(action.label,fontSize=11.sp,fontWeight=FontWeight.SemiBold,maxLines=1,overflow=TextOverflow.Ellipsis)
+                                        }
+                                    }
+                                }
                             }
                             if(!lost){
                                 Button(
