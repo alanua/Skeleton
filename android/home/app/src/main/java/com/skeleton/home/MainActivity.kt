@@ -84,6 +84,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.Popup
@@ -2459,7 +2460,36 @@ private fun shareMfpPdf(context:Context,api:HomeApi,doc:JSONObject){
     var trackingRestartNeeded by remember{mutableStateOf(LocationTrackingService.isRestartNeeded(context))}
     var trackingStatus by remember{mutableStateOf("")}
     var secretText by rememberSaveable{mutableStateOf("")};var gmailCallbackUrl by rememberSaveable{mutableStateOf("")};var gmailExpectedState by rememberSaveable{mutableStateOf("")};var status by remember{mutableStateOf("")};var busy by remember{mutableStateOf(false)};var gmailConfigured by remember{mutableStateOf(false)};var gmailAuthorized by remember{mutableStateOf(false)};var bitwardenBackup by remember{mutableStateOf("not_needed")}
-    fun refresh(){scope.launch{runCatching{api.get("/api/native/home-edge/secrets/status")}.onSuccess{gmailConfigured=it.optBoolean("gmail_oauth_client_configured");gmailAuthorized=it.optBoolean("gmail_authorized");bitwardenBackup=it.optString("bitwarden_backup","not_needed")}}}
+    var telegramApiConfigured by remember{mutableStateOf(false)}
+    var telegramSessionConfigured by remember{mutableStateOf(false)}
+    var telegramAuthorized by remember{mutableStateOf(false)}
+    var telegramSourceCount by remember{mutableStateOf(0)}
+    var telegramLastSyncStatus by remember{mutableStateOf("")}
+    var telegramApiId by remember{mutableStateOf("")}
+    var telegramApiHash by remember{mutableStateOf("")}
+    var telegramPhone by remember{mutableStateOf("")}
+    var telegramCode by remember{mutableStateOf("")}
+    var telegramPassword by remember{mutableStateOf("")}
+    var telegramAuthStage by remember{mutableStateOf("")}
+    var telegramSourceHandle by remember{mutableStateOf("")}
+    var telegramSourcePrivate by remember{mutableStateOf(false)}
+    var telegramSources by remember{mutableStateOf<List<String>>(emptyList())}
+    var telegramStatus by remember{mutableStateOf("")}
+    fun refresh(){scope.launch{
+        runCatching{api.get("/api/native/home-edge/secrets/status")}.onSuccess{
+            gmailConfigured=it.optBoolean("gmail_oauth_client_configured")
+            gmailAuthorized=it.optBoolean("gmail_authorized")
+            bitwardenBackup=it.optString("bitwarden_backup","not_needed")
+            telegramApiConfigured=it.optBoolean("telegram_api_configured")
+            telegramSessionConfigured=it.optBoolean("telegram_session_configured")
+            telegramAuthorized=it.optBoolean("telegram_authorized")
+            telegramSourceCount=it.optInt("telegram_source_count",0)
+            telegramLastSyncStatus=it.optString("telegram_last_sync_status")
+        }
+        runCatching{api.get("/api/native/home-edge/telegram/sources")}.onSuccess{j->
+            telegramSources=j.optJSONArray("sources")?.objects().orEmpty().mapNotNull{x->x.cleanText("handle").takeIf{h->h.isNotBlank()}}
+        }
+    }}
     suspend fun syncHealth(){
         healthBusy=true
         try{
@@ -2575,7 +2605,7 @@ private fun shareMfpPdf(context:Context,api:HomeApi,doc:JSONObject){
             }}
             item{Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(Card).padding(16.dp)){
                 Text("Секрети",fontSize=17.sp,fontWeight=FontWeight.Bold,color=Text)
-                Text("Поки тут лише додавання секретів. Інші функції Home Edge додамо пізніше.",fontSize=11.sp,lineHeight=16.sp,color=Muted,modifier=Modifier.padding(top=5.dp,bottom=12.dp))
+                Text("Gmail і Telegram. Довготривалі секрети зберігаються через Bitwarden; одноразові коди не записуються в Home.",fontSize=11.sp,lineHeight=16.sp,color=Muted,modifier=Modifier.padding(top=5.dp,bottom=12.dp))
                 Row(verticalAlignment=Alignment.CenterVertically){Box(Modifier.size(8.dp).clip(CircleShape).background(if(gmailAuthorized)Green else if(gmailConfigured)Warn else Muted));Spacer(Modifier.width(8.dp));Text(when{gmailAuthorized->"Gmail: авторизовано";gmailConfigured->"Gmail: секрет завантажено, потрібна авторизація";else->"Gmail: секрет ще не додано"},fontSize=11.sp,color=if(gmailAuthorized)Green else if(gmailConfigured)Warn else Muted)}
                 if(gmailConfigured){Text(if(bitwardenBackup=="stored")"Bitwarden: резервну копію збережено" else "Bitwarden: очікує синхронізації",fontSize=11.sp,color=if(bitwardenBackup=="stored")Green else Warn,modifier=Modifier.padding(top=7.dp))}
                 if(gmailConfigured&&!gmailAuthorized){
@@ -2584,12 +2614,90 @@ private fun shareMfpPdf(context:Context,api:HomeApi,doc:JSONObject){
                     OutlinedTextField(value=gmailCallbackUrl,onValueChange={if(it.length<=8192)gmailCallbackUrl=it},enabled=!busy,label={Text("Адреса після Google")},placeholder={Text("http://127.0.0.1:53682/?state=…&code=…")},minLines=2,maxLines=4,modifier=Modifier.fillMaxWidth(),colors=OutlinedTextFieldDefaults.colors(focusedTextColor=Text,unfocusedTextColor=Text,focusedBorderColor=Accent,unfocusedBorderColor=Line,focusedLabelColor=Accent,unfocusedLabelColor=Muted,cursorColor=Accent))
                     Button(onClick={scope.launch{busy=true;status="Завершую авторизацію Gmail…";runCatching{val cb=Uri.parse(gmailCallbackUrl.trim());if(cb.host!="127.0.0.1"||cb.port!=53682)throw IllegalStateException("Вставте повну адресу 127.0.0.1:53682 з браузера");val code=cb.getQueryParameter("code").orEmpty();val state=cb.getQueryParameter("state").orEmpty();if(code.isBlank()||state.isBlank())throw IllegalStateException("У адресі Google немає code/state");if(gmailExpectedState.isNotBlank()&&state!=gmailExpectedState)throw IllegalStateException("Ця адреса належить іншій сесії авторизації");api.post("/api/native/home-edge/gmail/callback",JSONObject().put("code",code).put("state",state))}.onSuccess{done->status=done.optString("message","Gmail авторизовано");gmailCallbackUrl="";gmailExpectedState="";refresh()}.onFailure{status=it.message?:"Не вдалося завершити авторизацію Gmail"};busy=false}},enabled=!busy&&gmailCallbackUrl.isNotBlank(),shape=RoundedCornerShape(12.dp),colors=ButtonDefaults.buttonColors(containerColor=Accent),modifier=Modifier.fillMaxWidth().height(48.dp).padding(top=8.dp)){Text("Завершити авторизацію",fontWeight=FontWeight.Bold,color=Color.White)}
                 }
+
+                HorizontalDivider(Modifier.padding(vertical=14.dp),color=Line)
+                Text("Telegram · читання каналів",fontSize=15.sp,fontWeight=FontWeight.Bold,color=Text)
+                val tgColor=when{telegramAuthorized->Green;telegramApiConfigured->Warn;else->Muted}
+                val tgLabel=when{
+                    telegramAuthorized->"Telegram: MTProto авторизовано"
+                    telegramSessionConfigured->"Telegram: сесія збережена, потрібна перевірка"
+                    telegramApiConfigured->"Telegram: API налаштовано, потрібна авторизація"
+                    else->"Telegram: API ще не налаштовано"
+                }
+                Row(Modifier.padding(top=8.dp),verticalAlignment=Alignment.CenterVertically){Box(Modifier.size(8.dp).clip(CircleShape).background(tgColor));Spacer(Modifier.width(8.dp));Text(tgLabel,fontSize=11.sp,color=tgColor)}
+                if(telegramSourceCount>0||telegramLastSyncStatus.isNotBlank())Text("Джерел: $telegramSourceCount · sync: ${telegramLastSyncStatus.ifBlank{"ще не запускався"}}",fontSize=10.sp,color=Muted,modifier=Modifier.padding(top=6.dp))
+                Text("User-account використовується тільки для READ_PUBLIC / explicit allowlist. Надсилання, редагування, видалення, реакції та join/leave через MTProto відсутні.",fontSize=10.sp,lineHeight=15.sp,color=Muted,modifier=Modifier.padding(top=8.dp))
+
+                if(!telegramApiConfigured){
+                    OutlinedTextField(value=telegramApiId,onValueChange={v->if(v.length<=20&&v.all{it.isDigit()})telegramApiId=v},enabled=!busy,label={Text("Telegram API ID")},singleLine=true,modifier=Modifier.fillMaxWidth().padding(top=9.dp),colors=OutlinedTextFieldDefaults.colors(focusedTextColor=Text,unfocusedTextColor=Text,focusedBorderColor=Accent,unfocusedBorderColor=Line,focusedLabelColor=Accent,unfocusedLabelColor=Muted,cursorColor=Accent))
+                    OutlinedTextField(value=telegramApiHash,onValueChange={v->if(v.length<=64)telegramApiHash=v.trim()},enabled=!busy,label={Text("Telegram API hash")},singleLine=true,visualTransformation=PasswordVisualTransformation(),modifier=Modifier.fillMaxWidth().padding(top=7.dp),colors=OutlinedTextFieldDefaults.colors(focusedTextColor=Text,unfocusedTextColor=Text,focusedBorderColor=Accent,unfocusedBorderColor=Line,focusedLabelColor=Accent,unfocusedLabelColor=Muted,cursorColor=Accent))
+                    Button(onClick={scope.launch{
+                        busy=true;telegramStatus="Зберігаю Telegram API у Bitwarden…"
+                        val value=JSONObject().put("kind","telegram_mtproto").put("api_id",telegramApiId).put("api_hash",telegramApiHash).toString()
+                        runCatching{api.post("/api/native/home-edge/secrets/text",JSONObject().put("label","Telegram MTProto API").put("value",value))}
+                            .onSuccess{telegramApiId="";telegramApiHash="";telegramStatus="Telegram API збережено";refresh()}
+                            .onFailure{telegramStatus=it.message?:"Не вдалося зберегти Telegram API"}
+                        busy=false
+                    }},enabled=!busy&&telegramApiId.length>=5&&telegramApiHash.length==32,shape=RoundedCornerShape(12.dp),colors=ButtonDefaults.buttonColors(containerColor=Accent),modifier=Modifier.fillMaxWidth().height(48.dp).padding(top=9.dp)){Text("Зберегти Telegram API",fontWeight=FontWeight.Bold,color=Color.White)}
+                }else if(!telegramAuthorized){
+                    OutlinedTextField(value=telegramPhone,onValueChange={if(it.length<=32)telegramPhone=it},enabled=!busy&&telegramAuthStage.isBlank(),label={Text("Номер Telegram")},placeholder={Text("+49…")},singleLine=true,modifier=Modifier.fillMaxWidth().padding(top=9.dp),colors=OutlinedTextFieldDefaults.colors(focusedTextColor=Text,unfocusedTextColor=Text,focusedBorderColor=Accent,unfocusedBorderColor=Line,focusedLabelColor=Accent,unfocusedLabelColor=Muted,cursorColor=Accent))
+                    if(telegramAuthStage.isBlank()){
+                        Button(onClick={scope.launch{
+                            busy=true;telegramStatus="Надсилаю запит Telegram…"
+                            runCatching{api.post("/api/native/home-edge/telegram/auth/start",JSONObject().put("phone",telegramPhone.trim()))}
+                                .onSuccess{telegramPhone="";telegramAuthStage="code";telegramStatus=it.optString("message","Код Telegram надіслано")}
+                                .onFailure{telegramStatus=it.message?:"Не вдалося почати Telegram авторизацію"}
+                            busy=false
+                        }},enabled=!busy&&telegramPhone.isNotBlank(),shape=RoundedCornerShape(12.dp),colors=ButtonDefaults.buttonColors(containerColor=Action),modifier=Modifier.fillMaxWidth().height(46.dp).padding(top=8.dp)){Text("Авторизувати Telegram",fontWeight=FontWeight.SemiBold,color=Text)}
+                    }
+                    if(telegramAuthStage=="code"){
+                        OutlinedTextField(value=telegramCode,onValueChange={v->if(v.length<=10&&v.all{it.isDigit()})telegramCode=v},enabled=!busy,label={Text("Одноразовий код Telegram")},singleLine=true,visualTransformation=PasswordVisualTransformation(),modifier=Modifier.fillMaxWidth().padding(top=8.dp),colors=OutlinedTextFieldDefaults.colors(focusedTextColor=Text,unfocusedTextColor=Text,focusedBorderColor=Accent,unfocusedBorderColor=Line,focusedLabelColor=Accent,unfocusedLabelColor=Muted,cursorColor=Accent))
+                        Button(onClick={scope.launch{
+                            busy=true
+                            val code=telegramCode;telegramCode=""
+                            runCatching{api.post("/api/native/home-edge/telegram/auth/code",JSONObject().put("code",code))}
+                                .onSuccess{done->if(done.optString("status")=="PASSWORD_REQUIRED"){telegramAuthStage="password";telegramStatus=done.optString("message","Потрібен 2FA пароль")}else{telegramAuthStage="";telegramStatus="Telegram авторизовано";refresh()}}
+                                .onFailure{telegramStatus=it.message?:"Telegram не прийняв код"}
+                            busy=false
+                        }},enabled=!busy&&telegramCode.length>=3,shape=RoundedCornerShape(12.dp),colors=ButtonDefaults.buttonColors(containerColor=Accent),modifier=Modifier.fillMaxWidth().height(46.dp).padding(top=8.dp)){Text("Підтвердити код",fontWeight=FontWeight.Bold,color=Color.White)}
+                    }
+                    if(telegramAuthStage=="password"){
+                        OutlinedTextField(value=telegramPassword,onValueChange={if(it.length<=512)telegramPassword=it},enabled=!busy,label={Text("Пароль двоетапної перевірки")},singleLine=true,visualTransformation=PasswordVisualTransformation(),modifier=Modifier.fillMaxWidth().padding(top=8.dp),colors=OutlinedTextFieldDefaults.colors(focusedTextColor=Text,unfocusedTextColor=Text,focusedBorderColor=Accent,unfocusedBorderColor=Line,focusedLabelColor=Accent,unfocusedLabelColor=Muted,cursorColor=Accent))
+                        Button(onClick={scope.launch{
+                            busy=true
+                            val password=telegramPassword;telegramPassword=""
+                            runCatching{api.post("/api/native/home-edge/telegram/auth/password",JSONObject().put("password",password))}
+                                .onSuccess{telegramAuthStage="";telegramStatus="Telegram авторизовано";refresh()}
+                                .onFailure{telegramStatus=it.message?:"Telegram не прийняв 2FA пароль"}
+                            busy=false
+                        }},enabled=!busy&&telegramPassword.isNotBlank(),shape=RoundedCornerShape(12.dp),colors=ButtonDefaults.buttonColors(containerColor=Accent),modifier=Modifier.fillMaxWidth().height(46.dp).padding(top=8.dp)){Text("Підтвердити 2FA",fontWeight=FontWeight.Bold,color=Color.White)}
+                    }
+                }else{
+                    OutlinedTextField(value=telegramSourceHandle,onValueChange={if(it.length<=65)telegramSourceHandle=it.trim()},enabled=!busy,label={Text("Канал")},placeholder={Text("@channel")},singleLine=true,modifier=Modifier.fillMaxWidth().padding(top=9.dp),colors=OutlinedTextFieldDefaults.colors(focusedTextColor=Text,unfocusedTextColor=Text,focusedBorderColor=Accent,unfocusedBorderColor=Line,focusedLabelColor=Accent,unfocusedLabelColor=Muted,cursorColor=Accent))
+                    Row(Modifier.fillMaxWidth().padding(top=5.dp),verticalAlignment=Alignment.CenterVertically){Switch(checked=telegramSourcePrivate,onCheckedChange={telegramSourcePrivate=it},enabled=!busy);Spacer(Modifier.width(8.dp));Text(if(telegramSourcePrivate)"Приватний allowlisted канал" else "Публічний канал",fontSize=10.sp,color=Muted)}
+                    Button(onClick={scope.launch{
+                        busy=true
+                        runCatching{api.post("/api/native/home-edge/telegram/sources",JSONObject().put("handle",telegramSourceHandle).put("private",telegramSourcePrivate))}
+                            .onSuccess{telegramStatus="Канал додано";telegramSourceHandle="";telegramSourcePrivate=false;refresh()}
+                            .onFailure{telegramStatus=it.message?:"Не вдалося додати канал"}
+                        busy=false
+                    }},enabled=!busy&&telegramSourceHandle.startsWith("@")&&telegramSourceHandle.length>=6,shape=RoundedCornerShape(12.dp),colors=ButtonDefaults.buttonColors(containerColor=Action),modifier=Modifier.fillMaxWidth().height(46.dp).padding(top=7.dp)){Text("Додати канал",fontWeight=FontWeight.SemiBold,color=Text)}
+                    if(telegramSources.isNotEmpty())Text("Allowlist: "+telegramSources.joinToString(" · "),fontSize=10.sp,lineHeight=15.sp,color=Muted,modifier=Modifier.padding(top=8.dp))
+                    Button(onClick={scope.launch{
+                        busy=true;telegramStatus="Синхронізую Telegram…"
+                        runCatching{api.post("/api/native/home-edge/telegram/sync",JSONObject())}
+                            .onSuccess{done->telegramStatus="Sync: "+done.optString("status","готово");refresh()}
+                            .onFailure{telegramStatus=it.message?:"Telegram sync не вдався"}
+                        busy=false
+                    }},enabled=!busy&&telegramSourceCount>0,shape=RoundedCornerShape(12.dp),colors=ButtonDefaults.buttonColors(containerColor=Accent),modifier=Modifier.fillMaxWidth().height(46.dp).padding(top=8.dp)){Text("Синхронізувати Telegram",fontWeight=FontWeight.Bold,color=Color.White)}
+                }
+                if(telegramStatus.isNotBlank())Text(telegramStatus,fontSize=11.sp,lineHeight=16.sp,color=if(telegramAuthorized||telegramStatus.contains("збережено")||telegramStatus.contains("додано"))Green else Muted,modifier=Modifier.padding(top=9.dp))
                 Button(onClick={filePicker.launch(arrayOf("*/*"))},enabled=!busy,shape=RoundedCornerShape(12.dp),colors=ButtonDefaults.buttonColors(containerColor=Accent),modifier=Modifier.fillMaxWidth().height(48.dp).padding(top=10.dp)){Text("Завантажити секрет з файлу",fontWeight=FontWeight.Bold,color=Color.White)}
                 Text("або вставити вручну",fontSize=10.sp,color=Muted,modifier=Modifier.padding(top=14.dp,bottom=6.dp))
                 OutlinedTextField(value=secretText,onValueChange={if(it.length<=131072)secretText=it},enabled=!busy,label={Text("JSON / секрет")},placeholder={Text("Вставте вміст сюди")},minLines=5,maxLines=10,modifier=Modifier.fillMaxWidth(),colors=OutlinedTextFieldDefaults.colors(focusedTextColor=Text,unfocusedTextColor=Text,focusedBorderColor=Accent,unfocusedBorderColor=Line,focusedLabelColor=Accent,unfocusedLabelColor=Muted,cursorColor=Accent))
                 Button(onClick={scope.launch{busy=true;status="Перевіряю…";runCatching{api.post("/api/native/home-edge/secrets/text",JSONObject().put("label","Home app input").put("value",secretText))}.onSuccess{status="Секрет прийнято · ${it.optString("label","готово")}";secretText="";refresh()}.onFailure{status=it.message?:"Не вдалося додати секрет"};busy=false}},enabled=!busy&&secretText.isNotBlank(),shape=RoundedCornerShape(12.dp),colors=ButtonDefaults.buttonColors(containerColor=Action),modifier=Modifier.fillMaxWidth().height(46.dp).padding(top=8.dp)){Text("Додати введений секрет",fontWeight=FontWeight.SemiBold,color=Text)}
                 if(status.isNotBlank())Text(status,fontSize=11.sp,lineHeight=16.sp,color=if(status.startsWith("Секрет прийнято"))Green else Muted,modifier=Modifier.padding(top=10.dp))
-                Text("Зараз автоматично розпізнається Google OAuth Desktop JSON. Сам секрет у відповіді та журналах не показується.",fontSize=10.sp,lineHeight=15.sp,color=Muted,modifier=Modifier.padding(top=12.dp))
+                Text("Розпізнаються Google OAuth Desktop JSON та Telegram MTProto API JSON. Самі значення секретів у відповідях і журналах не показуються.",fontSize=10.sp,lineHeight=15.sp,color=Muted,modifier=Modifier.padding(top=12.dp))
             }}
         }
     }
