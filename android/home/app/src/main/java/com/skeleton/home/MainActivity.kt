@@ -25,6 +25,9 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.setContent
+import com.skeleton.home.health.HealthConnectAvailability
+import com.skeleton.home.health.SkeletonHealthConnectAdapter
+import com.skeleton.home.health.toSkeletonJson
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -2197,14 +2200,50 @@ private fun shareMfpPdf(context:Context,api:HomeApi,doc:JSONObject){
 
 @Composable private fun HomeEdgeScreen(api:HomeApi,hyperion:Boolean,onHyperion:(Boolean)->Unit,outputTarget:String,onOutputTarget:(String)->Unit,onMenu:()->Unit,onBack:()->Unit){
     val scope=rememberCoroutineScope();val context=LocalContext.current
+    val healthAdapter=remember(context){SkeletonHealthConnectAdapter(context.applicationContext)}
+    var healthAvailability by remember{mutableStateOf(SkeletonHealthConnectAdapter.availability(context))}
+    var healthGranted by remember{mutableStateOf(false)}
+    var healthStatus by remember{mutableStateOf("")}
+    var healthBusy by remember{mutableStateOf(false)}
     var secretText by rememberSaveable{mutableStateOf("")};var gmailCallbackUrl by rememberSaveable{mutableStateOf("")};var gmailExpectedState by rememberSaveable{mutableStateOf("")};var status by remember{mutableStateOf("")};var busy by remember{mutableStateOf(false)};var gmailConfigured by remember{mutableStateOf(false)};var gmailAuthorized by remember{mutableStateOf(false)};var bitwardenBackup by remember{mutableStateOf("not_needed")}
     fun refresh(){scope.launch{runCatching{api.get("/api/native/home-edge/secrets/status")}.onSuccess{gmailConfigured=it.optBoolean("gmail_oauth_client_configured");gmailAuthorized=it.optBoolean("gmail_authorized");bitwardenBackup=it.optString("bitwarden_backup","not_needed")}}}
-    LaunchedEffect(api.server){if(api.server!=null)refresh()}
+    suspend fun syncHealth(){
+        healthBusy=true
+        try{
+            val summary=healthAdapter.readRecentSummary()?:throw IllegalStateException("Health Connect не надав дані")
+            val receipt=api.post("/api/native/home-edge/android/health",summary.toSkeletonJson())
+            healthStatus="Синхронізовано: сон — ${receipt.optInt("sleep_session_count",0)} сес., кроки — ${if(receipt.optBoolean("has_steps"))"так" else "немає"}"
+        }catch(e:Exception){healthStatus=e.message?:"Не вдалося синхронізувати Health Connect"}
+        finally{healthBusy=false}
+    }
+    fun refreshHealth(){scope.launch{
+        healthAvailability=SkeletonHealthConnectAdapter.availability(context)
+        healthGranted=runCatching{healthAdapter.hasReadPermissions()}.getOrDefault(false)
+        if(healthGranted&&api.server!=null)syncHealth()
+    }}
+    LaunchedEffect(api.server){if(api.server!=null){refresh();refreshHealth()}}
+    val healthPermissionLauncher=rememberLauncherForActivityResult(SkeletonHealthConnectAdapter.permissionContract()){granted->
+        healthGranted=granted.containsAll(SkeletonHealthConnectAdapter.readPermissions)
+        if(healthGranted&&api.server!=null)scope.launch{syncHealth()} else if(!healthGranted)healthStatus="Доступ до сну/кроків не надано"
+    }
     val filePicker=rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()){uri->if(uri!=null){scope.launch{busy=true;status="Перевіряю файл…";runCatching{api.uploadSecretFile(context,uri)}.onSuccess{status="Секрет прийнято · ${it.optString("label","готово")}";refresh()}.onFailure{status=it.message?:"Не вдалося додати секрет"};busy=false}}}
     Column(Modifier.fillMaxSize().background(Bg)){
         Header("Home Edge",api.server!=null,hyperion,onHyperion,outputTarget,onOutputTarget,onMenu,subtitle="Керування вузлом")
         Row(Modifier.fillMaxWidth().padding(horizontal=12.dp,vertical=4.dp),verticalAlignment=Alignment.CenterVertically){TextButton(onClick=onBack){Mdi("chevron-left",18.dp,Muted);Spacer(Modifier.width(5.dp));Text("Пристрої",color=Muted)}}
         LazyColumn(Modifier.weight(1f).padding(horizontal=13.dp),contentPadding=PaddingValues(bottom=24.dp),verticalArrangement=Arrangement.spacedBy(12.dp)){
+            item{Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(Card).border(1.dp,Line,RoundedCornerShape(16.dp)).padding(16.dp)){
+                Text("Здоров’я телефону",fontSize=17.sp,fontWeight=FontWeight.Bold,color=Text)
+                val availabilityText=when(healthAvailability){HealthConnectAvailability.AVAILABLE->if(healthGranted)"Health Connect: доступ надано" else "Health Connect: потрібен дозвіл";HealthConnectAvailability.UPDATE_REQUIRED->"Health Connect: потрібно оновити";HealthConnectAvailability.UNAVAILABLE->"Health Connect: недоступний"}
+                val availabilityColor=when{healthGranted->Green;healthAvailability==HealthConnectAvailability.AVAILABLE->Warn;else->Muted}
+                Row(Modifier.padding(top=8.dp),verticalAlignment=Alignment.CenterVertically){Box(Modifier.size(8.dp).clip(CircleShape).background(availabilityColor));Spacer(Modifier.width(8.dp));Text(availabilityText,fontSize=11.sp,color=availabilityColor)}
+                Text("Збираємо лише агреговані кроки та сесії/стадії сну. Сирі сенсорні потоки й інші медичні дані не читаються.",fontSize=10.sp,lineHeight=15.sp,color=Muted,modifier=Modifier.padding(top=8.dp))
+                if(healthAvailability==HealthConnectAvailability.AVAILABLE&&!healthGranted){
+                    Button(onClick={healthPermissionLauncher.launch(SkeletonHealthConnectAdapter.readPermissions)},enabled=!healthBusy,shape=RoundedCornerShape(12.dp),colors=ButtonDefaults.buttonColors(containerColor=Accent),modifier=Modifier.fillMaxWidth().height(48.dp).padding(top=10.dp)){Text("Надати доступ до сну та кроків",fontWeight=FontWeight.Bold,color=Color.White)}
+                }else if(healthGranted){
+                    Button(onClick={scope.launch{syncHealth()}},enabled=!healthBusy&&api.server!=null,shape=RoundedCornerShape(12.dp),colors=ButtonDefaults.buttonColors(containerColor=Action),modifier=Modifier.fillMaxWidth().height(46.dp).padding(top=10.dp)){Text(if(healthBusy)"Синхронізація…" else "Синхронізувати зараз",fontWeight=FontWeight.SemiBold,color=Text)}
+                }
+                if(healthStatus.isNotBlank())Text(healthStatus,fontSize=11.sp,lineHeight=16.sp,color=if(healthStatus.startsWith("Синхронізовано"))Green else Muted,modifier=Modifier.padding(top=9.dp))
+            }}
             item{Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(Card).padding(16.dp)){
                 Text("Секрети",fontSize=17.sp,fontWeight=FontWeight.Bold,color=Text)
                 Text("Поки тут лише додавання секретів. Інші функції Home Edge додамо пізніше.",fontSize=11.sp,lineHeight=16.sp,color=Muted,modifier=Modifier.padding(top=5.dp,bottom=12.dp))
