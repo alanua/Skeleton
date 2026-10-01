@@ -229,7 +229,7 @@ private class HomeApi {
         val text = input?.bufferedReader(Charsets.UTF_8)?.use(BufferedReader::readText).orEmpty()
         c.disconnect()
         val out = if (text.isBlank()) JSONObject() else JSONObject(text)
-        if (code >= 400) throw IllegalStateException(out.optString("error", "HTTP $code"))
+        if (code >= 400) throw HomeApiException(out.optString("error", "HTTP $code"), out.optString("reason_code", out.optString("status")))
         out
     }
     suspend fun get(path: String) = json("GET", path)
@@ -264,6 +264,32 @@ private class HomeApi {
         val code=c.responseCode;val input=if(code>=400)c.errorStream else c.inputStream;val text=input?.bufferedReader(Charsets.UTF_8)?.use(BufferedReader::readText).orEmpty();c.disconnect()
         val obj=if(text.isBlank())JSONObject() else JSONObject(text);if(code>=400)throw IllegalStateException(obj.optString("error","HTTP $code"));obj
     }
+}
+
+private class HomeApiException(message:String,val reasonCode:String=""):IllegalStateException(message)
+
+private fun telegramDeliveryLabel(type:String):String=when(type.uppercase(Locale.ROOT)){
+    "APP"->"Telegram на вже авторизованому пристрої"
+    "SMS"->"SMS"
+    "CALL"->"дзвінок"
+    "MISSED_CALL"->"пропущений дзвінок"
+    "EMAIL"->"email"
+    "FRAGMENT"->"Fragment"
+    "FIREBASE"->"сторонній канал Telegram"
+    else->"інший канал Telegram"
+}
+private fun telegramDeliveryStatus(j:JSONObject):String{
+    val type=j.optString("delivery_type")
+    val codeLength=j.optInt("code_length",0)
+    val base=if(type.isBlank())"Код Telegram надіслано" else "Код Telegram надіслано: ${telegramDeliveryLabel(type)}"
+    return if(codeLength>0)"$base · $codeLength цифр" else base
+}
+private fun telegramResetOnExpired(e:Throwable,reset:()->Unit):Boolean{
+    if((e as? HomeApiException)?.reasonCode=="AUTH_EXPIRED"){
+        reset()
+        return true
+    }
+    return false
 }
 
 private data class HomeUpdateInfo(val versionCode:Int,val versionName:String,val sha256:String,val bytes:Long,val apkPath:String)
@@ -2471,6 +2497,10 @@ private fun shareMfpPdf(context:Context,api:HomeApi,doc:JSONObject){
     var telegramCode by remember{mutableStateOf("")}
     var telegramPassword by remember{mutableStateOf("")}
     var telegramAuthStage by remember{mutableStateOf("")}
+    var telegramDelivery by remember{mutableStateOf("")}
+    var telegramNextDelivery by remember{mutableStateOf("")}
+    var telegramResendReadyAtMs by remember{mutableStateOf(0L)}
+    var telegramResendRemainingSeconds by remember{mutableStateOf(0)}
     var telegramSourceHandle by remember{mutableStateOf("")}
     var telegramSourcePrivate by remember{mutableStateOf(false)}
     var telegramSources by remember{mutableStateOf<List<String>>(emptyList())}
@@ -2490,6 +2520,32 @@ private fun shareMfpPdf(context:Context,api:HomeApi,doc:JSONObject){
             telegramSources=j.optJSONArray("sources")?.objects().orEmpty().mapNotNull{x->x.cleanText("handle").takeIf{h->h.isNotBlank()}}
         }
     }}
+    fun resetTelegramAuth(){
+        telegramAuthStage=""
+        telegramCode=""
+        telegramPassword=""
+        telegramDelivery=""
+        telegramNextDelivery=""
+        telegramResendReadyAtMs=0L
+        telegramResendRemainingSeconds=0
+        telegramStatus="Сесія авторизації Telegram завершилась. Введіть номер ще раз."
+    }
+    fun applyTelegramAuthStart(j:JSONObject){
+        telegramAuthStage="code"
+        telegramDelivery=telegramDeliveryStatus(j)
+        telegramNextDelivery=j.optString("next_delivery_type")
+        val timeout=j.optInt("timeout_seconds",-1)
+        telegramResendReadyAtMs=if(telegramNextDelivery.isNotBlank()&&timeout>=0)System.currentTimeMillis()+timeout*1000L else 0L
+        telegramResendRemainingSeconds=if(telegramResendReadyAtMs>0)maxOf(0,((telegramResendReadyAtMs-System.currentTimeMillis()+999L)/1000L).toInt()) else 0
+        telegramStatus=j.optString("message",telegramDelivery.ifBlank{"Код Telegram надіслано"})
+    }
+    LaunchedEffect(telegramAuthStage,telegramResendReadyAtMs){
+        while(telegramAuthStage=="code"&&telegramResendReadyAtMs>0){
+            telegramResendRemainingSeconds=maxOf(0,((telegramResendReadyAtMs-System.currentTimeMillis()+999L)/1000L).toInt())
+            if(telegramResendRemainingSeconds<=0)break
+            delay(1000)
+        }
+    }
     suspend fun syncHealth(){
         healthBusy=true
         try{
@@ -2649,19 +2705,30 @@ private fun shareMfpPdf(context:Context,api:HomeApi,doc:JSONObject){
                         Button(onClick={scope.launch{
                             busy=true;telegramStatus="Надсилаю запит Telegram…"
                             runCatching{api.post("/api/native/home-edge/telegram/auth/start",JSONObject().put("phone",telegramPhone.trim()))}
-                                .onSuccess{telegramPhone="";telegramAuthStage="code";telegramStatus=it.optString("message","Код Telegram надіслано")}
+                                .onSuccess{telegramPhone="";applyTelegramAuthStart(it)}
                                 .onFailure{telegramStatus=it.message?:"Не вдалося почати Telegram авторизацію"}
                             busy=false
                         }},enabled=!busy&&telegramPhone.isNotBlank(),shape=RoundedCornerShape(12.dp),colors=ButtonDefaults.buttonColors(containerColor=Action),modifier=Modifier.fillMaxWidth().height(46.dp).padding(top=8.dp)){Text("Авторизувати Telegram",fontWeight=FontWeight.SemiBold,color=Text)}
                     }
                     if(telegramAuthStage=="code"){
+                        if(telegramDelivery.isNotBlank())Text(telegramDelivery,fontSize=11.sp,lineHeight=16.sp,color=Green,modifier=Modifier.padding(top=8.dp))
+                        if(telegramNextDelivery.isNotBlank()&&telegramResendRemainingSeconds>0)Text("Інший спосіб (${telegramDeliveryLabel(telegramNextDelivery)}) буде доступний за ${telegramResendRemainingSeconds} с",fontSize=10.sp,lineHeight=15.sp,color=Warn,modifier=Modifier.padding(top=6.dp))
+                        if(telegramNextDelivery.isNotBlank()&&telegramResendRemainingSeconds<=0){
+                            OutlinedButton(onClick={scope.launch{
+                                busy=true;telegramStatus="Запитую інший спосіб Telegram…"
+                                runCatching{api.post("/api/native/home-edge/telegram/auth/resend",JSONObject())}
+                                    .onSuccess{applyTelegramAuthStart(it)}
+                                    .onFailure{e->if(!telegramResetOnExpired(e,::resetTelegramAuth))telegramStatus=e.message?:"Не вдалося надіслати іншим способом"}
+                                busy=false
+                            }},enabled=!busy,shape=RoundedCornerShape(12.dp),border=BorderStroke(1.dp,Accent),modifier=Modifier.fillMaxWidth().height(46.dp).padding(top=8.dp)){Text("Надіслати іншим способом",fontWeight=FontWeight.SemiBold,color=Accent)}
+                        }
                         OutlinedTextField(value=telegramCode,onValueChange={v->if(v.length<=10&&v.all{it.isDigit()})telegramCode=v},enabled=!busy,label={Text("Одноразовий код Telegram")},singleLine=true,visualTransformation=PasswordVisualTransformation(),modifier=Modifier.fillMaxWidth().padding(top=8.dp),colors=OutlinedTextFieldDefaults.colors(focusedTextColor=Text,unfocusedTextColor=Text,focusedBorderColor=Accent,unfocusedBorderColor=Line,focusedLabelColor=Accent,unfocusedLabelColor=Muted,cursorColor=Accent))
                         Button(onClick={scope.launch{
                             busy=true
                             val code=telegramCode;telegramCode=""
                             runCatching{api.post("/api/native/home-edge/telegram/auth/code",JSONObject().put("code",code))}
                                 .onSuccess{done->if(done.optString("status")=="PASSWORD_REQUIRED"){telegramAuthStage="password";telegramStatus=done.optString("message","Потрібен 2FA пароль")}else{telegramAuthStage="";telegramStatus="Telegram авторизовано";refresh()}}
-                                .onFailure{telegramStatus=it.message?:"Telegram не прийняв код"}
+                                .onFailure{e->if(!telegramResetOnExpired(e,::resetTelegramAuth))telegramStatus=e.message?:"Telegram не прийняв код"}
                             busy=false
                         }},enabled=!busy&&telegramCode.length>=3,shape=RoundedCornerShape(12.dp),colors=ButtonDefaults.buttonColors(containerColor=Accent),modifier=Modifier.fillMaxWidth().height(46.dp).padding(top=8.dp)){Text("Підтвердити код",fontWeight=FontWeight.Bold,color=Color.White)}
                     }
@@ -2672,7 +2739,7 @@ private fun shareMfpPdf(context:Context,api:HomeApi,doc:JSONObject){
                             val password=telegramPassword;telegramPassword=""
                             runCatching{api.post("/api/native/home-edge/telegram/auth/password",JSONObject().put("password",password))}
                                 .onSuccess{telegramAuthStage="";telegramStatus="Telegram авторизовано";refresh()}
-                                .onFailure{telegramStatus=it.message?:"Telegram не прийняв 2FA пароль"}
+                                .onFailure{e->if(!telegramResetOnExpired(e,::resetTelegramAuth))telegramStatus=e.message?:"Telegram не прийняв 2FA пароль"}
                             busy=false
                         }},enabled=!busy&&telegramPassword.isNotBlank(),shape=RoundedCornerShape(12.dp),colors=ButtonDefaults.buttonColors(containerColor=Accent),modifier=Modifier.fillMaxWidth().height(46.dp).padding(top=8.dp)){Text("Підтвердити 2FA",fontWeight=FontWeight.Bold,color=Color.White)}
                     }
@@ -2806,9 +2873,3 @@ private fun skEventAge(at:Long):String{if(at<=0)return "";val sec=((System.curre
 
 
 @Composable private fun SimpleSection(title:String,text:String){Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(Card).border(1.dp,Line,RoundedCornerShape(16.dp)).padding(14.dp)){Text(title,fontSize=15.sp,fontWeight=FontWeight.Bold,color=Text);Text(text,fontSize=11.sp,lineHeight=16.sp,color=Muted,modifier=Modifier.padding(top=8.dp))}}
-
-
-
-
-
-
