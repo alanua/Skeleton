@@ -104,3 +104,33 @@ download feature must be a separate explicit bounded operation.
 
 Rollback note: disabling the gateway files leaves current Bot API publication
 functional because `core.telegram_notifications` remains the canonical sender.
+
+## Global Read-Only MCP
+
+`core.telegram_mcp_readonly` is the global Telegram MCP boundary. It is a thin
+transport adapter over `core.telegram_gateway.TelegramGateway`; it does not open
+a second MTProto reader, create another session mechanism, or maintain a
+separate Telegram store. Production construction loads the existing source
+allowlist and passes it to `TelegramGateway.for_sources` with the canonical
+SQLite Telegram store path.
+
+The exposed tools are:
+
+- `telegram_list_allowed_sources`
+- `telegram_resolve_source`
+- `telegram_get_history`
+- `telegram_get_message`
+- `telegram_search`
+
+The MCP surface intentionally omits `write_bot`, `sync_source`, `watch_source`,
+memory proposals, raw MTProto client access, media downloads, shell/argv/env
+parameters, source/store path parameters, and secret/session parameters. Read
+operations therefore reuse the merged Telegram Gateway #4273 allowlist, secret
+reference policy, MTProto facade, audit log, store-backed retrieval, page
+bounds, flood-wait handling, and failure-closed error contract.
+
+`core.hetzner_control_mcp.HetznerControlMcpDispatcher.production()` composes the
+read-only Telegram dispatcher when the configured Telegram sources file is
+present. If the file is absent, the existing Hetzner control MCP tools remain
+available and no Telegram runtime state is created or mutated during tool
+registration.
