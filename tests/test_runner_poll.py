@@ -822,7 +822,9 @@ def test_poll_once_processes_ready_issues() -> None:
         {"number": 2, "title": "Two", "body": ""},
     ]
 
-    with mock.patch.object(runner, "get_ready_issues", return_value=issues), mock.patch.object(
+    with mock.patch.object(
+        runner, "runner_vnext_registered_queue_intake_enabled", return_value=False
+    ), mock.patch.object(runner, "get_ready_issues", return_value=issues), mock.patch.object(
         runner, "process_issue"
     ) as process_issue:
         processed = runner.poll_once(workdir="/repo")
