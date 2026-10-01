@@ -12,6 +12,7 @@ from core.hetzner_control_mcp import (
     HetznerControlMcpDispatcher,
     handle_jsonrpc_message,
 )
+from core.telegram_mcp_readonly import SEARCH_TOOL, tool_names as telegram_tool_names
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -182,5 +183,19 @@ def test_installed_form_launcher_resolves_registered_checkout_outside_repo_cwd(t
     responses = [json.loads(line) for line in completed.stdout.splitlines()]
     assert responses[0]["result"]["serverInfo"]["name"] == "skeleton-control-hetzner"
     tools = responses[1]["result"]["tools"]
-    assert [tool["name"] for tool in tools] == [ACTION_GATE_TOOL, RUNNER_PRIVILEGED_TOOL]
-    assert len(tools) == 2
+    assert [tool["name"] for tool in tools] == [ACTION_GATE_TOOL, RUNNER_PRIVILEGED_TOOL, *telegram_tool_names()]
+    assert len(tools) == 8
+
+
+def test_hetzner_production_telegram_tools_fail_closed_when_backend_is_unbound(monkeypatch) -> None:
+    from core import hetzner_control_mcp as hetzner
+    from core import telegram_mcp_readonly as readonly
+
+    monkeypatch.setattr(readonly, "_canonical_backend", None)
+    monkeypatch.setattr(hetzner, "LocalSudoGatewayTransport", lambda: CapturingPrivilegedGateway())
+
+    active = hetzner.HetznerControlMcpDispatcher.production()
+    result = active.call_tool(SEARCH_TOOL, {"query": "alpha"})
+
+    assert result["result"]["status"] == "blocked"
+    assert result["result"]["reason"] == "BACKEND_UNAVAILABLE"

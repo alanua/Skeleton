@@ -5,6 +5,7 @@ from pathlib import Path
 from core.hetzner_control_mcp import ACTION_GATE_TOOL, RUNNER_PRIVILEGED_TOOL, HetznerControlMcpDispatcher
 from core.telegram_gateway import TelegramGateway, TelegramMessage
 from core.telegram_mcp_readonly import (
+    BACKEND_STATUS_TOOL,
     GET_HISTORY_TOOL,
     GET_MESSAGE_TOOL,
     LIST_ALLOWED_SOURCES_TOOL,
@@ -45,7 +46,7 @@ def _dispatcher(tmp_path: Path) -> TelegramReadonlyMcpDispatcher:
             TelegramMessage(source_id="midnight", peer_id="@midnightquantum", message_id=2, text="beta update"),
         ],
     )
-    return TelegramReadonlyMcpDispatcher(gateway=gateway)
+    return TelegramReadonlyMcpDispatcher.for_gateway(gateway)
 
 
 class FakeFacade:
@@ -65,8 +66,8 @@ class FakeFacade:
 
 
 def test_readonly_mcp_exposes_only_canonical_gateway_read_tools() -> None:
-    tools = TelegramReadonlyMcpDispatcher(
-        gateway=TelegramGateway(
+    tools = TelegramReadonlyMcpDispatcher.for_gateway(
+        TelegramGateway(
             allowlist=TelegramAllowlist({"midnight": _source()}),
             store=TelegramStore.open(":memory:"),
         )
@@ -77,6 +78,8 @@ def test_readonly_mcp_exposes_only_canonical_gateway_read_tools() -> None:
     assert "telegram_watch_source" not in tool_names()
     assert "telegram_write_bot" not in tool_names()
     assert "telegram_propose_memory_fact" not in tool_names()
+    assert BACKEND_STATUS_TOOL in tool_names()
+    assert len(tool_names()) == 6
 
     exposed = {name for tool in tools for name in tool["inputSchema"].get("properties", {})}
     assert "argv" not in exposed
@@ -114,7 +117,7 @@ def test_readonly_history_uses_canonical_gateway_live_facade_and_store(tmp_path:
         store=TelegramStore.open(tmp_path / "telegram.db"),
         mtproto_factory=lambda _source: fake,
     )
-    dispatcher = TelegramReadonlyMcpDispatcher(gateway=gateway)
+    dispatcher = TelegramReadonlyMcpDispatcher.for_gateway(gateway)
 
     history = dispatcher.call_tool(GET_HISTORY_TOOL, {"source_ref": "@midnightquantum", "limit": 99})
 
@@ -149,13 +152,38 @@ def test_hetzner_mcp_composes_existing_control_tools_and_global_telegram_readonl
     assert result["result"]["messages"][0]["message_id"] == 1
 
 
-def test_hetzner_production_keeps_control_tools_when_telegram_registration_is_unavailable(monkeypatch) -> None:
-    from core import hetzner_control_mcp as hetzner
+def test_readonly_production_fails_closed_until_canonical_backend_is_bound(monkeypatch) -> None:
+    from core import telegram_mcp_readonly as readonly
 
-    monkeypatch.setattr(hetzner.TelegramReadonlyMcpDispatcher, "production", classmethod(lambda cls: (_ for _ in ()).throw(RuntimeError("bad config"))))
+    monkeypatch.setattr(readonly, "_canonical_backend", None)
+
+    active = TelegramReadonlyMcpDispatcher.production()
+
+    assert [tool["name"] for tool in active.list_tools()] == list(tool_names())
+    unavailable = active.call_tool(SEARCH_TOOL, {"query": "alpha"})
+    assert unavailable["result"]["status"] == "blocked"
+    assert unavailable["result"]["reason"] == "BACKEND_UNAVAILABLE"
+    assert unavailable["result"]["runtime_bind_child_issue"]["title"] == "Bind global Telegram read-only MCP to canonical reader runtime"
+
+    status = active.call_tool(BACKEND_STATUS_TOOL, {})
+    assert status["result"]["backend_bound"] is False
+    assert status["result"]["reason"] == "BACKEND_UNAVAILABLE"
+
+
+def test_hetzner_production_never_constructs_telegram_gateway_store_or_session(monkeypatch) -> None:
+    from core import hetzner_control_mcp as hetzner
+    from core import telegram_mcp_readonly as readonly
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("production path must not construct a TelegramGateway")
+
+    monkeypatch.setattr(readonly.TelegramGateway, "for_sources", forbidden)
+    monkeypatch.setattr(readonly, "_canonical_backend", None)
     monkeypatch.setattr(hetzner, "LocalSudoGatewayTransport", lambda: type("NoGateway", (), {"submit": lambda self, request: (1, b"{}")})())
 
     active = hetzner.HetznerControlMcpDispatcher.production()
 
-    assert active.telegram_readonly is None
-    assert [tool["name"] for tool in active.list_tools()] == [ACTION_GATE_TOOL, RUNNER_PRIVILEGED_TOOL]
+    assert active.telegram_readonly is not None
+    assert [tool["name"] for tool in active.list_tools()] == [ACTION_GATE_TOOL, RUNNER_PRIVILEGED_TOOL, *tool_names()]
+    result = active.call_tool(SEARCH_TOOL, {"query": "alpha"})
+    assert result["result"]["reason"] == "BACKEND_UNAVAILABLE"

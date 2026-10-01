@@ -81,11 +81,10 @@ class HetznerControlMcpDispatcher:
 
     @classmethod
     def production(cls) -> "HetznerControlMcpDispatcher":
-        try:
-            telegram_readonly = TelegramReadonlyMcpDispatcher.production()
-        except Exception:  # noqa: BLE001 - optional Telegram registration must fail closed.
-            telegram_readonly = None
-        return cls(privileged_gateway=LocalSudoGatewayTransport(), telegram_readonly=telegram_readonly)
+        return cls(
+            privileged_gateway=LocalSudoGatewayTransport(),
+            telegram_readonly=TelegramReadonlyMcpDispatcher.production(),
+        )
 
     def list_tools(self) -> tuple[dict[str, object], ...]:
         if self.telegram_readonly is None:
