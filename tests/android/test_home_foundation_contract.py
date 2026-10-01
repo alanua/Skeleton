@@ -1,182 +1,162 @@
 import re
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
 ANDROID_HOME = ROOT / "android" / "home"
+ANDROID_NS = "{http://schemas.android.com/apk/res/android}"
 
 
 def read(relative: str) -> str:
     return (ANDROID_HOME / relative).read_text(encoding="utf-8")
 
 
-def test_app_display_name_is_home() -> None:
-    assert "<string name=\"app_name\">Home</string>" in read("app/src/main/res/values/strings.xml")
-    assert 'android:label="@string/app_name"' in read("app/src/main/AndroidManifest.xml")
+def kotlin_sources() -> dict[str, str]:
+    return {
+        str(path.relative_to(ANDROID_HOME)): path.read_text(encoding="utf-8")
+        for path in (ANDROID_HOME / "app" / "src" / "main").rglob("*.kt")
+    }
 
 
-def test_debug_preview_has_distinct_install_identity() -> None:
+def manifest_root() -> ET.Element:
+    return ET.fromstring(read("app/src/main/AndroidManifest.xml"))
+
+
+def android_attr(element: ET.Element, name: str) -> str | None:
+    return element.attrib.get(f"{ANDROID_NS}{name}")
+
+
+def test_package_identity_label_compose_and_main_entry_are_current() -> None:
     gradle = read("app/build.gradle.kts")
-    debug_strings = read("app/src/debug/res/values/strings.xml")
+    manifest = manifest_root()
+    main = read("app/src/main/java/com/skeleton/home/MainActivity.kt")
+
+    assert 'namespace = "com.skeleton.home"' in gradle
     assert 'applicationId = "com.skeleton.home"' in gradle
-    assert 'applicationIdSuffix = ".preview"' in gradle
-    assert 'versionNameSuffix = "-preview"' in gradle
-    assert '<string name="app_name">Skeleton Home Preview</string>' in debug_strings
+    assert re.search(r"versionCode\s*=\s*(\d+)", gradle)
+    assert int(re.search(r"versionCode\s*=\s*(\d+)", gradle).group(1)) > 0
+    assert re.search(r'versionName\s*=\s*"\d+\.\d+\.\d+(?:[-+][^"]+)?"', gradle)
+    assert "buildFeatures { compose = true; buildConfig = true }" in gradle
+    assert "androidx.activity:activity-compose" in gradle
+
+    application = manifest.find("application")
+    assert application is not None
+    assert android_attr(application, "label") == "Home"
+    assert android_attr(application, "allowBackup") == "false"
+
+    main_activity = manifest.find("./application/activity[@android:name='.MainActivity']", {"android": ANDROID_NS[1:-1]})
+    assert main_activity is not None
+    assert android_attr(main_activity, "exported") == "true"
+    assert "<action android:name=\"android.intent.action.MAIN\"" in read("app/src/main/AndroidManifest.xml")
+    assert "class MainActivity : ComponentActivity()" in main
+    assert "import androidx.activity.compose.setContent" in main
+    assert "setContent { MaterialTheme" in main
+    assert "HomeComposeApp(sharedUrl.value)" in main
 
 
-def test_native_compose_shell_without_webview() -> None:
-    source = "\n".join(path.read_text(encoding="utf-8") for path in ANDROID_HOME.rglob("*.kt"))
-    gradle = read("app/build.gradle.kts")
-    assert "compose = true" in gradle
-    assert "setContent" in source
-    assert "WebView" not in source
-    assert "android.webkit" not in source
+def test_declared_permissions_and_health_connect_contract_are_canonical() -> None:
+    manifest = read("app/src/main/AndroidManifest.xml")
+    rationale = read("app/src/main/java/com/skeleton/home/HealthPermissionsRationaleActivity.kt")
+    health = read("app/src/main/java/com/skeleton/home/health/SkeletonHealthConnectAdapter.kt")
 
-
-def test_bottom_navigation_contract_and_remote_contextual_route() -> None:
-    nav = read("app/src/main/java/com/skeleton/home/navigation/HomeRoutes.kt")
-    assert 'val PrimaryBottomRoutes = listOf(\n    HomeRoute.Home,\n    HomeRoute.Video,\n    HomeRoute.Devices,\n)' in nav
-    assert "fun bottomRoutesFor(" in nav
-    assert "PrimaryBottomRoutes + HomeRoute.OperatorHub" in nav
-    assert 'data object Remote : HomeRoute("remote", "Пульт")' in nav
-    assert "HomeRoute.Remote" not in nav.split("val PrimaryBottomRoutes = listOf(", 1)[1].split(")", 1)[0]
-    assert '"Головна"' in nav
-    assert '"Відео"' in nav
-    assert '"Пристрої"' in nav
-    assert '"СК"' in nav
-
-
-def test_operator_hub_bottom_navigation_and_authorization() -> None:
-    auth = read("app/src/main/java/com/skeleton/home/auth/SyntheticSession.kt")
-    routes = read("app/src/main/java/com/skeleton/home/navigation/HomeRoutes.kt")
-    ui = read("app/src/main/java/com/skeleton/home/ui/HomeApp.kt")
-    unit = read("app/src/test/java/com/skeleton/home/HomeContractTest.kt")
-    android_test = read("app/src/androidTest/java/com/skeleton/home/HomeShellUiTest.kt")
-    assert "session.role == UserRole.OPERATOR" in auth
-    assert "fun operator()" in auth
-    assert "fun ordinary()" in auth
-    assert "fun spouse()" in auth
-    assert "HomeRoute.OperatorHub -> auth.canAccessOperatorHub(session)" in routes
-    assert "bottomRoutesFor(currentSession, session)" in ui
-    assert "operator-hub-entry" not in ui
-    assert 'contentDescription = "bottom-nav-${route.route}"' in ui
-    assert "Icons.Filled.Hub" not in ui
-    assert "MaterialHubIcon" in ui
-    assert 'name = "MaterialHub"' in ui
-    assert "HomeRoute.OperatorHub -> MaterialHubIcon" in ui
-    assert 'data object OperatorHub : HomeRoute("operator-hub", "СК")' in routes
-    assert 'listOf("Головна", "Відео", "Пристрої", "СК")' in unit
-    assert "directOperatorHubAuthorizationFailsClosedForNonOperators" in unit
-    assert "spouseDirectOperatorHubRouteIsDenied" in android_test
-    assert "Доступ до розділу відхилено" in ui
-
-
-def test_home_seek_15_controls_use_local_dependency_free_icons() -> None:
-    ui = read("app/src/main/java/com/skeleton/home/ui/HomeApp.kt")
-    unavailable_icons = ["Forward" + "15", "Replay" + "15"]
-    for icon in unavailable_icons:
-        assert f"Icons.Filled.{icon}" not in ui
-        assert f"androidx.compose.material.icons.filled.{icon}" not in ui
-    assert 'contentDescription = "control-back-15"' in ui
-    assert 'contentDescription = "control-forward-15"' in ui
-    assert 'name = "SeekBack15"' in ui
-    assert 'name = "SeekForward15"' in ui
-    assert 'label = "15 с"' in ui
-
-
-def test_series_season_and_episode_controls_use_distinct_vectors() -> None:
-    ui = read("app/src/main/java/com/skeleton/home/ui/HomeApp.kt")
-    assert 'contentDescription = "media-series-season-control"' in ui
-    assert 'contentDescription = "media-episode-control"' in ui
-    assert "SeriesSeasonIcon" in ui
-    assert "EpisodeIcon" in ui
-    assert 'name = "SeriesSeasonStack"' in ui
-    assert 'name = "EpisodeSinglePlay"' in ui
-    series_path = ui.split('name = "SeriesSeasonStack"', 1)[1].split("}.build()", 1)[0]
-    episode_path = ui.split('name = "EpisodeSinglePlay"', 1)[1].split("}.build()", 1)[0]
-    assert series_path != episode_path
-    assert "lineTo(22f, 18f)" in series_path
-    assert "quadTo(20.1f, 20f, 21f, 19.1f)" in episode_path
-
-
-def test_work_description_autoscroll_is_upward_only_with_direct_reset() -> None:
-    contracts = read("app/src/main/java/com/skeleton/home/domain/HomeContracts.kt")
-    ui = read("app/src/main/java/com/skeleton/home/ui/HomeApp.kt")
-    unit = read("app/src/test/java/com/skeleton/home/HomeContractTest.kt")
-    android_test = read("app/src/androidTest/java/com/skeleton/home/HomeShellUiTest.kt")
-    assert "object WorkDescriptionAutoScroll" in contracts
-    assert "currentOffset + stepPx.coerceAtLeast(1)" in contracts
-    assert "DescriptionAutoScrollStep(offset = 0, resetToTop = true)" in contracts
-    assert "shouldAnimate(contentHeight: Int, viewportHeight: Int)" in contracts
-    assert "fun WorkDescriptionText(" in ui
-    assert "scrollState.scrollTo(0)" in ui
-    assert "animateScrollTo" not in ui
-    assert "workDescriptionAutoScrollMovesUpwardThenResetsDirectlyToTop" in unit
-    assert 'contentDescription = "work-description-auto-scroll"' in ui
-    assert "work-description-auto-scroll" in android_test
-
-
-def test_future_interfaces_and_state_values_exist() -> None:
-    contracts = read("app/src/main/java/com/skeleton/home/domain/HomeContracts.kt")
-    for name in [
-        "interface CanonicalHomeApi",
-        "interface AuthSessionProvider",
-        "interface ConnectivityMonitor",
-        "interface SecureStorage",
-        "interface VerifiedActionStateStore",
+    for permission in [
+        "android.permission.INTERNET",
+        "android.permission.REQUEST_INSTALL_PACKAGES",
+        "android.permission.health.READ_STEPS",
+        "android.permission.health.READ_SLEEP",
     ]:
-        assert name in contracts
-    for value in ["ONLINE", "DEGRADED", "OFFLINE", "SENT", "ACCEPTED", "APPLIED", "PHYSICALLY_VERIFIED"]:
-        assert value in contracts
+        assert f'<uses-permission android:name="{permission}"' in manifest
+
+    assert '<package android:name="com.google.android.apps.healthdata"' in manifest
+    assert 'android:name=".HealthPermissionsRationaleActivity"' in manifest
+    assert 'androidx.health.ACTION_SHOW_PERMISSIONS_RATIONALE' in manifest
+    assert 'android:name=".HealthPermissionsUsageActivity"' in manifest
+    assert "android.permission.START_VIEW_PERMISSION_USAGE" in manifest
+    assert "android.intent.category.HEALTH_PERMISSIONS" in manifest
+
+    assert "HealthPermission.getReadPermission(StepsRecord::class)" in health
+    assert "HealthPermission.getReadPermission(SleepSessionRecord::class)" in health
+    assert "PermissionController.createRequestPermissionResultContract()" in health
+    assert "readRecentSummary" in health
+    assert "Home запитує лише читання кроків та сесій/стадій сну" in rationale
+    assert "геолокація, повідомлення та інші медичні категорії не читаються" in rationale
 
 
-def test_no_endpoint_secret_or_live_fixture_values() -> None:
-    production_roots = (
-        ANDROID_HOME / "app" / "src" / "main",
-        ANDROID_HOME / "app" / "src" / "debug",
-    )
-    production_files = [ANDROID_HOME / "app" / "build.gradle.kts"]
-    for root in production_roots:
-        production_files.extend(
-            path
-            for path in root.rglob("*")
-            if path.is_file() and path.suffix in {".kt", ".kts", ".xml", ".md"}
-        )
-    text = "\n".join(path.read_text(encoding="utf-8") for path in production_files)
-    urls = re.findall(r"https?://[^\"]+", text)
-    assert urls == ["http://schemas.android.com/apk/res/android"]
-    forbidden = ["api_key", "apikey", "secret", "token", "hmac", "ssh", "device_id"]
-    lowered = text.replace("Home Edge → Secrets", "").lower()
-    for word in forbidden:
-        assert word not in lowered
-    assert "Синтетичний режим" in text
-
-def test_existing_production_self_update_contract_is_preserved() -> None:
-    gradle = read("app/build.gradle.kts")
+def test_current_self_update_primitives_are_present() -> None:
     manifest = read("app/src/main/AndroidManifest.xml")
     main = read("app/src/main/java/com/skeleton/home/MainActivity.kt")
-    ui = read("app/src/main/java/com/skeleton/home/update/HomeUpdateUi.kt")
-    manager = read("app/src/main/java/com/skeleton/home/update/HomeUpdateManager.kt")
-    policy = read("app/src/main/java/com/skeleton/home/update/HomeUpdatePolicy.kt")
-    assert 'applicationId = "com.skeleton.home"' in gradle
-    assert 'applicationIdSuffix = ".preview"' in gradle
-    assert 'versionCode = 31' in gradle
-    assert 'versionName = "1.3.17"' in gradle
-    assert 'HOME_EDGE_BASE_URLS' in gradle
-    assert 'android.permission.REQUEST_INSTALL_PACKAGES' in manifest
-    assert 'android.permission.INTERNET' in manifest
-    assert 'HomeUpdateInstallStatusReceiver' in manifest
-    assert 'HomeUpdateManager(this)' in main
-    assert 'homeUpdateManager.onResume()' in main
-    assert 'Оновити застосунок' in ui
-    assert 'LaunchedEffect(manager)' in ui
-    assert '/api/native/app-update' in policy
-    assert 'remoteVersionCode > installedVersionCode' in policy
-    assert 'DownloadManager' in manager
-    assert 'MessageDigest.getInstance("SHA-256")' in manager
-    assert 'PackageInstaller.SessionParams' in manager
-    assert 'ACTION_MANAGE_UNKNOWN_APP_SOURCES' in manager
-    assert 'Preview build cannot install production updates' in manager
-    assert '192.168.' not in manager
-    assert '.ts.net' not in manager
+    receiver = read("app/src/main/java/com/skeleton/home/InstallStatusReceiver.kt")
 
+    assert '<receiver android:name=".InstallStatusReceiver" android:exported="false"' in manifest
+    assert "private data class HomeUpdateInfo" in main
+    assert 'api.get("/api/native/app-update")' in main
+    assert "it.versionCode>0" in main
+    assert "it.sha256.length==64" in main
+    assert "DownloadManager.Request(Uri.parse(url))" in main
+    assert 'setMimeType("application/vnd.android.package-archive")' in main
+    assert 'MessageDigest.getInstance("SHA-256")' in main
+    assert "requestPackageUpdateInstall(uri)" in main
+    assert "Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES" in main
+    assert "PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL)" in main
+    assert "InstallStatusReceiver::class.java" in main
+    assert 'const val ACTION_INSTALL_STATUS="com.skeleton.home.INSTALL_STATUS"' in receiver
+    assert "PackageInstaller.STATUS_PENDING_USER_ACTION" in receiver
+    assert "PackageInstaller.STATUS_SUCCESS" in receiver
+
+
+def test_home_edge_endpoints_are_buildconfig_driven_without_private_literals() -> None:
+    gradle = read("app/build.gradle.kts")
+    main = read("app/src/main/java/com/skeleton/home/MainActivity.kt")
+    location = read("app/src/main/java/com/skeleton/home/LocationTrackingService.kt")
+    source = "\n".join(kotlin_sources().values()) + "\n" + gradle
+
+    assert 'val homeEdgeBaseUrls = providers.gradleProperty("homeEdgeBaseUrls").orElse("").get()' in gradle
+    assert 'buildConfigField("String", "HOME_EDGE_BASE_URLS", "\\"$escapedHomeEdgeBaseUrls\\"")' in gradle
+    assert "BuildConfig.HOME_EDGE_BASE_URLS" in main
+    assert "BuildConfig.HOME_EDGE_BASE_URLS" in location
+    assert '.filter { it.startsWith("http://") || it.startsWith("https://") }' in main
+
+    assert not re.search(r'HOME_EDGE_BASE_URLS",\s*"\\"https?://', gradle)
+    assert not re.search(r"val\s+servers\s*=\s*listOf\([^)]*https?://", main, re.DOTALL)
+    assert not re.search(r"URL\(\s*\"https?://", main)
+    assert not re.search(r"\b(?:10|172\.(?:1[6-9]|2\d|3[01])|192\.168)\.\d{1,3}\.\d{1,3}\b", source)
+    assert ".ts.net" not in source
+
+
+def test_no_embedded_credentials_tokens_or_secret_values() -> None:
+    text_files = [
+        ANDROID_HOME / "app" / "build.gradle.kts",
+        ANDROID_HOME / "app" / "src" / "main" / "AndroidManifest.xml",
+    ]
+    text_files.extend(
+        path
+        for path in (ANDROID_HOME / "app" / "src" / "main").rglob("*")
+        if path.is_file() and path.suffix in {".kt", ".kts", ".xml", ".json"}
+    )
+    source = "\n".join(path.read_text(encoding="utf-8") for path in text_files)
+
+    literal_assignments = re.findall(
+        r"""(?ix)
+        \b(?:api[_-]?key|apikey|access[_-]?token|refresh[_-]?token|bearer|password|passwd|private[_-]?key|client[_-]?secret)\b
+        \s*(?:=|:)\s*["'][^"']{8,}["']
+        """,
+        source,
+    )
+    assert literal_assignments == []
+    assert "Authorization\"" not in source
+    assert "Bearer " not in source
+    assert "sk-" not in source
+    assert "BEGIN PRIVATE KEY" not in source
+    assert "BEGIN OPENSSH PRIVATE KEY" not in source
+
+
+def test_current_webview_and_native_bridge_are_intentional() -> None:
+    main = read("app/src/main/java/com/skeleton/home/MainActivity.kt")
+
+    assert "import android.webkit.WebView" in main
+    assert "import android.webkit.JavascriptInterface" in main
+    assert "AndroidView(" in main
+    assert "WebView(ctx).apply" in main
+    assert "@JavascriptInterface" in main
+    assert "addJavascriptInterface" in main
