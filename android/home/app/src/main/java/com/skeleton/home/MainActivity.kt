@@ -2603,9 +2603,13 @@ private fun shareMfpPdf(context:Context,api:HomeApi,doc:JSONObject){
                 if(lastObserved.isNotBlank())Text("Остання точка: $lastObserved",fontSize=10.sp,color=Muted,modifier=Modifier.padding(top=5.dp))
                 if(trackingStatus.isNotBlank())Text(trackingStatus,fontSize=11.sp,color=if(trackingEnabled)Green else Muted,modifier=Modifier.padding(top=7.dp))
             }}
-            item{Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(Card).padding(16.dp)){
-                Text("Секрети",fontSize=17.sp,fontWeight=FontWeight.Bold,color=Text)
-                Text("Gmail і Telegram. Довготривалі секрети зберігаються через Bitwarden; одноразові коди не записуються в Home.",fontSize=11.sp,lineHeight=16.sp,color=Muted,modifier=Modifier.padding(top=5.dp,bottom=12.dp))
+            item{Column(Modifier.fillMaxWidth().padding(horizontal=2.dp,vertical=2.dp)){
+                Text("Секрети",fontSize=19.sp,fontWeight=FontWeight.Bold,color=Text)
+                Text("Кожен сервіс має окремий блок. Довготривалі секрети зберігаються через Bitwarden; одноразові коди не записуються в Home.",fontSize=11.sp,lineHeight=16.sp,color=Muted,modifier=Modifier.padding(top=5.dp))
+            }}
+            item{Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(Card).border(1.dp,Line,RoundedCornerShape(16.dp)).padding(16.dp)){
+                Text("Gmail",fontSize=16.sp,fontWeight=FontWeight.Bold,color=Text)
+                Text("Google OAuth для читання та роботи з поштою через окремий Gmail-контур.",fontSize=10.sp,lineHeight=15.sp,color=Muted,modifier=Modifier.padding(top=5.dp,bottom=12.dp))
                 Row(verticalAlignment=Alignment.CenterVertically){Box(Modifier.size(8.dp).clip(CircleShape).background(if(gmailAuthorized)Green else if(gmailConfigured)Warn else Muted));Spacer(Modifier.width(8.dp));Text(when{gmailAuthorized->"Gmail: авторизовано";gmailConfigured->"Gmail: секрет завантажено, потрібна авторизація";else->"Gmail: секрет ще не додано"},fontSize=11.sp,color=if(gmailAuthorized)Green else if(gmailConfigured)Warn else Muted)}
                 if(gmailConfigured){Text(if(bitwardenBackup=="stored")"Bitwarden: резервну копію збережено" else "Bitwarden: очікує синхронізації",fontSize=11.sp,color=if(bitwardenBackup=="stored")Green else Warn,modifier=Modifier.padding(top=7.dp))}
                 if(gmailConfigured&&!gmailAuthorized){
@@ -2614,9 +2618,9 @@ private fun shareMfpPdf(context:Context,api:HomeApi,doc:JSONObject){
                     OutlinedTextField(value=gmailCallbackUrl,onValueChange={if(it.length<=8192)gmailCallbackUrl=it},enabled=!busy,label={Text("Адреса після Google")},placeholder={Text("http://127.0.0.1:53682/?state=…&code=…")},minLines=2,maxLines=4,modifier=Modifier.fillMaxWidth(),colors=OutlinedTextFieldDefaults.colors(focusedTextColor=Text,unfocusedTextColor=Text,focusedBorderColor=Accent,unfocusedBorderColor=Line,focusedLabelColor=Accent,unfocusedLabelColor=Muted,cursorColor=Accent))
                     Button(onClick={scope.launch{busy=true;status="Завершую авторизацію Gmail…";runCatching{val cb=Uri.parse(gmailCallbackUrl.trim());if(cb.host!="127.0.0.1"||cb.port!=53682)throw IllegalStateException("Вставте повну адресу 127.0.0.1:53682 з браузера");val code=cb.getQueryParameter("code").orEmpty();val state=cb.getQueryParameter("state").orEmpty();if(code.isBlank()||state.isBlank())throw IllegalStateException("У адресі Google немає code/state");if(gmailExpectedState.isNotBlank()&&state!=gmailExpectedState)throw IllegalStateException("Ця адреса належить іншій сесії авторизації");api.post("/api/native/home-edge/gmail/callback",JSONObject().put("code",code).put("state",state))}.onSuccess{done->status=done.optString("message","Gmail авторизовано");gmailCallbackUrl="";gmailExpectedState="";refresh()}.onFailure{status=it.message?:"Не вдалося завершити авторизацію Gmail"};busy=false}},enabled=!busy&&gmailCallbackUrl.isNotBlank(),shape=RoundedCornerShape(12.dp),colors=ButtonDefaults.buttonColors(containerColor=Accent),modifier=Modifier.fillMaxWidth().height(48.dp).padding(top=8.dp)){Text("Завершити авторизацію",fontWeight=FontWeight.Bold,color=Color.White)}
                 }
-
-                HorizontalDivider(Modifier.padding(vertical=14.dp),color=Line)
-                Text("Telegram · читання каналів",fontSize=15.sp,fontWeight=FontWeight.Bold,color=Text)
+            }}
+            item{Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(Card).border(1.dp,Line,RoundedCornerShape(16.dp)).padding(16.dp)){
+                Text("Telegram · читання каналів",fontSize=16.sp,fontWeight=FontWeight.Bold,color=Text)
                 val tgColor=when{telegramAuthorized->Green;telegramApiConfigured->Warn;else->Muted}
                 val tgLabel=when{
                     telegramAuthorized->"Telegram: MTProto авторизовано"
@@ -2691,8 +2695,12 @@ private fun shareMfpPdf(context:Context,api:HomeApi,doc:JSONObject){
                         busy=false
                     }},enabled=!busy&&telegramSourceCount>0,shape=RoundedCornerShape(12.dp),colors=ButtonDefaults.buttonColors(containerColor=Accent),modifier=Modifier.fillMaxWidth().height(46.dp).padding(top=8.dp)){Text("Синхронізувати Telegram",fontWeight=FontWeight.Bold,color=Color.White)}
                 }
-                if(telegramStatus.isNotBlank())Text(telegramStatus,fontSize=11.sp,lineHeight=16.sp,color=if(telegramAuthorized||telegramStatus.contains("збережено")||telegramStatus.contains("додано"))Green else Muted,modifier=Modifier.padding(top=9.dp))
-                Button(onClick={filePicker.launch(arrayOf("*/*"))},enabled=!busy,shape=RoundedCornerShape(12.dp),colors=ButtonDefaults.buttonColors(containerColor=Accent),modifier=Modifier.fillMaxWidth().height(48.dp).padding(top=10.dp)){Text("Завантажити секрет з файлу",fontWeight=FontWeight.Bold,color=Color.White)}
+                if(telegramStatus.isNotBlank())Text(telegramStatus,fontSize=11.sp,lineHeight=16.sp,color=if(telegramAuthorized||telegramStatus.contains("збережено")||telegramStatus.contains("додано"))Green else if(telegramStatus.contains("зачекати"))Warn else Muted,modifier=Modifier.padding(top=9.dp))
+            }}
+            item{Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(Card).border(1.dp,Line,RoundedCornerShape(16.dp)).padding(16.dp)){
+                Text("Додати інший секрет",fontSize=16.sp,fontWeight=FontWeight.Bold,color=Text)
+                Text("Імпорт із файлу або ручне додавання підтримуваного JSON/секрету. Значення не показуються у відповідях чи журналах.",fontSize=10.sp,lineHeight=15.sp,color=Muted,modifier=Modifier.padding(top=5.dp,bottom=10.dp))
+                Button(onClick={filePicker.launch(arrayOf("*/*"))},enabled=!busy,shape=RoundedCornerShape(12.dp),colors=ButtonDefaults.buttonColors(containerColor=Accent),modifier=Modifier.fillMaxWidth().height(48.dp)){Text("Завантажити секрет з файлу",fontWeight=FontWeight.Bold,color=Color.White)}
                 Text("або вставити вручну",fontSize=10.sp,color=Muted,modifier=Modifier.padding(top=14.dp,bottom=6.dp))
                 OutlinedTextField(value=secretText,onValueChange={if(it.length<=131072)secretText=it},enabled=!busy,label={Text("JSON / секрет")},placeholder={Text("Вставте вміст сюди")},minLines=5,maxLines=10,modifier=Modifier.fillMaxWidth(),colors=OutlinedTextFieldDefaults.colors(focusedTextColor=Text,unfocusedTextColor=Text,focusedBorderColor=Accent,unfocusedBorderColor=Line,focusedLabelColor=Accent,unfocusedLabelColor=Muted,cursorColor=Accent))
                 Button(onClick={scope.launch{busy=true;status="Перевіряю…";runCatching{api.post("/api/native/home-edge/secrets/text",JSONObject().put("label","Home app input").put("value",secretText))}.onSuccess{status="Секрет прийнято · ${it.optString("label","готово")}";secretText="";refresh()}.onFailure{status=it.message?:"Не вдалося додати секрет"};busy=false}},enabled=!busy&&secretText.isNotBlank(),shape=RoundedCornerShape(12.dp),colors=ButtonDefaults.buttonColors(containerColor=Action),modifier=Modifier.fillMaxWidth().height(46.dp).padding(top=8.dp)){Text("Додати введений секрет",fontWeight=FontWeight.SemiBold,color=Text)}
