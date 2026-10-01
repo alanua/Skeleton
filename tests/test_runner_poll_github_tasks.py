@@ -3405,6 +3405,68 @@ def test_cross_project_changed_worktree_publishes_before_cleanup(tmp_path: Path)
     notify.assert_called_once_with(13, "DONE", mock.ANY)
 
 
+def test_retained_dirty_wrong_base_recovery_cleanup_uses_path_after_publication(
+    tmp_path: Path,
+) -> None:
+    canonical_path = tmp_path / "lavalamp" / "issue-alanua-Lavalamp-13"
+    recovery_path = canonical_path.parent / (
+        f"{canonical_path.name}-recovery-{'a' * 12}"
+    )
+    issue = {
+        "number": 13,
+        "title": "Lavalamp delivery",
+        "body": _lavalamp_codegen_issue_body(),
+        "comments": [],
+    }
+
+    def publish(body: str) -> str:
+        assert f"Recovery Worktree: {recovery_path.name}" in body
+        return (
+            "DONE: Runner host maintenance task completed.\n"
+            "maintenance_task_id=publish_target_project_issue_worktree_pr\n"
+            "repository=alanua/Lavalamp\n"
+            "draft_pr_url=https://github.com/alanua/Lavalamp/pull/44\n"
+            "success_criteria=met"
+        )
+
+    with mock.patch.object(runner, "set_issue_label") as labels, mock.patch.object(
+        runner, "verify_target_repository_checkout", return_value=None
+    ), mock.patch.object(
+        runner,
+        "prepare_target_repository_issue_worktree",
+        return_value=(0, "wrong_base_recovery=prepared", recovery_path),
+    ), mock.patch.object(
+        runner, "cleanup_runtime_artifacts"
+    ), mock.patch.object(
+        runner, "run_codex_task", return_value=(0, "RESULT: DONE")
+    ), mock.patch.object(
+        runner, "changed_files", return_value=["README.md"]
+    ), mock.patch.object(
+        runner, "local_worktree_recovery_diff", return_value="Local worktree git diff: none"
+    ), mock.patch.object(
+        runner, "publish_target_project_issue_worktree_pr", side_effect=publish
+    ), mock.patch.object(
+        runner, "cleanup_target_repository_issue_worktree_path", return_value=(0, "")
+    ) as cleanup_path, mock.patch.object(
+        runner, "cleanup_target_repository_issue_worktree", return_value=(0, "")
+    ) as cleanup_canonical, mock.patch.object(
+        runner, "post_issue_comment"
+    ), mock.patch.object(
+        runner, "notify_task_finished"
+    ), mock.patch.object(
+        runner, "record_runner_task_picked_up", return_value=None
+    ), mock.patch.object(
+        runner, "record_runner_executor_result", return_value=None
+    ), mock.patch.object(
+        runner, "maybe_replenish_runner_queue_after_completion", return_value=True
+    ):
+        runner.process_issue(issue, workdir=str(tmp_path), source_repository="alanua/Lavalamp")
+
+    cleanup_path.assert_called_once_with("alanua/Lavalamp", str(recovery_path))
+    cleanup_canonical.assert_not_called()
+    labels.assert_any_call(13, runner.LABEL_RUNNING, runner.LABEL_DONE)
+
+
 def test_skeleton_source_target_publication_branch_identity_is_unchanged() -> None:
     task, reason = runner.extract_runner_task(
         _lavalamp_codegen_issue_body(),
@@ -3422,6 +3484,36 @@ def test_skeleton_source_target_publication_branch_identity_is_unchanged() -> No
 
     assert "Source Repository: alanua/Skeleton" in body
     assert "Output Branch: runner/issue-13" in body
+
+
+def test_target_project_publication_body_names_derived_recovery_worktree(
+    tmp_path: Path,
+) -> None:
+    task, reason = runner.extract_runner_task(
+        _lavalamp_codegen_issue_body(),
+        default_repository="alanua/Lavalamp",
+    )
+    assert reason is None
+    assert task is not None
+    canonical_path = tmp_path / "lavalamp" / "issue-alanua-Lavalamp-13"
+    recovery_path = canonical_path.parent / (
+        f"{canonical_path.name}-recovery-{'a' * 12}"
+    )
+
+    with mock.patch.object(
+        runner,
+        "target_repository_issue_worktree_path",
+        return_value=canonical_path,
+    ):
+        body = runner._target_project_publication_body(
+            issue_number=13,
+            issue_body=_lavalamp_codegen_issue_body(),
+            runner_task=task,
+            source_repository="alanua/Lavalamp",
+            issue_workdir=recovery_path,
+        )
+
+    assert f"Recovery Worktree: {recovery_path.name}" in body
 
 
 def test_cross_project_publication_failure_keeps_changed_worktree(
@@ -5365,6 +5457,410 @@ def test_prepare_target_worktree_existing_clean_wrong_base_blocks(
         base_sha,
         "HEAD",
     ]
+
+
+def _target_dirty_continuation_gate(
+    *,
+    issue_number: int = 4364,
+    source_repository: str = runner.REPO,
+    repository: str = "alanua/Lavalamp",
+    allowed_files: frozenset[str] = frozenset(
+        {
+            "scripts/runner_poll_github_tasks.py",
+            "tests/test_runner_poll_github_tasks.py",
+        }
+    ),
+) -> runner.CodegenDirtyContinuationGate:
+    return runner.CodegenDirtyContinuationGate(
+        repository=repository,
+        source_repository=source_repository,
+        issue_number=issue_number,
+        expected_branch=runner.issue_branch(issue_number, source_repository),
+        allowed_files=allowed_files,
+        retry_decision="ALLOW_ONE_TIME_OVERRIDE",
+    )
+
+
+def _prepare_target_wrong_base_recovery_fixture(
+    tmp_path: Path,
+    *,
+    issue_number: int = 4364,
+    source_repository: str = runner.REPO,
+    overlap_base_delta: bool = False,
+    committed_files: tuple[str, ...] = ("scripts/runner_poll_github_tasks.py",),
+    dirty_files: tuple[str, ...] = (
+        "scripts/runner_poll_github_tasks.py",
+        "tests/test_runner_poll_github_tasks.py",
+    ),
+    untracked_files: tuple[str, ...] = (),
+) -> tuple[Path, Path, str, str]:
+    coordinator = tmp_path / "lavalamp-main"
+    issue_path = tmp_path / "lavalamp-worktrees" / runner._source_issue_slug(
+        issue_number, source_repository
+    )
+    coordinator.mkdir()
+    _run_git(coordinator, "init")
+    _run_git(coordinator, "config", "user.email", "runner@example.invalid")
+    _run_git(coordinator, "config", "user.name", "Runner Test")
+    for relative_path in (
+        "scripts/runner_poll_github_tasks.py",
+        "tests/test_runner_poll_github_tasks.py",
+        "docs/out-of-scope.md",
+    ):
+        path = coordinator / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"base {relative_path}\n", encoding="utf-8")
+    _run_git(coordinator, "add", ".")
+    _run_git(coordinator, "commit", "-m", "old base")
+    _run_git(coordinator, "branch", "-M", "main")
+    _run_git(
+        coordinator,
+        "checkout",
+        "-b",
+        runner.issue_branch(issue_number, source_repository),
+    )
+    for relative_path in committed_files:
+        (coordinator / relative_path).write_text(
+            f"committed retained {relative_path}\n", encoding="utf-8"
+        )
+    if committed_files:
+        _run_git(coordinator, "add", *committed_files)
+        _run_git(coordinator, "commit", "-m", "retained branch delta")
+    retained_head = runner.run_command(["git", "rev-parse", "HEAD"], cwd=coordinator)[
+        1
+    ].strip()
+    _run_git(coordinator, "checkout", "main")
+    base_path = (
+        coordinator / "scripts" / "runner_poll_github_tasks.py"
+        if overlap_base_delta
+        else coordinator / "docs" / "out-of-scope.md"
+    )
+    base_path.write_text("new exact base delta\n", encoding="utf-8")
+    _run_git(coordinator, "add", str(base_path.relative_to(coordinator)))
+    _run_git(coordinator, "commit", "-m", "new exact base")
+    new_base = runner.run_command(["git", "rev-parse", "HEAD"], cwd=coordinator)[
+        1
+    ].strip()
+    issue_path.parent.mkdir(parents=True)
+    _run_git(
+        coordinator,
+        "clone",
+        "--local",
+        "--no-hardlinks",
+        str(coordinator),
+        str(issue_path),
+    )
+    _run_git(issue_path, "checkout", runner.issue_branch(issue_number, source_repository))
+    assert runner.run_command(["git", "rev-parse", "HEAD"], cwd=issue_path)[1].strip() == retained_head
+    for relative_path in dirty_files:
+        (issue_path / relative_path).write_text(
+            f"dirty retained {relative_path}\n", encoding="utf-8"
+        )
+    for relative_path in untracked_files:
+        path = issue_path / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("untracked\n", encoding="utf-8")
+    return coordinator, issue_path, retained_head, new_base
+
+
+def test_prepare_target_worktree_retained_dirty_wrong_base_recovers_to_fresh_exact_base(
+    tmp_path: Path,
+) -> None:
+    coordinator, issue_path, retained_head, new_base = (
+        _prepare_target_wrong_base_recovery_fixture(tmp_path)
+    )
+    retained_dirty_script = (issue_path / "scripts" / "runner_poll_github_tasks.py").read_text(
+        encoding="utf-8"
+    )
+    retained_dirty_test = (
+        issue_path / "tests" / "test_runner_poll_github_tasks.py"
+    ).read_text(encoding="utf-8")
+
+    with mock.patch.object(
+        runner, "_remote_url_matches_project_repo", return_value=True
+    ), mock.patch.object(
+        runner,
+        "ensure_safe_target_repository_worktree_path",
+        side_effect=lambda _repository, path: Path(path).resolve(strict=False),
+    ):
+        code, output, path = runner.prepare_git_issue_worktree(
+            4364,
+            coordinator,
+            issue_path,
+            target_repository="alanua/Lavalamp",
+            source_repository=runner.REPO,
+            base="main",
+            base_sha=new_base,
+            continuation_gate=_target_dirty_continuation_gate(),
+        )
+
+    assert code == 0, output
+    assert path != issue_path
+    assert path == issue_path.parent / f"{issue_path.name}-recovery-{new_base[:12]}"
+    assert "wrong_base_recovery=prepared" in output
+    assert runner.run_command(["git", "rev-parse", "HEAD"], cwd=issue_path)[1].strip() == retained_head
+    assert runner.run_command(["git", "rev-parse", "HEAD"], cwd=path)[1].strip() == new_base
+    assert (issue_path / "scripts" / "runner_poll_github_tasks.py").read_text(
+        encoding="utf-8"
+    ) == retained_dirty_script
+    assert (issue_path / "tests" / "test_runner_poll_github_tasks.py").read_text(
+        encoding="utf-8"
+    ) == retained_dirty_test
+    assert (path / "scripts" / "runner_poll_github_tasks.py").read_text(
+        encoding="utf-8"
+    ) == retained_dirty_script
+    assert (path / "tests" / "test_runner_poll_github_tasks.py").read_text(
+        encoding="utf-8"
+    ) == retained_dirty_test
+
+
+def test_prepare_target_worktree_retained_dirty_wrong_base_blocks_without_retry_gate(
+    tmp_path: Path,
+) -> None:
+    coordinator, issue_path, _retained_head, new_base = (
+        _prepare_target_wrong_base_recovery_fixture(tmp_path)
+    )
+
+    with mock.patch.object(
+        runner, "_remote_url_matches_project_repo", return_value=True
+    ), mock.patch.object(
+        runner,
+        "ensure_safe_target_repository_worktree_path",
+        side_effect=lambda _repository, path: Path(path).resolve(strict=False),
+    ):
+        code, output, path = runner.prepare_git_issue_worktree(
+            4364,
+            coordinator,
+            issue_path,
+            target_repository="alanua/Lavalamp",
+            source_repository=runner.REPO,
+            base="main",
+            base_sha=new_base,
+        )
+
+    assert code == 1
+    assert path == issue_path
+    assert "Existing issue worktree is dirty" in output
+    assert not list(issue_path.parent.glob("*-recovery-*"))
+
+
+def test_prepare_target_worktree_retained_dirty_wrong_base_blocks_out_of_allowlist_before_recovery(
+    tmp_path: Path,
+) -> None:
+    coordinator, issue_path, _retained_head, new_base = (
+        _prepare_target_wrong_base_recovery_fixture(
+            tmp_path,
+            dirty_files=("scripts/runner_poll_github_tasks.py", "docs/out-of-scope.md"),
+        )
+    )
+
+    with mock.patch.object(
+        runner, "_remote_url_matches_project_repo", return_value=True
+    ), mock.patch.object(
+        runner,
+        "ensure_safe_target_repository_worktree_path",
+        side_effect=lambda _repository, path: Path(path).resolve(strict=False),
+    ):
+        code, output, path = runner.prepare_git_issue_worktree(
+            4364,
+            coordinator,
+            issue_path,
+            target_repository="alanua/Lavalamp",
+            source_repository=runner.REPO,
+            base="main",
+            base_sha=new_base,
+            continuation_gate=_target_dirty_continuation_gate(),
+        )
+
+    assert code == 1
+    assert path == issue_path
+    assert "reason=retained_dirty_changed_files_outside_allowlist" in output
+    assert not list(issue_path.parent.glob("*-recovery-*"))
+
+
+def test_prepare_target_worktree_retained_dirty_wrong_base_blocks_unexpected_untracked_before_recovery(
+    tmp_path: Path,
+) -> None:
+    coordinator, issue_path, _retained_head, new_base = (
+        _prepare_target_wrong_base_recovery_fixture(
+            tmp_path,
+            untracked_files=("notes.txt", ".runner-codegen-trace-safe.log"),
+        )
+    )
+
+    with mock.patch.object(
+        runner, "_remote_url_matches_project_repo", return_value=True
+    ), mock.patch.object(
+        runner,
+        "ensure_safe_target_repository_worktree_path",
+        side_effect=lambda _repository, path: Path(path).resolve(strict=False),
+    ):
+        code, output, path = runner.prepare_git_issue_worktree(
+            4364,
+            coordinator,
+            issue_path,
+            target_repository="alanua/Lavalamp",
+            source_repository=runner.REPO,
+            base="main",
+            base_sha=new_base,
+            continuation_gate=_target_dirty_continuation_gate(),
+        )
+
+    assert code == 1
+    assert path == issue_path
+    assert "reason=retained_dirty_unexpected_untracked_files" in output
+    assert not list(issue_path.parent.glob("*-recovery-*"))
+
+
+def test_prepare_target_worktree_retained_dirty_wrong_base_blocks_head_delta_outside_allowlist(
+    tmp_path: Path,
+) -> None:
+    coordinator, issue_path, retained_head, new_base = (
+        _prepare_target_wrong_base_recovery_fixture(
+            tmp_path,
+            committed_files=("docs/out-of-scope.md",),
+            dirty_files=("scripts/runner_poll_github_tasks.py",),
+        )
+    )
+
+    with mock.patch.object(
+        runner, "_remote_url_matches_project_repo", return_value=True
+    ), mock.patch.object(
+        runner,
+        "ensure_safe_target_repository_worktree_path",
+        side_effect=lambda _repository, path: Path(path).resolve(strict=False),
+    ):
+        code, output, path = runner.prepare_git_issue_worktree(
+            4364,
+            coordinator,
+            issue_path,
+            target_repository="alanua/Lavalamp",
+            source_repository=runner.REPO,
+            base="main",
+            base_sha=new_base,
+            continuation_gate=_target_dirty_continuation_gate(),
+        )
+
+    assert code == 1
+    assert path == issue_path
+    assert "reason=wrong_base_recovery_committed_diff_changed_files_outside_allowlist" in output
+    assert runner.run_command(["git", "rev-parse", "HEAD"], cwd=issue_path)[1].strip() == retained_head
+
+
+def test_prepare_target_worktree_retained_dirty_wrong_base_blocks_base_drift(
+    tmp_path: Path,
+) -> None:
+    worktree_path = tmp_path / "worktrees" / "issue-4364"
+    worktree_path.mkdir(parents=True)
+    base_sha = "b" * 40
+
+    with mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=(
+            (0, " M scripts/runner_poll_github_tasks.py\n"),
+            (0, "runner/issue-4364\n"),
+            (0, "https://github.com/alanua/Lavalamp.git"),
+            (0, "scripts/runner_poll_github_tasks.py\n"),
+            (0, ""),
+            (0, ""),
+            (0, "fetched"),
+            (0, f"{base_sha}\n"),
+            (1, ""),
+            (0, "a" * 40 + "\n"),
+            (0, "scripts/runner_poll_github_tasks.py\n"),
+            (0, "scripts/runner_poll_github_tasks.py\n"),
+            (0, "committed patch"),
+            (0, "dirty patch"),
+            (0, "cloned"),
+            (0, ""),
+            (0, "fetched recovery"),
+            (0, "c" * 40 + "\n"),
+        ),
+    ), mock.patch.object(
+        runner,
+        "ensure_safe_target_repository_worktree_path",
+        side_effect=lambda _repository, path: Path(path),
+    ):
+        code, output, path = runner.prepare_git_issue_worktree(
+            4364,
+            tmp_path / "repo",
+            worktree_path,
+            target_repository="alanua/Lavalamp",
+            base="main",
+            base_sha=base_sha,
+            continuation_gate=_target_dirty_continuation_gate(
+                source_repository="alanua/Skeleton"
+            ),
+        )
+
+    assert code == 1
+    assert path == worktree_path
+    assert "reason=wrong_base_recovery_base_drift" in output
+
+
+def test_prepare_target_worktree_retained_dirty_wrong_base_blocks_patch_conflict(
+    tmp_path: Path,
+) -> None:
+    coordinator, issue_path, retained_head, new_base = (
+        _prepare_target_wrong_base_recovery_fixture(tmp_path, overlap_base_delta=True)
+    )
+
+    with mock.patch.object(
+        runner, "_remote_url_matches_project_repo", return_value=True
+    ), mock.patch.object(
+        runner,
+        "ensure_safe_target_repository_worktree_path",
+        side_effect=lambda _repository, path: Path(path).resolve(strict=False),
+    ):
+        code, output, path = runner.prepare_git_issue_worktree(
+            4364,
+            coordinator,
+            issue_path,
+            target_repository="alanua/Lavalamp",
+            source_repository=runner.REPO,
+            base="main",
+            base_sha=new_base,
+            continuation_gate=_target_dirty_continuation_gate(),
+        )
+
+    assert code == 1
+    assert path == issue_path
+    assert "reason=wrong_base_recovery_committed_patch_check_failed" in output
+    assert runner.run_command(["git", "rev-parse", "HEAD"], cwd=issue_path)[1].strip() == retained_head
+
+
+def test_prepare_target_worktree_retained_dirty_wrong_base_duplicate_recovery_blocks(
+    tmp_path: Path,
+) -> None:
+    coordinator, issue_path, retained_head, new_base = (
+        _prepare_target_wrong_base_recovery_fixture(tmp_path)
+    )
+    recovery_path = issue_path.parent / f"{issue_path.name}-recovery-{new_base[:12]}"
+    recovery_path.mkdir()
+
+    with mock.patch.object(
+        runner, "_remote_url_matches_project_repo", return_value=True
+    ), mock.patch.object(
+        runner,
+        "ensure_safe_target_repository_worktree_path",
+        side_effect=lambda _repository, path: Path(path).resolve(strict=False),
+    ):
+        code, output, path = runner.prepare_git_issue_worktree(
+            4364,
+            coordinator,
+            issue_path,
+            target_repository="alanua/Lavalamp",
+            source_repository=runner.REPO,
+            base="main",
+            base_sha=new_base,
+            continuation_gate=_target_dirty_continuation_gate(),
+        )
+
+    assert code == 1
+    assert path == issue_path
+    assert "reason=wrong_base_recovery_path_exists" in output
+    assert runner.run_command(["git", "rev-parse", "HEAD"], cwd=issue_path)[1].strip() == retained_head
 
 
 def test_prepare_target_worktree_source_repository_mismatch_blocks_before_fetch(
@@ -16187,6 +16683,45 @@ def test_publish_target_project_issue_worktree_pr_explicit_main_base_sha_succeed
         "origin",
         "refs/heads/main:refs/remotes/origin/main",
     ] in commands
+
+
+def test_publish_target_project_issue_worktree_pr_uses_derived_recovery_worktree(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target_root = tmp_path / "lumenflow"
+    base_sha = "a" * 40
+    recovery_name = f"issue-123-recovery-{base_sha[:12]}"
+    monkeypatch.setenv("RUNNER_APPROVED_WORKSPACE_ROOT", str(tmp_path))
+    _prepare_issue_publish_worktree(target_root)
+    recovery_path = target_root / recovery_name
+    recovery_path.mkdir(parents=True)
+    (recovery_path / ".git").write_text("gitdir: /tmp/git-dir\n", encoding="utf-8")
+    with mock.patch.object(
+        runner, "load_runner_project_tree", return_value=_target_project_tree(target_root)
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_issue_publish_commands(
+            worktree_path=recovery_path,
+            repository="alanua/LumenFlow",
+            remote_url="https://github.com/alanua/LumenFlow.git",
+            changed_files=("README.md",),
+            fetched_base_sha=base_sha,
+            commit_message="Publish target project issue #123 worktree",
+        ),
+    ) as run:
+        report = runner.publish_target_project_issue_worktree_pr(
+            _publish_target_project_issue_worktree_body(
+                base_sha=base_sha,
+                extra_metadata=(f"Recovery Worktree: {recovery_name}",),
+            )
+        )
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert report.startswith("DONE:")
+    assert "issue_worktree_path_unsafe" not in report
+    assert ["git", "branch", "--show-current"] in commands
 
 
 def test_publish_target_project_issue_worktree_pr_safe_non_main_exact_base_succeeds(
