@@ -1641,9 +1641,18 @@ def _validation_command_uses_pytest(args: list[str]) -> bool:
 
 
 def _validation_pytest_temp_parent(cwd_path: Path) -> Path:
-    candidates = [Path(tempfile.gettempdir()), Path("/tmp")]
+    candidates = [
+        Path(tempfile.gettempdir()),
+        Path("/tmp"),
+    ]
+    if os.environ.get("TMPDIR"):
+        candidates.insert(1, Path(os.environ["TMPDIR"]))
+    seen: set[Path] = set()
     for candidate in candidates:
         candidate_path = candidate.resolve(strict=False)
+        if candidate_path in seen:
+            continue
+        seen.add(candidate_path)
         if candidate_path.is_relative_to(cwd_path):
             continue
         if candidate_path.is_dir():
@@ -1653,11 +1662,7 @@ def _validation_pytest_temp_parent(cwd_path: Path) -> Path:
 
 def _create_validation_pytest_temp_root(cwd: str | Path) -> Path:
     cwd_path = Path(cwd)
-    if not cwd_path.is_dir():
-        raise FileNotFoundError(
-            f"pytest validation cwd is not an existing directory: {cwd_path}"
-        )
-    temp_parent = _validation_pytest_temp_parent(cwd_path.resolve(strict=True))
+    temp_parent = _validation_pytest_temp_parent(cwd_path.resolve(strict=False))
     return Path(
         tempfile.mkdtemp(
             prefix=".runner-validation-pytest-",
@@ -1669,7 +1674,11 @@ def _create_validation_pytest_temp_root(cwd: str | Path) -> Path:
 def _remove_validation_pytest_temp_root(path: Path) -> None:
     allowed_parents = {
         candidate.resolve(strict=False)
-        for candidate in (Path(tempfile.gettempdir()), Path("/tmp"))
+        for candidate in (
+            Path(tempfile.gettempdir()),
+            *( (Path(os.environ["TMPDIR"]),) if os.environ.get("TMPDIR") else () ),
+            Path("/tmp"),
+        )
         if candidate.is_dir()
     }
     try:
@@ -2162,6 +2171,23 @@ def _is_approved_runner_codex_metadata_untracked_path(path: str) -> bool:
     return bool(separator) and re.fullmatch(
         r"\.runner-codex-state-[A-Za-z0-9_-]+", first_part
     ) is not None
+
+
+def _is_inside_public_repo_content(path: Path) -> bool:
+    root = ROOT.resolve(strict=False)
+    resolved = path.resolve(strict=False)
+    if resolved == root:
+        return True
+    try:
+        relative = resolved.relative_to(root)
+    except ValueError:
+        return False
+    if (
+        relative.parts
+        and re.fullmatch(r"\.runner-codex-state-[A-Za-z0-9_-]+", relative.parts[0])
+    ):
+        return False
+    return True
 
 
 def _git_name_lines(command: list[str], cwd: Path) -> tuple[int, list[str], str]:
@@ -7117,7 +7143,11 @@ def _loop_state_db_path() -> tuple[Path | None, str | None]:
         env_var_name=LOOP_STATE_DB_ENV,
         root=ROOT,
         path_has_symlink_component=_path_has_symlink_component,
-        path_is_relative_to=_path_is_relative_to,
+        path_is_relative_to=lambda path, parent: (
+            _is_inside_public_repo_content(path)
+            if parent.resolve(strict=False) == ROOT.resolve(strict=False)
+            else _path_is_relative_to(path, parent)
+        ),
     )
 
 
@@ -8910,9 +8940,9 @@ def _aufmass_private_registered_paths() -> tuple[Path | None, Path | None, str |
         if not _path_is_under_allowed_target_base(path):
             return None, None, f"reason={name}_unsafe"
 
-    if workspace_root == ROOT or _path_is_relative_to(workspace_root, ROOT):
+    if _is_inside_public_repo_content(workspace_root):
         return None, None, "reason=private_workspace_inside_public_repo"
-    if checkout_path == ROOT or _path_is_relative_to(checkout_path, ROOT):
+    if _is_inside_public_repo_content(checkout_path):
         return None, None, "reason=private_checkout_inside_public_repo"
 
     return checkout_path, workspace_root, None
@@ -9131,7 +9161,7 @@ def _resolve_private_registry_path(
     resolved_registry = registry_path.resolve(strict=False)
     if not _path_is_relative_to(resolved_registry, workspace_root):
         return None, "registry_outside_private_workspace"
-    if resolved_registry == ROOT or _path_is_relative_to(resolved_registry, ROOT):
+    if _is_inside_public_repo_content(resolved_registry):
         return None, "registry_inside_public_repo"
     if not resolved_registry.is_file():
         return None, "registry_missing"
@@ -9151,7 +9181,7 @@ def _private_registry_relative_path(
     resolved = (workspace_root / candidate).resolve(strict=False)
     if not _path_is_relative_to(resolved, workspace_root):
         return None, f"{label}_outside_private_workspace"
-    if resolved == ROOT or _path_is_relative_to(resolved, ROOT):
+    if _is_inside_public_repo_content(resolved):
         return None, f"{label}_inside_public_repo"
     return resolved, None
 
@@ -9797,7 +9827,7 @@ def _write_private_shortlist_artifacts(
         resolved = path.resolve(strict=False)
         if not _path_is_relative_to(resolved, resolved_output_root):
             return "shortlist_artifact_path_unsafe"
-        if resolved == ROOT or _path_is_relative_to(resolved, ROOT):
+        if _is_inside_public_repo_content(resolved):
             return "shortlist_artifact_inside_public_repo"
     payload = {
         "schema": "skeleton.aufmass_private_shortlist.v1",
@@ -9943,7 +9973,7 @@ def _write_private_area_schedule_artifacts(
         resolved = path.resolve(strict=False)
         if not _path_is_relative_to(resolved, resolved_output_root):
             return "area_schedule_artifact_path_unsafe"
-        if resolved == ROOT or _path_is_relative_to(resolved, ROOT):
+        if _is_inside_public_repo_content(resolved):
             return "area_schedule_artifact_inside_public_repo"
     payload = {
         "schema": "skeleton.aufmass_private_area_schedule.v1",
@@ -21219,7 +21249,12 @@ def _runner_vnext_prepare_safe_db(path: Path, root: Path, reason: str) -> Path:
             info = path.lstat()
         except OSError as exc:
             raise RuntimeError(reason) from exc
-        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        if (
+            stat.S_ISLNK(info.st_mode)
+            or not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.geteuid()
+            or stat.S_IMODE(info.st_mode) & 0o077
+        ):
             raise RuntimeError(reason)
     return resolved
 
@@ -21300,6 +21335,9 @@ for key, value in pairs:
     replacement = f"{key}={value}"
     indexes = seen[key]
     if indexes:
+        existing_value = updated[indexes[0]].strip().split("=", 1)[1]
+        if existing_value != value:
+            raise SystemExit(4)
         updated[indexes[0]] = replacement
     else:
         updated.append(replacement)
@@ -21313,6 +21351,44 @@ try:
 finally:
     if os.path.exists(temp_name):
         os.unlink(temp_name)
+"""
+
+_RUNNER_VNEXT_ENV_PREFLIGHT_SCRIPT = """\
+from pathlib import Path
+import os
+import stat
+import sys
+
+path = Path(sys.argv[1])
+pairs = list(zip(sys.argv[2::2], sys.argv[3::2]))
+target = {key: value for key, value in pairs}
+if len(target) != len(pairs):
+    raise SystemExit(2)
+try:
+    info = path.lstat()
+except FileNotFoundError:
+    raise SystemExit(0)
+if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+    raise SystemExit(4)
+if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) & 0o077:
+    raise SystemExit(5)
+lines = path.read_text(encoding="utf-8").splitlines()
+seen = {key: [] for key in target}
+for index, line in enumerate(lines):
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#") or "=" not in stripped:
+        continue
+    name, value = stripped.split("=", 1)
+    name = name.strip()
+    if name.startswith("export "):
+        name = name.removeprefix("export ").strip()
+    if name in seen:
+        seen[name].append((index, value))
+for key, entries in seen.items():
+    if len(entries) > 1:
+        raise SystemExit(3)
+    if entries and entries[0][1] != target[key]:
+        raise SystemExit(6)
 """
 
 _RUNNER_VNEXT_ENV_VERIFY_SCRIPT = """\
@@ -21346,6 +21422,13 @@ def _runner_vnext_prepare_bind_env(root: Path, ledger: Path, lease: Path) -> Non
     )
     argv = [item for pair in pairs for item in pair]
     commands = (
+        _non_interactive_sudo(
+            "python3",
+            "-c",
+            _RUNNER_VNEXT_ENV_PREFLIGHT_SCRIPT,
+            TELEGRAM_CALLBACK_LOCAL_CONFIG,
+            *argv,
+        ),
         _non_interactive_sudo("touch", TELEGRAM_CALLBACK_LOCAL_CONFIG),
         _non_interactive_sudo("chown", "root:root", TELEGRAM_CALLBACK_LOCAL_CONFIG),
         _non_interactive_sudo("chmod", "0600", TELEGRAM_CALLBACK_LOCAL_CONFIG),
@@ -21370,6 +21453,25 @@ def _runner_vnext_prepare_bind_env(root: Path, ledger: Path, lease: Path) -> Non
             raise RuntimeError("prepare_runtime_state_env_bind_failed")
 
 
+def _runner_vnext_prepare_preflight_env(root: Path, ledger: Path, lease: Path) -> None:
+    pairs = (
+        (RUNNER_VNEXT_STATE_ROOT_ENV, str(root)),
+        (RUNNER_VNEXT_LEDGER_DB_ENV, str(ledger)),
+        (RUNNER_VNEXT_LEASE_DB_ENV, str(lease)),
+    )
+    argv = [item for pair in pairs for item in pair]
+    command = _non_interactive_sudo(
+        "python3",
+        "-c",
+        _RUNNER_VNEXT_ENV_PREFLIGHT_SCRIPT,
+        TELEGRAM_CALLBACK_LOCAL_CONFIG,
+        *argv,
+    )
+    code, _output = run_command(command)
+    if code != 0:
+        raise RuntimeError("prepare_runtime_state_env_bind_failed")
+
+
 def runner_vnext_prepare_runtime_state_v1(body: str, workdir: str | Path) -> str:
     task_id = RUNNER_VNEXT_PREPARE_RUNTIME_STATE_TASK_ID
     try:
@@ -21388,6 +21490,7 @@ def runner_vnext_prepare_runtime_state_v1(body: str, workdir: str | Path) -> str
             root,
             "prepare_runtime_state_lease_path_unsafe",
         )
+        _runner_vnext_prepare_preflight_env(root, ledger, lease)
         _runner_vnext_prepare_initialize_stores(root, ledger, lease)
         _runner_vnext_prepare_bind_env(root, ledger, lease)
     except RuntimeError as exc:

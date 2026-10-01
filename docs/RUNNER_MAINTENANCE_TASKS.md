@@ -96,10 +96,14 @@ The task persists only `SKELETON_RUNNER_VNEXT_STATE_ROOT`,
 `SKELETON_RUNNER_VNEXT_LEDGER_DB`, and `SKELETON_RUNNER_VNEXT_LEASE_DB` via the
 existing non-interactive `sudo -n` env-file update pattern for
 `/etc/skeleton-runner.env`; unrelated settings are preserved and duplicate
-target entries are rejected. It never writes `SKELETON_RUNNER_VNEXT_MODE` and
-never runs `systemctl` mutations. Public output is limited to the exact main
-SHA, `state_ready`, `ledger_ready`, `lease_ready`, `config_bound`,
-`mode_unchanged=true`, `service_changes=false`, and `success_criteria`.
+target entries or conflicting existing target values are rejected before store
+initialization. Existing DB files must already be regular owner-private files
+before any store open occurs, and the env file is preflighted before any
+`touch`, ownership, mode, or content mutation. It never writes
+`SKELETON_RUNNER_VNEXT_MODE` and never runs `systemctl` mutations. Public output
+is limited to the exact main SHA, `state_ready`, `ledger_ready`, `lease_ready`,
+`config_bound`, `mode_unchanged=true`, `service_changes=false`, and
+`success_criteria`.
 
 `runner_codex_primary_health_probe` is the protected, narrow PRIMARY-CODEX
 health probe. It requires exact maintenance-mode metadata, `Repository:

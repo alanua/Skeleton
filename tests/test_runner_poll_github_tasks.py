@@ -27529,3 +27529,122 @@ def test_runner_vnext_prepare_runtime_state_rejects_duplicate_env_entries(
     assert "config_bound=false" in report
     assert "reason=prepare_runtime_state_env_bind_failed" in report
     assert f"{runner.RUNNER_VNEXT_MODE_ENV}=" not in env_file.read_text(encoding="utf-8")
+    assert not ledger.exists()
+    assert not lease.exists()
+    assert all(command[:3] != ["sudo", "-n", "touch"] for command in commands)
+
+
+def test_runner_vnext_prepare_runtime_state_rejects_conflicting_env_values_before_db_mutation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    state_root = tmp_path / "private-state" / "runner-vnext"
+    ledger = state_root / "ledger.sqlite"
+    lease = state_root / "lease.sqlite"
+    env_file = tmp_path / "skeleton-runner.env"
+    env_file.write_text(
+        "\n".join(
+            (
+                "UNRELATED_SETTING=keep",
+                f"{runner.RUNNER_VNEXT_STATE_ROOT_ENV}=/old/root",
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    env_file.chmod(0o600)
+    commands: list[list[str]] = []
+    monkeypatch.setattr(runner, "RUNNER_VNEXT_FIXED_STATE_ROOT", state_root)
+    monkeypatch.setattr(runner, "RUNNER_VNEXT_FIXED_LEDGER_DB", ledger)
+    monkeypatch.setattr(runner, "RUNNER_VNEXT_FIXED_LEASE_DB", lease)
+    monkeypatch.setattr(runner, "TELEGRAM_CALLBACK_LOCAL_CONFIG", str(env_file))
+    monkeypatch.setattr(
+        runner,
+        "run_command",
+        _runner_vnext_prepare_fake_run_command(env_file, commands),
+    )
+
+    report = runner.dispatch_runtime_maintenance_task(
+        runner.RUNNER_VNEXT_PREPARE_RUNTIME_STATE_TASK_ID,
+        str(tmp_path),
+        _runner_vnext_prepare_runtime_state_body(),
+    )
+
+    assert runner.maintenance_report_status(report) == "BLOCKED"
+    assert "reason=prepare_runtime_state_env_bind_failed" in report
+    assert f"{runner.RUNNER_VNEXT_STATE_ROOT_ENV}=/old/root" in env_file.read_text(
+        encoding="utf-8"
+    )
+    assert not ledger.exists()
+    assert not lease.exists()
+    assert all(command[:3] != ["sudo", "-n", "touch"] for command in commands)
+
+
+def test_runner_vnext_prepare_runtime_state_rejects_unsafe_existing_db_before_store_open(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    state_root = tmp_path / "private-state" / "runner-vnext"
+    state_root.mkdir(parents=True, mode=0o700)
+    state_root.chmod(0o700)
+    ledger = state_root / "ledger.sqlite"
+    lease = state_root / "lease.sqlite"
+    ledger.write_text("not yet trusted\n", encoding="utf-8")
+    ledger.chmod(0o644)
+    env_file = tmp_path / "skeleton-runner.env"
+    commands: list[list[str]] = []
+    monkeypatch.setattr(runner, "RUNNER_VNEXT_FIXED_STATE_ROOT", state_root)
+    monkeypatch.setattr(runner, "RUNNER_VNEXT_FIXED_LEDGER_DB", ledger)
+    monkeypatch.setattr(runner, "RUNNER_VNEXT_FIXED_LEASE_DB", lease)
+    monkeypatch.setattr(runner, "TELEGRAM_CALLBACK_LOCAL_CONFIG", str(env_file))
+    monkeypatch.setattr(
+        runner,
+        "run_command",
+        _runner_vnext_prepare_fake_run_command(env_file, commands),
+    )
+    build_stores = mock.Mock(side_effect=AssertionError("must not open unsafe DB"))
+    monkeypatch.setattr(runner, "build_authoritative_stores", build_stores)
+
+    report = runner.dispatch_runtime_maintenance_task(
+        runner.RUNNER_VNEXT_PREPARE_RUNTIME_STATE_TASK_ID,
+        str(tmp_path),
+        _runner_vnext_prepare_runtime_state_body(),
+    )
+
+    assert runner.maintenance_report_status(report) == "BLOCKED"
+    assert "reason=prepare_runtime_state_ledger_path_unsafe" in report
+    assert not lease.exists()
+    build_stores.assert_not_called()
+    assert all(command[:3] != ["sudo", "-n", "touch"] for command in commands)
+
+
+def test_runner_vnext_prepare_runtime_state_rejects_unsafe_env_file_before_chmod(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    state_root = tmp_path / "private-state" / "runner-vnext"
+    ledger = state_root / "ledger.sqlite"
+    lease = state_root / "lease.sqlite"
+    env_file = tmp_path / "skeleton-runner.env"
+    env_file.write_text("UNRELATED_SETTING=keep\n", encoding="utf-8")
+    env_file.chmod(0o644)
+    commands: list[list[str]] = []
+    monkeypatch.setattr(runner, "RUNNER_VNEXT_FIXED_STATE_ROOT", state_root)
+    monkeypatch.setattr(runner, "RUNNER_VNEXT_FIXED_LEDGER_DB", ledger)
+    monkeypatch.setattr(runner, "RUNNER_VNEXT_FIXED_LEASE_DB", lease)
+    monkeypatch.setattr(runner, "TELEGRAM_CALLBACK_LOCAL_CONFIG", str(env_file))
+    monkeypatch.setattr(
+        runner,
+        "run_command",
+        _runner_vnext_prepare_fake_run_command(env_file, commands),
+    )
+
+    report = runner.dispatch_runtime_maintenance_task(
+        runner.RUNNER_VNEXT_PREPARE_RUNTIME_STATE_TASK_ID,
+        str(tmp_path),
+        _runner_vnext_prepare_runtime_state_body(),
+    )
+
+    assert runner.maintenance_report_status(report) == "BLOCKED"
+    assert "reason=prepare_runtime_state_env_bind_failed" in report
+    assert env_file.stat().st_mode & 0o777 == 0o644
+    assert not ledger.exists()
+    assert not lease.exists()
+    assert all(command[:3] != ["sudo", "-n", "chmod"] for command in commands)
