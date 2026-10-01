@@ -17,6 +17,14 @@ source, action, timestamp, status, count/result, and bounded error or flood-wait
 state. Audit records include peer provenance hashes instead of raw message text,
 session material, tokens, or secret values.
 
+`core.telegram_mcp_readonly` is the global read-only MCP facade for this
+canonical gateway backend. It exposes exactly six tools named after the backend
+methods: `resolve_source`, `get_history`, `get_message`, `search`,
+`sync_source`, and `list_allowed_sources`. It does not expose `write_bot`,
+`watch_source`, raw MTProto clients, secrets, environment injection, shell
+commands, media downloads, memory proposals, or arbitrary peers. Unsupported
+tool names and write-shaped modes fail closed before reaching the backend.
+
 The MTProto facade exposes read-only history access. `READ_PUBLIC` accepts only
 the configured source id, public handle, or stable peer id for that source.
 `READ_ALLOWED_PRIVATE` accepts only exact peers listed in
