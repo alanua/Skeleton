@@ -7175,6 +7175,7 @@ def _target_project_publication_body(
         *recovery_metadata,
         f"Output Branch: {issue_branch(issue_number, source_repository)}",
         "Draft PR: true",
+        *_target_project_publication_existing_pr_metadata(issue_body),
         "Allowed Files:",
         *(f"- {path}" for path in sorted(allowed_files)),
     ]
@@ -7187,6 +7188,23 @@ def _target_project_publication_body(
             "```",
         )
     )
+
+
+def _target_project_publication_existing_pr_metadata(issue_body: str) -> list[str]:
+    declared_pr = _declared_existing_pr_number(issue_body)
+    if declared_pr is None:
+        return []
+    expected_head_sha = _declared_existing_pr_expected_head_sha(issue_body)
+    if expected_head_sha is None:
+        raise RuntimeError("publication_contract_existing_pr_head_sha_missing")
+    expected_head_branch = _declared_existing_pr_expected_head_branch(issue_body)
+    if expected_head_branch is None:
+        raise RuntimeError("publication_contract_existing_pr_head_branch_missing")
+    return [
+        f"Existing PR: {declared_pr}",
+        f"Expected PR Head SHA: {expected_head_sha}",
+        f"Expected PR Head Branch: {expected_head_branch}",
+    ]
 
 
 def _codegen_requires_target_publication(issue_body: str) -> bool:

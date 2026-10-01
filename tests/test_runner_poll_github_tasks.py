@@ -3154,6 +3154,7 @@ def test_completion_path_invokes_replenishment_after_done_status(tmp_path: Path)
 
 def _lavalamp_codegen_issue_body(
     expected_output: str | tuple[str, ...] = "one protected draft PR",
+    extra_metadata: tuple[str, ...] = (),
 ) -> str:
     if isinstance(expected_output, tuple):
         expected_output_lines = f"Expected Output: {'; '.join(expected_output)}"
@@ -3166,6 +3167,7 @@ def _lavalamp_codegen_issue_body(
             "Base SHA: " + "a" * 40,
             "Allowed Files:",
             "- README.md",
+            *extra_metadata,
             expected_output_lines,
             "",
             "```task",
@@ -3514,6 +3516,88 @@ def test_target_project_publication_body_names_derived_recovery_worktree(
         )
 
     assert f"Recovery Worktree: {recovery_path.name}" in body
+
+
+def test_target_project_publication_body_propagates_declared_existing_pr_binding() -> None:
+    head_sha = "b" * 40
+    issue_body = _lavalamp_codegen_issue_body(
+        extra_metadata=(
+            "Existing PR: 14",
+            f"Expected PR Head SHA: {head_sha}",
+            "Expected PR Head Branch: runner/issue-13",
+        )
+    )
+    task, reason = runner.extract_runner_task(
+        issue_body,
+        default_repository="alanua/Lavalamp",
+    )
+    assert reason is None
+    assert task is not None
+
+    body = runner._target_project_publication_body(
+        issue_number=13,
+        issue_body=issue_body,
+        runner_task=task,
+        source_repository="alanua/Lavalamp",
+    )
+
+    assert "Existing PR: 14" in body
+    assert f"Expected PR Head SHA: {head_sha}" in body
+    assert "Expected PR Head Branch: runner/issue-13" in body
+
+
+def test_target_project_publication_body_omits_existing_pr_binding_for_new_pr() -> None:
+    task, reason = runner.extract_runner_task(
+        _lavalamp_codegen_issue_body(),
+        default_repository="alanua/Lavalamp",
+    )
+    assert reason is None
+    assert task is not None
+
+    body = runner._target_project_publication_body(
+        issue_number=13,
+        issue_body=_lavalamp_codegen_issue_body(),
+        runner_task=task,
+        source_repository="alanua/Lavalamp",
+    )
+
+    assert "Existing PR:" not in body
+    assert "Expected PR Head SHA:" not in body
+    assert "Expected PR Head Branch:" not in body
+
+
+@pytest.mark.parametrize(
+    ("extra_metadata", "reason"),
+    (
+        (
+            ("Existing PR: 14", "Expected PR Head Branch: runner/issue-13"),
+            "publication_contract_existing_pr_head_sha_missing",
+        ),
+        (
+            ("Existing PR: 14", f"Expected PR Head SHA: {'b' * 40}"),
+            "publication_contract_existing_pr_head_branch_missing",
+        ),
+    ),
+)
+def test_target_project_publication_body_requires_declared_existing_pr_head_bindings(
+    extra_metadata: tuple[str, ...],
+    reason: str,
+) -> None:
+    issue_body = _lavalamp_codegen_issue_body(extra_metadata=extra_metadata)
+    task, extract_reason = runner.extract_runner_task(
+        issue_body,
+        default_repository="alanua/Lavalamp",
+    )
+    assert extract_reason is None
+    assert task is not None
+
+    with pytest.raises(RuntimeError, match=reason):
+        runner._target_project_publication_body(
+            issue_number=13,
+            issue_body=issue_body,
+            runner_task=task,
+            source_repository="alanua/Lavalamp",
+        )
 
 
 def test_cross_project_publication_failure_keeps_changed_worktree(
