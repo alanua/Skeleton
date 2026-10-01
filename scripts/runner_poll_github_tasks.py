@@ -1641,18 +1641,9 @@ def _validation_command_uses_pytest(args: list[str]) -> bool:
 
 
 def _validation_pytest_temp_parent(cwd_path: Path) -> Path:
-    candidates = [
-        Path(tempfile.gettempdir()),
-        Path("/tmp"),
-    ]
-    if os.environ.get("TMPDIR"):
-        candidates.insert(1, Path(os.environ["TMPDIR"]))
-    seen: set[Path] = set()
+    candidates = [Path(tempfile.gettempdir()), Path("/tmp")]
     for candidate in candidates:
         candidate_path = candidate.resolve(strict=False)
-        if candidate_path in seen:
-            continue
-        seen.add(candidate_path)
         if candidate_path.is_relative_to(cwd_path):
             continue
         if candidate_path.is_dir():
@@ -1662,7 +1653,11 @@ def _validation_pytest_temp_parent(cwd_path: Path) -> Path:
 
 def _create_validation_pytest_temp_root(cwd: str | Path) -> Path:
     cwd_path = Path(cwd)
-    temp_parent = _validation_pytest_temp_parent(cwd_path.resolve(strict=False))
+    if not cwd_path.is_dir():
+        raise FileNotFoundError(
+            f"pytest validation cwd is not an existing directory: {cwd_path}"
+        )
+    temp_parent = _validation_pytest_temp_parent(cwd_path.resolve(strict=True))
     return Path(
         tempfile.mkdtemp(
             prefix=".runner-validation-pytest-",
@@ -1674,11 +1669,7 @@ def _create_validation_pytest_temp_root(cwd: str | Path) -> Path:
 def _remove_validation_pytest_temp_root(path: Path) -> None:
     allowed_parents = {
         candidate.resolve(strict=False)
-        for candidate in (
-            Path(tempfile.gettempdir()),
-            *( (Path(os.environ["TMPDIR"]),) if os.environ.get("TMPDIR") else () ),
-            Path("/tmp"),
-        )
+        for candidate in (Path(tempfile.gettempdir()), Path("/tmp"))
         if candidate.is_dir()
     }
     try:
@@ -2171,23 +2162,6 @@ def _is_approved_runner_codex_metadata_untracked_path(path: str) -> bool:
     return bool(separator) and re.fullmatch(
         r"\.runner-codex-state-[A-Za-z0-9_-]+", first_part
     ) is not None
-
-
-def _is_inside_public_repo_content(path: Path) -> bool:
-    root = ROOT.resolve(strict=False)
-    resolved = path.resolve(strict=False)
-    if resolved == root:
-        return True
-    try:
-        relative = resolved.relative_to(root)
-    except ValueError:
-        return False
-    if (
-        relative.parts
-        and re.fullmatch(r"\.runner-codex-state-[A-Za-z0-9_-]+", relative.parts[0])
-    ):
-        return False
-    return True
 
 
 def _git_name_lines(command: list[str], cwd: Path) -> tuple[int, list[str], str]:
@@ -7143,11 +7117,7 @@ def _loop_state_db_path() -> tuple[Path | None, str | None]:
         env_var_name=LOOP_STATE_DB_ENV,
         root=ROOT,
         path_has_symlink_component=_path_has_symlink_component,
-        path_is_relative_to=lambda path, parent: (
-            _is_inside_public_repo_content(path)
-            if parent.resolve(strict=False) == ROOT.resolve(strict=False)
-            else _path_is_relative_to(path, parent)
-        ),
+        path_is_relative_to=_path_is_relative_to,
     )
 
 
@@ -8940,9 +8910,9 @@ def _aufmass_private_registered_paths() -> tuple[Path | None, Path | None, str |
         if not _path_is_under_allowed_target_base(path):
             return None, None, f"reason={name}_unsafe"
 
-    if _is_inside_public_repo_content(workspace_root):
+    if workspace_root == ROOT or _path_is_relative_to(workspace_root, ROOT):
         return None, None, "reason=private_workspace_inside_public_repo"
-    if _is_inside_public_repo_content(checkout_path):
+    if checkout_path == ROOT or _path_is_relative_to(checkout_path, ROOT):
         return None, None, "reason=private_checkout_inside_public_repo"
 
     return checkout_path, workspace_root, None
@@ -9161,7 +9131,7 @@ def _resolve_private_registry_path(
     resolved_registry = registry_path.resolve(strict=False)
     if not _path_is_relative_to(resolved_registry, workspace_root):
         return None, "registry_outside_private_workspace"
-    if _is_inside_public_repo_content(resolved_registry):
+    if resolved_registry == ROOT or _path_is_relative_to(resolved_registry, ROOT):
         return None, "registry_inside_public_repo"
     if not resolved_registry.is_file():
         return None, "registry_missing"
@@ -9181,7 +9151,7 @@ def _private_registry_relative_path(
     resolved = (workspace_root / candidate).resolve(strict=False)
     if not _path_is_relative_to(resolved, workspace_root):
         return None, f"{label}_outside_private_workspace"
-    if _is_inside_public_repo_content(resolved):
+    if resolved == ROOT or _path_is_relative_to(resolved, ROOT):
         return None, f"{label}_inside_public_repo"
     return resolved, None
 
@@ -9827,7 +9797,7 @@ def _write_private_shortlist_artifacts(
         resolved = path.resolve(strict=False)
         if not _path_is_relative_to(resolved, resolved_output_root):
             return "shortlist_artifact_path_unsafe"
-        if _is_inside_public_repo_content(resolved):
+        if resolved == ROOT or _path_is_relative_to(resolved, ROOT):
             return "shortlist_artifact_inside_public_repo"
     payload = {
         "schema": "skeleton.aufmass_private_shortlist.v1",
@@ -9973,7 +9943,7 @@ def _write_private_area_schedule_artifacts(
         resolved = path.resolve(strict=False)
         if not _path_is_relative_to(resolved, resolved_output_root):
             return "area_schedule_artifact_path_unsafe"
-        if _is_inside_public_repo_content(resolved):
+        if resolved == ROOT or _path_is_relative_to(resolved, ROOT):
             return "area_schedule_artifact_inside_public_repo"
     payload = {
         "schema": "skeleton.aufmass_private_area_schedule.v1",
