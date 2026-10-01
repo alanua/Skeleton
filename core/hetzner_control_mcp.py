@@ -7,6 +7,11 @@ from typing import Protocol
 
 from core.action_gate import ActionGateRequest, validate_action_request
 from core.runner_controller_privileged_gateway import LocalSudoGatewayTransport
+from core.telegram_mcp_readonly import (
+    TelegramReadonlyMcpDispatcher,
+    is_readonly_telegram_tool,
+    tool_descriptions as telegram_tool_descriptions,
+)
 
 
 MCP_SCHEMA = "skeleton.hetzner_control_mcp.v1"
@@ -72,13 +77,19 @@ def tool_descriptions() -> tuple[dict[str, object], ...]:
 @dataclass(frozen=True)
 class HetznerControlMcpDispatcher:
     privileged_gateway: PrivilegedGatewayTransport
+    telegram_readonly: TelegramReadonlyMcpDispatcher | None = None
 
     @classmethod
     def production(cls) -> "HetznerControlMcpDispatcher":
-        return cls(privileged_gateway=LocalSudoGatewayTransport())
+        return cls(
+            privileged_gateway=LocalSudoGatewayTransport(),
+            telegram_readonly=TelegramReadonlyMcpDispatcher.production(),
+        )
 
     def list_tools(self) -> tuple[dict[str, object], ...]:
-        return tool_descriptions()
+        if self.telegram_readonly is None:
+            return tool_descriptions()
+        return tool_descriptions() + telegram_tool_descriptions()
 
     def call_tool(self, name: str, arguments: Mapping[str, object]) -> dict[str, object]:
         if not isinstance(arguments, Mapping):
@@ -87,6 +98,8 @@ class HetznerControlMcpDispatcher:
             return self._action_gate(arguments)
         if name == RUNNER_PRIVILEGED_TOOL:
             return self._runner_privileged_gateway(arguments)
+        if is_readonly_telegram_tool(name) and self.telegram_readonly is not None:
+            return self.telegram_readonly.call_tool(name, arguments)
         return _blocked("UNSUPPORTED_TOOL")
 
     def _action_gate(self, arguments: Mapping[str, object]) -> dict[str, object]:

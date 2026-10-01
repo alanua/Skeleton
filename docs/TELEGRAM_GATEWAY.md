@@ -104,3 +104,45 @@ download feature must be a separate explicit bounded operation.
 
 Rollback note: disabling the gateway files leaves current Bot API publication
 functional because `core.telegram_notifications` remains the canonical sender.
+
+## Global Read-Only MCP
+
+`core.telegram_mcp_readonly` is the global Telegram MCP boundary. It is a thin
+transport adapter over a bound canonical reader backend; it does not open a
+second MTProto reader, create another session mechanism, or maintain a separate
+Telegram store. Production construction never loads Telegram source config,
+opens SQLite, or creates a `TelegramGateway`. Until the existing trusted reader
+runtime binds a `TelegramReadonlyBackend`, every read tool fails closed with
+`BACKEND_UNAVAILABLE`.
+
+The exposed tools are:
+
+- `telegram_list_allowed_sources`
+- `telegram_resolve_source`
+- `telegram_get_history`
+- `telegram_get_message`
+- `telegram_search`
+- `telegram_backend_status`
+
+The MCP surface intentionally omits `write_bot`, `sync_source`, `watch_source`,
+memory proposals, raw MTProto client access, media downloads, shell/argv/env
+parameters, source/store path parameters, and secret/session parameters. Read
+operations therefore reuse the canonical Telegram Gateway allowlist, secret
+reference policy, MTProto facade, audit log, store-backed retrieval, page
+bounds, flood-wait handling, and failure-closed error contract only after that
+runtime is explicitly bound.
+
+`core.hetzner_control_mcp.HetznerControlMcpDispatcher.production()` composes the
+read-only Telegram dispatcher without constructing Telegram runtime state. If
+the canonical reader is not bound yet, the existing Hetzner control MCP tools
+remain available and Telegram tool calls return `BACKEND_UNAVAILABLE`.
+
+Runtime-bind child issue to create if production remains unbound:
+
+Title: `Bind global Telegram read-only MCP to canonical reader runtime`
+
+Body: Bind `core.telegram_mcp_readonly` to the single production Telegram reader
+runtime. Do not create a second `TelegramGateway`, `TelegramStore`, MTProto
+session, or local source loader in the Hetzner MCP path. Expose the existing
+runtime through the `TelegramReadonlyBackend` protocol and verify unbound calls
+fail closed with `BACKEND_UNAVAILABLE`.
