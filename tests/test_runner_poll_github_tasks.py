@@ -26612,9 +26612,23 @@ def test_runner_vnext_maintenance_ids_are_registered_with_exact_protection() -> 
     assert runner.RUNNER_VNEXT_READONLY_PREFLIGHT_TASK_ID in runner.RUNTIME_MAINTENANCE_TASK_IDS
     assert runner.RUNNER_VNEXT_EXTERNAL_ATTESTATION_TASK_ID in runner.RUNTIME_MAINTENANCE_TASK_IDS
     assert runner.RUNNER_VNEXT_EXACT_GREEN_CANARY_TASK_ID in runner.RUNTIME_MAINTENANCE_TASK_IDS
+    assert runner.RUNNER_VNEXT_PREPARE_RUNTIME_STATE_TASK_ID in runner.RUNTIME_MAINTENANCE_TASK_IDS
     assert runner.RUNNER_VNEXT_READONLY_PREFLIGHT_TASK_ID not in runner.PROTECTED_MAINTENANCE_TASK_IDS
     assert runner.RUNNER_VNEXT_EXTERNAL_ATTESTATION_TASK_ID in runner.PROTECTED_MAINTENANCE_TASK_IDS
     assert runner.RUNNER_VNEXT_EXACT_GREEN_CANARY_TASK_ID in runner.PROTECTED_MAINTENANCE_TASK_IDS
+    assert runner.RUNNER_VNEXT_PREPARE_RUNTIME_STATE_TASK_ID in runner.PROTECTED_MAINTENANCE_TASK_IDS
+
+
+def _runner_vnext_prepare_runtime_state_body(expected_sha: str = HEAD_SHA) -> str:
+    return "\n".join(
+        (
+            f"Mode: {runner.RUNTIME_MAINTENANCE_MODE}",
+            f"Maintenance Task ID: {runner.RUNNER_VNEXT_PREPARE_RUNTIME_STATE_TASK_ID}",
+            "Repository: alanua/Skeleton",
+            f"Expected Main SHA: {expected_sha}",
+            f"Operator Approval: {runner.RUNNER_VNEXT_PREPARE_RUNTIME_STATE_APPROVAL}",
+        )
+    )
 
 
 def _runner_vnext_selector_body(
@@ -27028,6 +27042,105 @@ def test_runner_vnext_readonly_preflight_is_public_safe_and_non_mutating(
     )
 
 
+def test_runner_vnext_readonly_preflight_accepts_activating_legacy_oneshot(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    workdir, ledger, lease = _write_runner_vnext_preflight_fixture(tmp_path)
+    monkeypatch.setenv(runner.RUNNER_VNEXT_STATE_ROOT_ENV, str(ledger.parent))
+    monkeypatch.setenv(runner.RUNNER_VNEXT_LEDGER_DB_ENV, str(ledger))
+    monkeypatch.setenv(runner.RUNNER_VNEXT_LEASE_DB_ENV, str(lease))
+
+    def read_only_probe(command: list[str], cwd=None, timeout=None, **_kwargs):
+        if command[:4] == ["git", "rev-parse", "--verify", "HEAD"]:
+            return 0, HEAD_SHA + "\n"
+        if command[:2] == ["gh", "api"]:
+            return 0, HEAD_SHA + "\n"
+        if command[:2] == ["systemctl", "is-active"]:
+            if command[2] == runner.RUNNER_LEGACY_SERVICE_UNIT:
+                return 0, "activating\n"
+            return 0, "active\n"
+        if command[:2] == ["systemctl", "is-enabled"]:
+            return 0, "enabled\n"
+        if command[:2] == ["systemctl", "show"]:
+            return 0, "loaded\n"
+        raise AssertionError(command)
+
+    monkeypatch.setattr(runner, "run_command", read_only_probe)
+
+    report = runner.runner_vnext_readonly_preflight(workdir)
+
+    assert runner.maintenance_report_status(report) == "DONE"
+    assert "legacy_service_state=activating" in report
+    assert "legacy_timer_state=active" in report
+    assert "legacy_timer_enabled_state=enabled" in report
+    assert "rollback_available=true" in report
+
+
+@pytest.mark.parametrize("service_output", ("unknown\n", "masked\n", "not-found\n"))
+def test_runner_vnext_readonly_preflight_blocks_unhealthy_legacy_service_states(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, service_output: str
+) -> None:
+    workdir, ledger, lease = _write_runner_vnext_preflight_fixture(tmp_path)
+    monkeypatch.setenv(runner.RUNNER_VNEXT_STATE_ROOT_ENV, str(ledger.parent))
+    monkeypatch.setenv(runner.RUNNER_VNEXT_LEDGER_DB_ENV, str(ledger))
+    monkeypatch.setenv(runner.RUNNER_VNEXT_LEASE_DB_ENV, str(lease))
+
+    def read_only_probe(command: list[str], cwd=None, timeout=None, **_kwargs):
+        if command[:4] == ["git", "rev-parse", "--verify", "HEAD"]:
+            return 0, HEAD_SHA + "\n"
+        if command[:2] == ["gh", "api"]:
+            return 0, HEAD_SHA + "\n"
+        if command[:2] == ["systemctl", "is-active"]:
+            if command[2] == runner.RUNNER_LEGACY_SERVICE_UNIT:
+                return 3, service_output
+            return 0, "active\n"
+        if command[:2] == ["systemctl", "is-enabled"]:
+            return 0, "enabled\n"
+        if command[:2] == ["systemctl", "show"]:
+            return 0, "loaded\n"
+        raise AssertionError(command)
+
+    monkeypatch.setattr(runner, "run_command", read_only_probe)
+
+    report = runner.runner_vnext_readonly_preflight(workdir)
+
+    assert runner.maintenance_report_status(report) == "BLOCKED"
+    assert f"legacy_service_state={service_output.strip()}" in report
+    assert "reason=legacy_service_not_active" in report
+
+
+def test_runner_vnext_readonly_preflight_blocks_invalid_legacy_service_state(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    workdir, ledger, lease = _write_runner_vnext_preflight_fixture(tmp_path)
+    monkeypatch.setenv(runner.RUNNER_VNEXT_STATE_ROOT_ENV, str(ledger.parent))
+    monkeypatch.setenv(runner.RUNNER_VNEXT_LEDGER_DB_ENV, str(ledger))
+    monkeypatch.setenv(runner.RUNNER_VNEXT_LEASE_DB_ENV, str(lease))
+
+    def read_only_probe(command: list[str], cwd=None, timeout=None, **_kwargs):
+        if command[:4] == ["git", "rev-parse", "--verify", "HEAD"]:
+            return 0, HEAD_SHA + "\n"
+        if command[:2] == ["gh", "api"]:
+            return 0, HEAD_SHA + "\n"
+        if command[:2] == ["systemctl", "is-active"]:
+            if command[2] == runner.RUNNER_LEGACY_SERVICE_UNIT:
+                return 0, "deactivating\n"
+            return 0, "active\n"
+        if command[:2] == ["systemctl", "is-enabled"]:
+            return 0, "enabled\n"
+        if command[:2] == ["systemctl", "show"]:
+            return 0, "loaded\n"
+        raise AssertionError(command)
+
+    monkeypatch.setattr(runner, "run_command", read_only_probe)
+
+    report = runner.runner_vnext_readonly_preflight(workdir)
+
+    assert runner.maintenance_report_status(report) == "BLOCKED"
+    assert "legacy_service_state=unknown" in report
+    assert "reason=legacy_service_probe_failed" in report
+
+
 def test_runner_vnext_readonly_preflight_rollback_requires_systemd_unit_load_evidence(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -27242,3 +27355,177 @@ def test_runner_vnext_readonly_preflight_rejects_colliding_or_memory_stores(
     assert report.startswith("BLOCKED:")
     assert "ledger_file_backed=false" in report
     assert "lease_file_backed=false" in report
+
+
+def _run_runner_vnext_env_script(command: list[str]) -> tuple[int, str]:
+    script = command[4]
+    argv = ["-c", *command[5:]]
+    old_argv = list(os.sys.argv)
+    try:
+        os.sys.argv = argv
+        try:
+            exec(script, {"__name__": "__main__"})
+        except SystemExit as exc:
+            code = exc.code if isinstance(exc.code, int) else 1
+            return code, ""
+    finally:
+        os.sys.argv = old_argv
+    return 0, ""
+
+
+def _runner_vnext_prepare_fake_run_command(
+    env_file: Path, commands: list[list[str]], *, sha: str = HEAD_SHA
+):
+    def fake_run_command(command: list[str], cwd=None, timeout=None, **_kwargs):
+        commands.append(command)
+        if command[:4] == ["git", "rev-parse", "--verify", "HEAD"]:
+            return 0, sha + "\n"
+        if command[:2] == ["gh", "api"]:
+            return 0, sha + "\n"
+        if command[:3] == ["sudo", "-n", "touch"]:
+            env_file.touch(exist_ok=True)
+            return 0, ""
+        if command[:3] == ["sudo", "-n", "chown"]:
+            return 0, ""
+        if command[:3] == ["sudo", "-n", "chmod"]:
+            env_file.chmod(0o600)
+            return 0, ""
+        if command[:4] == ["sudo", "-n", "python3", "-c"]:
+            return _run_runner_vnext_env_script(command)
+        raise AssertionError(command)
+
+    return fake_run_command
+
+
+def test_runner_vnext_prepare_runtime_state_uses_fixed_paths_and_binds_env(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    state_root = tmp_path / "private-state" / "runner-vnext"
+    ledger = state_root / "ledger.sqlite"
+    lease = state_root / "lease.sqlite"
+    env_file = tmp_path / "skeleton-runner.env"
+    env_file.write_text("UNRELATED_SETTING=keep\n", encoding="utf-8")
+    env_file.chmod(0o600)
+    commands: list[list[str]] = []
+    monkeypatch.setattr(runner, "RUNNER_VNEXT_FIXED_STATE_ROOT", state_root)
+    monkeypatch.setattr(runner, "RUNNER_VNEXT_FIXED_LEDGER_DB", ledger)
+    monkeypatch.setattr(runner, "RUNNER_VNEXT_FIXED_LEASE_DB", lease)
+    monkeypatch.setattr(runner, "TELEGRAM_CALLBACK_LOCAL_CONFIG", str(env_file))
+    monkeypatch.setattr(
+        runner,
+        "run_command",
+        _runner_vnext_prepare_fake_run_command(env_file, commands),
+    )
+
+    report = runner.dispatch_runtime_maintenance_task(
+        runner.RUNNER_VNEXT_PREPARE_RUNTIME_STATE_TASK_ID,
+        str(tmp_path),
+        _runner_vnext_prepare_runtime_state_body(),
+    )
+
+    assert runner.maintenance_report_status(report) == "DONE"
+    assert f"exact_main_sha={HEAD_SHA}" in report
+    assert "state_ready=true" in report
+    assert "ledger_ready=true" in report
+    assert "lease_ready=true" in report
+    assert "config_bound=true" in report
+    assert "mode_unchanged=true" in report
+    assert "service_changes=false" in report
+    assert ledger != lease
+    assert state_root.stat().st_mode & 0o077 == 0
+    assert ledger.stat().st_mode & 0o077 == 0
+    assert lease.stat().st_mode & 0o077 == 0
+    with sqlite3.connect(ledger) as connection:
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+    assert "runner_vnext_operation_events" in tables
+    assert "runner_vnext_operation_starts" in tables
+    with sqlite3.connect(lease) as connection:
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+    assert "runner_vnext_lane_fences" in tables
+    assert "runner_vnext_lane_leases" in tables
+    env_lines = env_file.read_text(encoding="utf-8").splitlines()
+    assert "UNRELATED_SETTING=keep" in env_lines
+    assert f"{runner.RUNNER_VNEXT_STATE_ROOT_ENV}={state_root}" in env_lines
+    assert f"{runner.RUNNER_VNEXT_LEDGER_DB_ENV}={ledger}" in env_lines
+    assert f"{runner.RUNNER_VNEXT_LEASE_DB_ENV}={lease}" in env_lines
+    assert all(not line.startswith(f"{runner.RUNNER_VNEXT_MODE_ENV}=") for line in env_lines)
+    assert all(
+        command[0] != "systemctl"
+        and not (command[:3] == ["sudo", "-n", "systemctl"])
+        for command in commands
+    )
+
+
+def test_runner_vnext_prepare_runtime_state_rejects_user_supplied_paths(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    env_file = tmp_path / "skeleton-runner.env"
+    commands: list[list[str]] = []
+    monkeypatch.setattr(
+        runner,
+        "run_command",
+        _runner_vnext_prepare_fake_run_command(env_file, commands),
+    )
+
+    report = runner.dispatch_runtime_maintenance_task(
+        runner.RUNNER_VNEXT_PREPARE_RUNTIME_STATE_TASK_ID,
+        str(tmp_path),
+        _runner_vnext_prepare_runtime_state_body()
+        + "\nState Root: /tmp/attacker-controlled",
+    )
+
+    assert runner.maintenance_report_status(report) == "BLOCKED"
+    assert "reason=prepare_runtime_state_unknown_input_field" in report
+    assert commands == []
+
+
+def test_runner_vnext_prepare_runtime_state_rejects_duplicate_env_entries(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    state_root = tmp_path / "private-state" / "runner-vnext"
+    ledger = state_root / "ledger.sqlite"
+    lease = state_root / "lease.sqlite"
+    env_file = tmp_path / "skeleton-runner.env"
+    env_file.write_text(
+        "\n".join(
+            (
+                "UNRELATED_SETTING=keep",
+                f"{runner.RUNNER_VNEXT_LEDGER_DB_ENV}=/old/one.sqlite",
+                f"{runner.RUNNER_VNEXT_LEDGER_DB_ENV}=/old/two.sqlite",
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    env_file.chmod(0o600)
+    commands: list[list[str]] = []
+    monkeypatch.setattr(runner, "RUNNER_VNEXT_FIXED_STATE_ROOT", state_root)
+    monkeypatch.setattr(runner, "RUNNER_VNEXT_FIXED_LEDGER_DB", ledger)
+    monkeypatch.setattr(runner, "RUNNER_VNEXT_FIXED_LEASE_DB", lease)
+    monkeypatch.setattr(runner, "TELEGRAM_CALLBACK_LOCAL_CONFIG", str(env_file))
+    monkeypatch.setattr(
+        runner,
+        "run_command",
+        _runner_vnext_prepare_fake_run_command(env_file, commands),
+    )
+
+    report = runner.dispatch_runtime_maintenance_task(
+        runner.RUNNER_VNEXT_PREPARE_RUNTIME_STATE_TASK_ID,
+        str(tmp_path),
+        _runner_vnext_prepare_runtime_state_body(),
+    )
+
+    assert runner.maintenance_report_status(report) == "BLOCKED"
+    assert "config_bound=false" in report
+    assert "reason=prepare_runtime_state_env_bind_failed" in report
+    assert f"{runner.RUNNER_VNEXT_MODE_ENV}=" not in env_file.read_text(encoding="utf-8")
