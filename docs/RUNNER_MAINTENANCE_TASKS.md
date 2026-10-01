@@ -70,6 +70,41 @@ repository readability, git head, Python/pytest availability, allowlisted write
 readiness, and codegen executor availability without performing workspace
 writes or runtime mutation.
 
+`runner_vnext_prepare_runtime_state_v1` is a protected, bounded preparation
+task for the future vNext runtime state cutover. It requires separate exact
+operator approval and accepts only:
+
+```text
+Mode: RUNTIME_MAINTENANCE_TASK
+Maintenance Task ID: runner_vnext_prepare_runtime_state_v1
+Repository: alanua/Skeleton
+Expected Main SHA: <current exact 40-hex main commit>
+Operator Approval: EXACT_HEAD_RUNNER_VNEXT_PREPARE_RUNTIME_STATE_V1_APPROVED
+```
+
+The issue cannot supply a path, environment key, command, service, or mode. The
+Runner verifies checkout `HEAD` and GitHub `main` both match `Expected Main
+SHA`, creates only the fixed private state root
+`/home/agent/.local/share/skeleton/runner-vnext`, and initializes distinct
+`ledger.sqlite` and `lease.sqlite` stores through `build_authoritative_stores()`.
+It closes and reopens the stores to verify schemas, requires the root to be
+`0700`-or-stricter and each DB to be `0600`-or-stricter, uses a restrictive
+umask, and fails closed on symlink/path escape, unsafe type/owner/mode,
+checkout/main drift, store collision, or schema/reopen failure.
+
+The task persists only `SKELETON_RUNNER_VNEXT_STATE_ROOT`,
+`SKELETON_RUNNER_VNEXT_LEDGER_DB`, and `SKELETON_RUNNER_VNEXT_LEASE_DB` via the
+existing non-interactive `sudo -n` env-file update pattern for
+`/etc/skeleton-runner.env`; unrelated settings are preserved and duplicate
+target entries or conflicting existing target values are rejected before store
+initialization. Existing DB files must already be regular owner-private files
+before any store open occurs, and the env file is preflighted before any
+`touch`, ownership, mode, or content mutation. It never writes
+`SKELETON_RUNNER_VNEXT_MODE` and never runs `systemctl` mutations. Public output
+is limited to the exact main SHA, `state_ready`, `ledger_ready`, `lease_ready`,
+`config_bound`, `mode_unchanged=true`, `service_changes=false`, and
+`success_criteria`.
+
 `runner_codex_primary_health_probe` is the protected, narrow PRIMARY-CODEX
 health probe. It requires exact maintenance-mode metadata, `Repository:
 alanua/Skeleton`, and the current `Expected Main SHA`. Before contacting the

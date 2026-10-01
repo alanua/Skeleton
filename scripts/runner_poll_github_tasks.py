@@ -286,9 +286,16 @@ RUNNER_VNEXT_NODE_SNAPSHOT_MAX_TTL_SECONDS = 60.0
 RUNNER_VNEXT_READONLY_PREFLIGHT_TASK_ID = "runner_vnext_readonly_preflight"
 RUNNER_VNEXT_EXTERNAL_ATTESTATION_TASK_ID = "runner_vnext_external_attestation"
 RUNNER_VNEXT_EXACT_GREEN_CANARY_TASK_ID = "runner_vnext_exact_green_canary"
+RUNNER_VNEXT_PREPARE_RUNTIME_STATE_TASK_ID = "runner_vnext_prepare_runtime_state_v1"
 RUNNER_VNEXT_PREFLIGHT_SCHEMA = "skeleton.runner_vnext_readonly_preflight_receipt.v1"
 RUNNER_VNEXT_EXTERNAL_ATTESTATION_PROFILE = "green_diagnostic_v1"
 RUNNER_VNEXT_EXTERNAL_ATTESTATION_FILENAME = "runner-vnext-external-attestation.json"
+RUNNER_VNEXT_PREPARE_RUNTIME_STATE_APPROVAL = (
+    "EXACT_HEAD_RUNNER_VNEXT_PREPARE_RUNTIME_STATE_V1_APPROVED"
+)
+RUNNER_VNEXT_FIXED_STATE_ROOT = Path("/home/agent/.local/share/skeleton/runner-vnext")
+RUNNER_VNEXT_FIXED_LEDGER_DB = RUNNER_VNEXT_FIXED_STATE_ROOT / "ledger.sqlite"
+RUNNER_VNEXT_FIXED_LEASE_DB = RUNNER_VNEXT_FIXED_STATE_ROOT / "lease.sqlite"
 RUNNER_LEGACY_SERVICE_UNIT = "skeleton-runner-poll.service"
 RUNNER_LEGACY_TIMER_UNIT = "skeleton-runner-poll.timer"
 RUNNER_VNEXT_CODEGEN_CAPABILITIES = (
@@ -509,6 +516,7 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         RUNNER_VNEXT_READONLY_PREFLIGHT_TASK_ID,
         RUNNER_VNEXT_EXTERNAL_ATTESTATION_TASK_ID,
         RUNNER_VNEXT_EXACT_GREEN_CANARY_TASK_ID,
+        RUNNER_VNEXT_PREPARE_RUNTIME_STATE_TASK_ID,
         BUILD_AND_LOCAL_OTA_OPERATION,
         PREPARE_PRIVATE_STATIC_SITE_HANDOFF,
         DEPLOY_PRIVATE_STATIC_SITE,
@@ -574,6 +582,7 @@ PROTECTED_MAINTENANCE_TASK_IDS = frozenset(
         RUNNER_CODEX_PRIMARY_HEALTH_PROBE,
         RUNNER_VNEXT_EXTERNAL_ATTESTATION_TASK_ID,
         RUNNER_VNEXT_EXACT_GREEN_CANARY_TASK_ID,
+        RUNNER_VNEXT_PREPARE_RUNTIME_STATE_TASK_ID,
     )
 )
 CONTAINER_VALIDATION_SOURCE_ISSUE = 1667
@@ -1183,6 +1192,13 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "canary_replayed",
         "canary_execution_started",
         "canary_lease_released",
+        "exact_main_sha",
+        "state_ready",
+        "ledger_ready",
+        "lease_ready",
+        "config_bound",
+        "mode_unchanged",
+        "service_changes",
     }
 )
 RUNNER_MEMORY_DB_ENV = "SKELETON_RUNNER_MEMORY_DB"
@@ -20710,6 +20726,7 @@ def _runner_vnext_preflight_systemctl(unit: str, operation: str) -> str:
     value = output.strip().splitlines()[0].strip().lower() if output.strip() else ""
     allowed = {
         "active",
+        "activating",
         "inactive",
         "failed",
         "unknown",
@@ -20733,6 +20750,10 @@ def _runner_vnext_preflight_systemctl(unit: str, operation: str) -> str:
     }:
         raise RuntimeError("preflight_systemctl_probe_failed")
     return value
+
+
+def _runner_vnext_service_state_healthy_for_preflight(value: str) -> bool:
+    return value in {"active", "activating"}
 
 
 def _runner_vnext_preflight_systemd_load_state(unit: str) -> str:
@@ -20955,7 +20976,7 @@ def runner_vnext_readonly_preflight(workdir: str | Path) -> str:
             f"legacy_timer_load_state={timer_load_state}",
         ]
     )
-    if service_state != "active":
+    if not _runner_vnext_service_state_healthy_for_preflight(service_state):
         blockers.append("legacy_service_not_active")
     if timer_state != "active":
         blockers.append("legacy_timer_not_active")
@@ -21097,6 +21118,380 @@ def runner_vnext_readonly_preflight(workdir: str | Path) -> str:
         task_id,
         status_lines,
         "met" if not blockers else "not_met",
+    )
+
+
+_RUNNER_VNEXT_PREPARE_RUNTIME_STATE_FIELDS = frozenset(
+    (
+        "Mode",
+        "Maintenance Task ID",
+        "Repository",
+        "Expected Main SHA",
+        "Operator Approval",
+    )
+)
+
+
+def _runner_vnext_prepare_runtime_state_input(body: str) -> dict[str, str]:
+    parsed: dict[str, str] = {}
+    for raw_line in _metadata_before_task(body).splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        match = re.fullmatch(
+            r"(?P<field>[A-Za-z][A-Za-z0-9 ]{0,80}):\s*(?P<value>\S(?:.*\S)?)",
+            line,
+        )
+        if match is None:
+            raise RuntimeError("prepare_runtime_state_noncanonical_input")
+        field = match.group("field")
+        if field not in _RUNNER_VNEXT_PREPARE_RUNTIME_STATE_FIELDS:
+            raise RuntimeError("prepare_runtime_state_unknown_input_field")
+        if field in parsed:
+            raise RuntimeError("prepare_runtime_state_duplicate_input_field")
+        parsed[field] = match.group("value")
+    if set(parsed) != _RUNNER_VNEXT_PREPARE_RUNTIME_STATE_FIELDS:
+        raise RuntimeError("prepare_runtime_state_required_input_missing")
+    if parsed["Mode"] != RUNTIME_MAINTENANCE_MODE:
+        raise RuntimeError("prepare_runtime_state_mode_mismatch")
+    if parsed["Maintenance Task ID"] != RUNNER_VNEXT_PREPARE_RUNTIME_STATE_TASK_ID:
+        raise RuntimeError("prepare_runtime_state_task_id_mismatch")
+    if parsed["Repository"] != REPO:
+        raise RuntimeError("prepare_runtime_state_repository_mismatch")
+    if _HEAD_SHA_RE.fullmatch(parsed["Expected Main SHA"].lower()) is None:
+        raise RuntimeError("prepare_runtime_state_expected_main_sha_invalid")
+    if parsed["Operator Approval"] != RUNNER_VNEXT_PREPARE_RUNTIME_STATE_APPROVAL:
+        raise RuntimeError("prepare_runtime_state_operator_approval_mismatch")
+    return parsed
+
+
+def _runner_vnext_prepare_exact_main(workdir: str | Path, expected_sha: str) -> str:
+    code, output = run_command(
+        ["git", "rev-parse", "--verify", "HEAD"],
+        cwd=workdir,
+        timeout=15,
+    )
+    checkout_sha = output.strip().lower()
+    if code != 0 or checkout_sha != expected_sha:
+        raise RuntimeError("prepare_runtime_state_checkout_main_drift")
+    code, output = run_command(
+        ["gh", "api", f"repos/{REPO}/commits/main", "--jq", ".sha"],
+        cwd=workdir,
+        timeout=15,
+    )
+    github_sha = output.strip().lower()
+    if code != 0 or github_sha != expected_sha:
+        raise RuntimeError("prepare_runtime_state_github_main_drift")
+    return expected_sha
+
+
+def _runner_vnext_prepare_safe_root(root: Path) -> Path:
+    if not root.is_absolute() or ".." in root.parts or _path_has_symlink_component(root):
+        raise RuntimeError("prepare_runtime_state_root_path_unsafe")
+    old_umask = os.umask(0o077)
+    try:
+        root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    finally:
+        os.umask(old_umask)
+    try:
+        info = root.lstat()
+        resolved = root.resolve(strict=True)
+    except OSError as exc:
+        raise RuntimeError("prepare_runtime_state_root_invalid") from exc
+    if (
+        stat.S_ISLNK(info.st_mode)
+        or not stat.S_ISDIR(info.st_mode)
+        or info.st_uid != os.geteuid()
+        or stat.S_IMODE(info.st_mode) & 0o077
+    ):
+        raise RuntimeError("prepare_runtime_state_root_unsafe")
+    return resolved
+
+
+def _runner_vnext_prepare_safe_db(path: Path, root: Path, reason: str) -> Path:
+    if not path.is_absolute() or ".." in path.parts or _path_has_symlink_component(path):
+        raise RuntimeError(reason)
+    resolved = path.resolve(strict=False)
+    if not _path_is_relative_to(resolved, root):
+        raise RuntimeError(reason)
+    if path.exists():
+        try:
+            info = path.lstat()
+        except OSError as exc:
+            raise RuntimeError(reason) from exc
+        if (
+            stat.S_ISLNK(info.st_mode)
+            or not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.geteuid()
+            or stat.S_IMODE(info.st_mode) & 0o077
+        ):
+            raise RuntimeError(reason)
+    return resolved
+
+
+def _runner_vnext_prepare_verify_db(path: Path, root: Path, kind: str) -> None:
+    safe = _runner_vnext_preflight_safe_file(
+        str(path),
+        root,
+        f"prepare_runtime_state_{kind}_db_unsafe",
+    )
+    info = safe.stat()
+    if stat.S_IMODE(info.st_mode) & 0o077:
+        raise RuntimeError(f"prepare_runtime_state_{kind}_db_mode_unsafe")
+    _runner_vnext_readonly_db_reconciled(safe, kind, time.time())
+
+
+def _runner_vnext_prepare_initialize_stores(root: Path, ledger: Path, lease: Path) -> None:
+    if ledger == lease:
+        raise RuntimeError("prepare_runtime_state_store_path_collision")
+    old_umask = os.umask(0o077)
+    try:
+        stores = build_authoritative_stores(
+            RunnerVNextRuntimeConfig(
+                state_root=str(root),
+                ledger_db_path=str(ledger),
+                lease_db_path=str(lease),
+            ),
+            clock=time.time,
+        )
+        stores.close()
+        for path in (ledger, lease):
+            path.chmod(0o600)
+        _runner_vnext_prepare_verify_db(ledger, root, "ledger")
+        _runner_vnext_prepare_verify_db(lease, root, "lease")
+        stores = build_authoritative_stores(
+            RunnerVNextRuntimeConfig(
+                state_root=str(root),
+                ledger_db_path=str(ledger),
+                lease_db_path=str(lease),
+            ),
+            clock=time.time,
+        )
+        stores.close()
+        for path in (ledger, lease):
+            path.chmod(0o600)
+        _runner_vnext_prepare_verify_db(ledger, root, "ledger")
+        _runner_vnext_prepare_verify_db(lease, root, "lease")
+    finally:
+        os.umask(old_umask)
+
+
+_RUNNER_VNEXT_ENV_UPDATE_SCRIPT = """\
+from pathlib import Path
+import os
+import sys
+import tempfile
+
+path = Path(sys.argv[1])
+pairs = list(zip(sys.argv[2::2], sys.argv[3::2]))
+target = {key: value for key, value in pairs}
+if len(target) != len(pairs):
+    raise SystemExit(2)
+lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+seen = {key: [] for key in target}
+for index, line in enumerate(lines):
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#") or "=" not in stripped:
+        continue
+    name = stripped.split("=", 1)[0].strip()
+    if name.startswith("export "):
+        name = name.removeprefix("export ").strip()
+    if name in seen:
+        seen[name].append(index)
+if any(len(indexes) > 1 for indexes in seen.values()):
+    raise SystemExit(3)
+updated = list(lines)
+for key, value in pairs:
+    replacement = f"{key}={value}"
+    indexes = seen[key]
+    if indexes:
+        existing_value = updated[indexes[0]].strip().split("=", 1)[1]
+        if existing_value != value:
+            raise SystemExit(4)
+        updated[indexes[0]] = replacement
+    else:
+        updated.append(replacement)
+directory = path.parent
+fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(directory), text=True)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write("\\n".join(updated) + "\\n")
+    os.chmod(temp_name, 0o600)
+    os.replace(temp_name, path)
+finally:
+    if os.path.exists(temp_name):
+        os.unlink(temp_name)
+"""
+
+_RUNNER_VNEXT_ENV_PREFLIGHT_SCRIPT = """\
+from pathlib import Path
+import os
+import stat
+import sys
+
+path = Path(sys.argv[1])
+pairs = list(zip(sys.argv[2::2], sys.argv[3::2]))
+target = {key: value for key, value in pairs}
+if len(target) != len(pairs):
+    raise SystemExit(2)
+try:
+    info = path.lstat()
+except FileNotFoundError:
+    raise SystemExit(0)
+if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+    raise SystemExit(4)
+if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) & 0o077:
+    raise SystemExit(5)
+lines = path.read_text(encoding="utf-8").splitlines()
+seen = {key: [] for key in target}
+for index, line in enumerate(lines):
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#") or "=" not in stripped:
+        continue
+    name, value = stripped.split("=", 1)
+    name = name.strip()
+    if name.startswith("export "):
+        name = name.removeprefix("export ").strip()
+    if name in seen:
+        seen[name].append((index, value))
+for key, entries in seen.items():
+    if len(entries) > 1:
+        raise SystemExit(3)
+    if entries and entries[0][1] != target[key]:
+        raise SystemExit(6)
+"""
+
+_RUNNER_VNEXT_ENV_VERIFY_SCRIPT = """\
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+pairs = list(zip(sys.argv[2::2], sys.argv[3::2]))
+target = {key: value for key, value in pairs}
+lines = path.read_text(encoding="utf-8").splitlines()
+found = {key: [] for key in target}
+for line in lines:
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#") or "=" not in stripped:
+        continue
+    name, value = stripped.split("=", 1)
+    name = name.strip()
+    if name.startswith("export "):
+        name = name.removeprefix("export ").strip()
+    if name in found:
+        found[name].append(value)
+raise SystemExit(0 if all(found[key] == [value] for key, value in target.items()) else 1)
+"""
+
+
+def _runner_vnext_prepare_bind_env(root: Path, ledger: Path, lease: Path) -> None:
+    pairs = (
+        (RUNNER_VNEXT_STATE_ROOT_ENV, str(root)),
+        (RUNNER_VNEXT_LEDGER_DB_ENV, str(ledger)),
+        (RUNNER_VNEXT_LEASE_DB_ENV, str(lease)),
+    )
+    argv = [item for pair in pairs for item in pair]
+    commands = (
+        _non_interactive_sudo(
+            "python3",
+            "-c",
+            _RUNNER_VNEXT_ENV_PREFLIGHT_SCRIPT,
+            TELEGRAM_CALLBACK_LOCAL_CONFIG,
+            *argv,
+        ),
+        _non_interactive_sudo("touch", TELEGRAM_CALLBACK_LOCAL_CONFIG),
+        _non_interactive_sudo("chown", "root:root", TELEGRAM_CALLBACK_LOCAL_CONFIG),
+        _non_interactive_sudo("chmod", "0600", TELEGRAM_CALLBACK_LOCAL_CONFIG),
+        _non_interactive_sudo(
+            "python3",
+            "-c",
+            _RUNNER_VNEXT_ENV_UPDATE_SCRIPT,
+            TELEGRAM_CALLBACK_LOCAL_CONFIG,
+            *argv,
+        ),
+        _non_interactive_sudo(
+            "python3",
+            "-c",
+            _RUNNER_VNEXT_ENV_VERIFY_SCRIPT,
+            TELEGRAM_CALLBACK_LOCAL_CONFIG,
+            *argv,
+        ),
+    )
+    for command in commands:
+        code, _output = run_command(command)
+        if code != 0:
+            raise RuntimeError("prepare_runtime_state_env_bind_failed")
+
+
+def _runner_vnext_prepare_preflight_env(root: Path, ledger: Path, lease: Path) -> None:
+    pairs = (
+        (RUNNER_VNEXT_STATE_ROOT_ENV, str(root)),
+        (RUNNER_VNEXT_LEDGER_DB_ENV, str(ledger)),
+        (RUNNER_VNEXT_LEASE_DB_ENV, str(lease)),
+    )
+    argv = [item for pair in pairs for item in pair]
+    command = _non_interactive_sudo(
+        "python3",
+        "-c",
+        _RUNNER_VNEXT_ENV_PREFLIGHT_SCRIPT,
+        TELEGRAM_CALLBACK_LOCAL_CONFIG,
+        *argv,
+    )
+    code, _output = run_command(command)
+    if code != 0:
+        raise RuntimeError("prepare_runtime_state_env_bind_failed")
+
+
+def runner_vnext_prepare_runtime_state_v1(body: str, workdir: str | Path) -> str:
+    task_id = RUNNER_VNEXT_PREPARE_RUNTIME_STATE_TASK_ID
+    try:
+        parsed = _runner_vnext_prepare_runtime_state_input(body)
+        exact_main = _runner_vnext_prepare_exact_main(
+            workdir, parsed["Expected Main SHA"].lower()
+        )
+        root = _runner_vnext_prepare_safe_root(RUNNER_VNEXT_FIXED_STATE_ROOT)
+        ledger = _runner_vnext_prepare_safe_db(
+            RUNNER_VNEXT_FIXED_LEDGER_DB,
+            root,
+            "prepare_runtime_state_ledger_path_unsafe",
+        )
+        lease = _runner_vnext_prepare_safe_db(
+            RUNNER_VNEXT_FIXED_LEASE_DB,
+            root,
+            "prepare_runtime_state_lease_path_unsafe",
+        )
+        _runner_vnext_prepare_preflight_env(root, ledger, lease)
+        _runner_vnext_prepare_initialize_stores(root, ledger, lease)
+        _runner_vnext_prepare_bind_env(root, ledger, lease)
+    except RuntimeError as exc:
+        reason = str(exc) or "prepare_runtime_state_failed"
+        return _maintenance_report(
+            "BLOCKED",
+            task_id,
+            [
+                "state_ready=false",
+                "ledger_ready=false",
+                "lease_ready=false",
+                "config_bound=false",
+                "mode_unchanged=true",
+                "service_changes=false",
+                f"reason={reason}",
+            ],
+            "not_met",
+        )
+    return _maintenance_report(
+        "DONE",
+        task_id,
+        [
+            f"exact_main_sha={exact_main}",
+            "state_ready=true",
+            "ledger_ready=true",
+            "lease_ready=true",
+            "config_bound=true",
+            "mode_unchanged=true",
+            "service_changes=false",
+        ],
+        "met",
     )
 
 
@@ -21256,6 +21651,8 @@ def dispatch_runtime_maintenance_task(
             return runner_vnext_external_attestation(body)
         if task_id == RUNNER_VNEXT_EXACT_GREEN_CANARY_TASK_ID:
             return runner_vnext_exact_green_canary(body)
+        if task_id == RUNNER_VNEXT_PREPARE_RUNTIME_STATE_TASK_ID:
+            return runner_vnext_prepare_runtime_state_v1(body, workdir)
         if task_id == "runner_controller_repair_codex_state_mount_v1":
             return runner_controller_repair_codex_state_mount_v1(body)
         if task_id == SKELETON_CONTROL_MCP_HETZNER_ACTIVATE_V1:
