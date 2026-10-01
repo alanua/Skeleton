@@ -9864,8 +9864,11 @@ def _issue_publish_commands(
     untracked_files: tuple[str, ...] = (),
     validated_publish_files: tuple[str, ...] | None = None,
     existing_pr_url: str = "",
+    existing_pr_number: int = 123,
     existing_pr_base_branch: str = "main",
     existing_pr_base_sha: str = "a" * 40,
+    existing_pr_head_sha: str | None = None,
+    existing_pr_files: tuple[str, ...] = (),
     existing_pr_code: int = 0,
     remote_branch_exists: bool = False,
     ls_remote_output: str | None = None,
@@ -9959,19 +9962,21 @@ def _issue_publish_commands(
             owner, name = repository.split("/", 1)
             return 0, json.dumps(
                 {
+                    "number": existing_pr_number,
                     "url": existing_pr_url,
                     "state": "OPEN",
                     "isDraft": True,
                     "baseRefName": existing_pr_base_branch,
                     "baseRefOid": existing_pr_base_sha,
                     "headRefName": branch,
-                    "headRefOid": post_commit_head,
+                    "headRefOid": existing_pr_head_sha or post_commit_head,
                     "headRepository": {
                         "nameWithOwner": repository,
                         "owner": {"login": owner},
                         "name": name,
                     },
                     "headRepositoryOwner": {"login": owner},
+                    "files": [{"path": path} for path in existing_pr_files],
                 }
             )
         if command == [
@@ -10018,6 +10023,14 @@ def _issue_publish_commands(
             f"refs/heads/{branch}:refs/heads/{branch}",
         ]:
             return push_code, "push failed output must not leak"
+        if command == [
+            "git",
+            "push",
+            "origin",
+            f"--force-with-lease={branch}:{existing_pr_head_sha or post_commit_head}",
+            f"HEAD:refs/heads/{branch}",
+        ]:
+            return push_code, "push failed output must not leak"
         if command[:7] == [
             "gh",
             "pr",
@@ -10034,6 +10047,7 @@ def _issue_publish_commands(
             owner, name = repository.split("/", 1)
             return 0, json.dumps(
                 {
+                    "number": existing_pr_number,
                     "url": pr_create_url,
                     "state": "OPEN",
                     "isDraft": True,
@@ -10047,6 +10061,7 @@ def _issue_publish_commands(
                         "name": name,
                     },
                     "headRepositoryOwner": {"login": owner},
+                    "files": [{"path": path} for path in (existing_pr_files or expected_publish_files)],
                 }
             )
         owner = repository.split("/", 1)[0]
@@ -16434,9 +16449,9 @@ def test_publish_target_project_issue_worktree_pr_gh_failure_branch_present_exac
         )
 
     commands = [call.args[0] for call in run.call_args_list]
-    assert report.startswith("DONE:")
+    assert report.startswith("BLOCKED:")
     assert "existing_pr_lookup=existing_pr_found" in report
-    assert "existing_pr_url=https://github.com/alanua/LumenFlow/pull/123" in report
+    assert "reason=existing_pr_binding_missing" in report
     assert [
         "gh",
         "api",
@@ -16456,6 +16471,125 @@ def test_publish_target_project_issue_worktree_pr_gh_failure_branch_present_exac
     ] in commands
     assert all(command[:2] != ["git", "add"] for command in commands)
     assert all(command[:2] != ["git", "push"] for command in commands)
+    assert all(command[:3] != ["gh", "pr", "create"] for command in commands)
+
+
+def test_publish_target_project_recovery_updates_declared_existing_pr_head(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target_root = tmp_path / "lumenflow"
+    base_sha = "a" * 40
+    old_head = "1" * 40
+    new_head = "2" * 40
+    pr_url = "https://github.com/alanua/LumenFlow/pull/123"
+    monkeypatch.setenv("RUNNER_APPROVED_WORKSPACE_ROOT", str(tmp_path))
+    worktree_path = _prepare_issue_publish_worktree(target_root)
+    with mock.patch.object(
+        runner, "load_runner_project_tree", return_value=_target_project_tree(target_root)
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_issue_publish_commands(
+            worktree_path=worktree_path,
+            repository="alanua/LumenFlow",
+            remote_url="https://github.com/alanua/LumenFlow.git",
+            changed_files=("README.md",),
+            fetched_base_sha=base_sha,
+            existing_pr_url=pr_url,
+            existing_pr_base_sha=base_sha,
+            existing_pr_head_sha=old_head,
+            existing_pr_files=("README.md",),
+            post_commit_head=new_head,
+            pr_create_url=pr_url,
+            commit_message="Publish target project issue #123 worktree",
+        ),
+    ) as run:
+        report = runner.publish_target_project_issue_worktree_pr(
+            _publish_target_project_issue_worktree_body(
+                base_sha=base_sha,
+                extra_metadata=(
+                    "Existing PR: 123",
+                    f"Expected PR Head SHA: {old_head}",
+                    "Expected PR Head Branch: runner/issue-123",
+                ),
+            )
+        )
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert report.startswith("DONE:")
+    assert "existing_pr_lookup=existing_pr_found" in report
+    assert f"existing_pr_head_sha={old_head}" in report
+    assert f"pushed_head_sha={new_head}" in report
+    assert "step=push_existing_pr_branch status=done" in report
+    assert "step=post_push_read_pr_metadata status=done" in report
+    assert [
+        "git",
+        "push",
+        "origin",
+        f"--force-with-lease=runner/issue-123:{old_head}",
+        "HEAD:refs/heads/runner/issue-123",
+    ] in commands
+    assert all(command[:3] != ["gh", "pr", "create"] for command in commands)
+
+
+@pytest.mark.parametrize(
+    ("command_kwargs", "extra_metadata", "reason"),
+    (
+        ({}, (), "existing_pr_binding_missing"),
+        ({"existing_pr_head_sha": "3" * 40}, ("Existing PR: 123", f"Expected PR Head SHA: {'1' * 40}", "Expected PR Head Branch: runner/issue-123"), "existing_pr_head_sha_mismatch"),
+        ({}, ("Existing PR: 999", f"Expected PR Head SHA: {'1' * 40}", "Expected PR Head Branch: runner/issue-123"), "existing_pr_number_mismatch"),
+        ({}, ("Existing PR: 123", f"Expected PR Head SHA: {'1' * 40}", "Expected PR Head Branch: runner/issue-999"), "existing_pr_declared_branch_mismatch"),
+        ({"existing_pr_base_sha": "b" * 40}, ("Existing PR: 123", f"Expected PR Head SHA: {'1' * 40}", "Expected PR Head Branch: runner/issue-123"), "existing_pr_base_sha_mismatch"),
+        ({"push_code": 1}, ("Existing PR: 123", f"Expected PR Head SHA: {'1' * 40}", "Expected PR Head Branch: runner/issue-123"), "push_failed"),
+        ({"post_commit_head": "2" * 40, "post_push_pr_base_sha": "b" * 40}, ("Existing PR: 123", f"Expected PR Head SHA: {'1' * 40}", "Expected PR Head Branch: runner/issue-123"), "post_push_pr_base_sha_mismatch"),
+        ({"existing_pr_files": ("README.md", "unsafe.txt")}, ("Existing PR: 123", f"Expected PR Head SHA: {'1' * 40}", "Expected PR Head Branch: runner/issue-123"), "post_push_pr_files_outside_allowlist"),
+    ),
+)
+def test_publish_target_project_existing_pr_update_failures_block(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    command_kwargs: dict[str, object],
+    extra_metadata: tuple[str, ...],
+    reason: str,
+) -> None:
+    target_root = tmp_path / "lumenflow"
+    base_sha = "a" * 40
+    old_head = "1" * 40
+    monkeypatch.setenv("RUNNER_APPROVED_WORKSPACE_ROOT", str(tmp_path))
+    worktree_path = _prepare_issue_publish_worktree(target_root)
+    defaults: dict[str, object] = {
+        "worktree_path": worktree_path,
+        "repository": "alanua/LumenFlow",
+        "remote_url": "https://github.com/alanua/LumenFlow.git",
+        "changed_files": ("README.md",),
+        "fetched_base_sha": base_sha,
+        "existing_pr_url": "https://github.com/alanua/LumenFlow/pull/123",
+        "existing_pr_base_sha": base_sha,
+        "existing_pr_head_sha": old_head,
+        "existing_pr_files": ("README.md",),
+        "post_commit_head": "2" * 40,
+        "pr_create_url": "https://github.com/alanua/LumenFlow/pull/123",
+        "commit_message": "Publish target project issue #123 worktree",
+    }
+    defaults.update(command_kwargs)
+    with mock.patch.object(
+        runner, "load_runner_project_tree", return_value=_target_project_tree(target_root)
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_issue_publish_commands(**defaults),
+    ) as run:
+        report = runner.publish_target_project_issue_worktree_pr(
+            _publish_target_project_issue_worktree_body(
+                base_sha=base_sha,
+                extra_metadata=extra_metadata,
+            )
+        )
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert report.startswith("BLOCKED:")
+    assert f"reason={reason}" in report
     assert all(command[:3] != ["gh", "pr", "create"] for command in commands)
 
 
@@ -16972,13 +17106,21 @@ def test_publish_target_project_issue_worktree_pr_existing_pr_wrong_base_blocks(
             remote_url="https://github.com/alanua/LumenFlow.git",
             changed_files=("README.md",),
             fetched_base_sha=base_sha,
-            existing_pr_url="https://github.com/alanua/LumenFlow/pull/55",
+            existing_pr_url="https://github.com/alanua/LumenFlow/pull/123",
+            existing_pr_head_sha="1" * 40,
             commit_message="Publish target project issue #123 worktree",
             **existing_kwargs,
         ),
     ) as run:
         report = runner.publish_target_project_issue_worktree_pr(
-            _publish_target_project_issue_worktree_body(base_sha=base_sha)
+            _publish_target_project_issue_worktree_body(
+                base_sha=base_sha,
+                extra_metadata=(
+                    "Existing PR: 123",
+                    f"Expected PR Head SHA: {'1' * 40}",
+                    "Expected PR Head Branch: runner/issue-123",
+                ),
+            )
         )
 
     commands = [call.args[0] for call in run.call_args_list]
@@ -17375,7 +17517,7 @@ def test_publish_target_project_issue_worktree_pr_enforces_allowed_files(
     assert all(command[:2] != ["git", "push"] for command in commands)
 
 
-def test_publish_target_project_issue_worktree_pr_ignores_codex_noise_and_reuses_existing_pr(
+def test_publish_target_project_issue_worktree_pr_ignores_codex_noise_and_blocks_undeclared_existing_pr(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -17401,12 +17543,13 @@ def test_publish_target_project_issue_worktree_pr_ignores_codex_noise_and_reuses
         )
 
     commands = [call.args[0] for call in run.call_args_list]
-    assert report.startswith("DONE:")
+    assert report.startswith("BLOCKED:")
     assert "unexpected_untracked_files_count=0" in report
-    assert "existing_pr_url=https://github.com/alanua/LumenFlow/pull/55" in report
+    assert "reason=existing_pr_binding_missing" in report
     assert not any(".codex/session.json" in command for command in commands)
     assert all(command[:3] != ["gh", "pr", "create"] for command in commands)
     assert all(command[:2] != ["gh", "api"] for command in commands)
+    assert all(command[:2] != ["git", "add"] for command in commands)
     assert all(command[:2] != ["git", "push"] for command in commands)
     assert all(command[:3] != ["git", "ls-remote", "--heads"] for command in commands)
 
