@@ -153,6 +153,12 @@ def test_gmail_oauth_reauthorization_blocks_and_preserves_checkpoint(tmp_path) -
 
 
 def test_mail_resume_after_authorization_uses_existing_cursor(tmp_path) -> None:
+    class RevokedGmailProvider:
+        provider = "gmail"
+
+        def poll(self, account: MailProviderAccount, cursor: MailProviderCursor, *, max_messages: int):
+            raise MailOperationError("GMAIL_OAUTH_REVOKED", "reauthorization required")
+
     account = _gmail_account()
     state = MailStateStore(tmp_path / "mail.sqlite3")
     state.initialize()
@@ -162,9 +168,29 @@ def test_mail_resume_after_authorization_uses_existing_cursor(tmp_path) -> None:
         cursor_ref="gmail-cursor-1",
         now=100,
     )
+    blocked_runtime = MailRuntime(
+        state_store=state,
+        providers={"gmail": RevokedGmailProvider()},
+        clock=lambda: 120,
+    )
+    blocked_runtime.process_poll_packet(build_mail_poll_payload(account)["task_packet"])
+    assert state.pending_lifecycle_work()[0]["blocker_reason"] == "GMAIL_OAUTH_REAUTHORIZATION_REQUIRED"
+
     runtime = MailRuntime(
         state_store=state,
-        providers={"gmail": StaticMailProvider([_message(provider="gmail", provider_message_ref="gmail-msg-2")])},
+        providers={
+            "gmail": StaticMailProvider(
+                [
+                    _message(
+                        provider="gmail",
+                        provider_message_ref="gmail-msg-2",
+                        subject_hint="Newsletter",
+                        body_preview="FYI digest",
+                        deadline_hint=None,
+                    )
+                ]
+            )
+        },
         clock=lambda: 130,
     )
 
@@ -172,4 +198,6 @@ def test_mail_resume_after_authorization_uses_existing_cursor(tmp_path) -> None:
 
     assert receipt["status"] == "DONE"
     assert receipt["processed"] == 1
+    assert receipt["ignored"] == 1
     assert state.get_cursor(account.account_ref) == "gmail-msg-2"
+    assert state.pending_lifecycle_work() == []

@@ -5,7 +5,7 @@ from pathlib import Path
 import sqlite3
 from typing import Any
 
-from core.intake_lifecycle import IntakeLifecycleStore
+from core.intake_lifecycle import IntakeLifecycleStore, stable_intake_id
 
 
 @dataclass(frozen=True)
@@ -191,6 +191,25 @@ class MailStateStore:
             state="BLOCKED",
             blocker_reason=reason,
             next_action=next_action,
+            provenance_refs=(f"mail-account:{digest[:24]}",),
+            now=now,
+        )
+        return item.public_mapping()
+
+    def record_account_resumed(self, *, account_ref: str, now: int) -> dict[str, Any] | None:
+        import hashlib
+
+        digest = hashlib.sha256(account_ref.encode("utf-8")).hexdigest()
+        intake_id = stable_intake_id(item_kind="mail", source_ref=account_ref, source_hash=digest)
+        if self.lifecycle.get(intake_id) is None:
+            return None
+        item = self.lifecycle.record(
+            item_kind="mail",
+            source_ref=account_ref,
+            source_hash=digest,
+            state="DONE",
+            blocker_reason="COMPLETED",
+            next_action="none",
             provenance_refs=(f"mail-account:{digest[:24]}",),
             now=now,
         )

@@ -6,6 +6,7 @@ from core.intake_lifecycle import (
     IntakeLifecycleError,
     IntakeLifecycleStore,
     reconcile_lifecycle,
+    shared_pending_lifecycle_work,
     stable_intake_id,
 )
 
@@ -114,3 +115,90 @@ def test_stalled_nonterminal_work_is_deferred_for_resume(tmp_path) -> None:
     assert receipt["stalled_items"] == 1
     assert store.pending_work()[0]["state"] == "DEFERRED"
     assert store.pending_work()[0]["next_action"] == "resume_nonterminal_intake_work"
+
+
+def test_blocked_and_deferred_items_resume_with_explicit_transition_policy(tmp_path) -> None:
+    store = IntakeLifecycleStore(tmp_path / "state.sqlite3")
+    blocked = store.record(
+        item_kind="mail",
+        source_ref="acct:primary",
+        source_hash="e" * 64,
+        state="BLOCKED",
+        blocker_reason="OAUTH_REAUTHORIZATION_REQUIRED",
+        next_action="operator_reauthorize_then_resume",
+        provenance_refs=("mail-account:e",),
+        now=10,
+    )
+
+    resumed = store.record(
+        item_kind="mail",
+        source_ref="acct:primary",
+        source_hash="e" * 64,
+        state="PROCESSING",
+        blocker_reason="MAIL_PROCESSING_IN_PROGRESS",
+        next_action="classify_mail_for_operator_action",
+        provenance_refs=("mail-account:e",),
+        now=20,
+    )
+
+    assert resumed.intake_id == blocked.intake_id
+    assert resumed.state == "PROCESSING"
+    assert resumed.blocker_reason == "MAIL_PROCESSING_IN_PROGRESS"
+    assert resumed.next_action == "classify_mail_for_operator_action"
+
+    deferred = store.update_existing(
+        resumed.intake_id,
+        state="DEFERRED",
+        blocker_reason="BACKOFF_ACTIVE",
+        next_action="resume_after_backoff",
+        now=30,
+    )
+    assert deferred.state == "DEFERRED"
+
+    resumed_again = store.update_existing(
+        resumed.intake_id,
+        state="PROCESSING",
+        blocker_reason="MAIL_PROCESSING_IN_PROGRESS",
+        next_action="classify_mail_for_operator_action",
+        now=40,
+    )
+    assert resumed_again.state == "PROCESSING"
+
+
+def test_shared_pending_lifecycle_work_is_public_safe_and_read_only(tmp_path) -> None:
+    document_store = IntakeLifecycleStore(tmp_path / "document.sqlite3")
+    mail_store = IntakeLifecycleStore(tmp_path / "mail.sqlite3")
+    document_store.record(
+        item_kind="document",
+        source_ref="document:scan-a",
+        source_hash="1" * 64,
+        state="DEFERRED",
+        blocker_reason="BACKOFF_ACTIVE",
+        next_action="retry_document_intake_after_backoff",
+        provenance_refs=("document:scan-a",),
+        now=30,
+    )
+    mail_store.record(
+        item_kind="mail",
+        source_ref="acct:primary",
+        source_hash="2" * 64,
+        state="BLOCKED",
+        blocker_reason="OPERATOR_ACTION_REQUIRED",
+        next_action="operator_review_action_required_mail",
+        provenance_refs=("mail:message-a",),
+        now=20,
+    )
+
+    receipt = shared_pending_lifecycle_work({"document": document_store, "mail": mail_store}, limit=10)
+
+    assert receipt["schema"] == "skeleton.shared_pending_lifecycle_work.v1"
+    assert receipt["public_safe"] is True
+    assert receipt["private_payloads_included"] is False
+    assert receipt["external_side_effects_executed"] is False
+    assert receipt["pending_count"] == 2
+    assert receipt["state_counts"]["BLOCKED"] == 1
+    assert receipt["state_counts"]["DEFERRED"] == 1
+    assert receipt["item_kind_counts"] == {"document": 1, "mail": 1}
+    assert [item["store_ref"] for item in receipt["items"]] == ["mail", "document"]
+    assert document_store.pending_work()[0]["state"] == "DEFERRED"
+    assert mail_store.pending_work()[0]["state"] == "BLOCKED"

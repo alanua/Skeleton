@@ -13,6 +13,7 @@ from typing import Any, Final
 INTAKE_LIFECYCLE_SCHEMA: Final = "skeleton.intake_lifecycle_item.v1"
 INTAKE_LIFECYCLE_RECEIPT_SCHEMA: Final = "skeleton.intake_lifecycle_public_receipt.v1"
 INTAKE_RECONCILIATION_RECEIPT_SCHEMA: Final = "skeleton.intake_lifecycle_reconciliation_receipt.v1"
+SHARED_PENDING_LIFECYCLE_WORK_SCHEMA: Final = "skeleton.shared_pending_lifecycle_work.v1"
 
 INTAKE_STATES: Final = frozenset(
     {"RECEIVED", "PRESERVED", "CLASSIFIED", "INDEXED", "PROCESSING", "DONE", "BLOCKED", "DEFERRED"}
@@ -27,6 +28,17 @@ STATE_ORDER: Final = {
     "DONE": 60,
     "DEFERRED": 70,
     "BLOCKED": 80,
+}
+ACTIVE_RESUME_STATES: Final = frozenset({"RECEIVED", "PRESERVED", "CLASSIFIED", "INDEXED", "PROCESSING"})
+INTAKE_TRANSITION_POLICY: Final = {
+    "RECEIVED": frozenset({"RECEIVED", "PRESERVED", "CLASSIFIED", "INDEXED", "PROCESSING", "DONE", "BLOCKED", "DEFERRED"}),
+    "PRESERVED": frozenset({"PRESERVED", "CLASSIFIED", "INDEXED", "PROCESSING", "DONE", "BLOCKED", "DEFERRED"}),
+    "CLASSIFIED": frozenset({"CLASSIFIED", "INDEXED", "PROCESSING", "DONE", "BLOCKED", "DEFERRED"}),
+    "INDEXED": frozenset({"INDEXED", "PROCESSING", "DONE", "BLOCKED", "DEFERRED"}),
+    "PROCESSING": frozenset({"PROCESSING", "DONE", "BLOCKED", "DEFERRED"}),
+    "DEFERRED": frozenset({"DEFERRED", *ACTIVE_RESUME_STATES, "DONE", "BLOCKED"}),
+    "BLOCKED": frozenset({"BLOCKED", *ACTIVE_RESUME_STATES, "DONE", "DEFERRED"}),
+    "DONE": frozenset({"DONE"}),
 }
 
 
@@ -423,6 +435,46 @@ def reconcile_lifecycle(
     }
 
 
+def shared_pending_lifecycle_work(
+    stores: Mapping[str, IntakeLifecycleStore],
+    *,
+    limit: int = 100,
+) -> dict[str, Any]:
+    """Return a public-safe read-only merge of pending work from existing stores."""
+
+    capped_limit = _limit(limit)
+    rows: list[dict[str, Any]] = []
+    source_counts: dict[str, int] = {}
+    for store_ref, store in stores.items():
+        source = _token(store_ref, "store_ref")
+        pending = store.pending_work(limit=capped_limit)
+        source_counts[source] = len(pending)
+        for item in pending:
+            public_item = dict(item)
+            public_item["store_ref"] = source
+            rows.append(public_item)
+    rows.sort(key=lambda item: (int(item["updated_at"]), str(item["store_ref"]), str(item["intake_id"])))
+    rows = rows[:capped_limit]
+    state_counts = {state: 0 for state in sorted(INTAKE_STATES)}
+    item_kind_counts: dict[str, int] = {}
+    for item in rows:
+        state = str(item["state"])
+        state_counts[state] = state_counts.get(state, 0) + 1
+        item_kind = str(item["item_kind"])
+        item_kind_counts[item_kind] = item_kind_counts.get(item_kind, 0) + 1
+    return {
+        "schema": SHARED_PENDING_LIFECYCLE_WORK_SCHEMA,
+        "pending_count": len(rows),
+        "state_counts": state_counts,
+        "item_kind_counts": dict(sorted(item_kind_counts.items())),
+        "source_counts": dict(sorted(source_counts.items())),
+        "items": rows,
+        "public_safe": True,
+        "private_payloads_included": False,
+        "external_side_effects_executed": False,
+    }
+
+
 def _build_item(
     *,
     item_kind: str,
@@ -484,7 +536,11 @@ def _row_item(row: sqlite3.Row) -> LifecycleItem:
 
 
 def _merged_state(current: str, new: str) -> str:
-    if current == "BLOCKED" and new != "DONE":
+    current = _state(current)
+    new = _state(new)
+    if new in INTAKE_TRANSITION_POLICY[current]:
+        return new
+    if current == "BLOCKED" and new not in {"DONE", *ACTIVE_RESUME_STATES, "DEFERRED"}:
         return current
     if current == "DONE":
         return current

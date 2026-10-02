@@ -81,6 +81,7 @@ class MailRuntime:
                 receipt["resume_from_cursor_ref"] = cursor.cursor_ref
                 return receipt
             raise
+        self.state_store.record_account_resumed(account_ref=account.account_ref, now=now)
         processed = ignored = operator = replayed = failed = 0
         message_receipts: list[dict[str, Any]] = []
 
@@ -92,6 +93,9 @@ class MailRuntime:
                 now=now,
                 max_attempts=self.config.max_attempts,
             )
+            if not should_process:
+                replayed += 1
+                continue
             self.state_store.record_lifecycle(
                 message_hash=message_hash,
                 account_ref=account.account_ref,
@@ -100,9 +104,6 @@ class MailRuntime:
                 next_action="classify_mail_for_operator_action",
                 now=now,
             )
-            if not should_process:
-                replayed += 1
-                continue
             try:
                 receipt = process_important_mail(envelope.__dict__, now=now)
             except Exception:
