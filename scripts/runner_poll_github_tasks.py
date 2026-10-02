@@ -331,6 +331,7 @@ LABEL_RUN_NOW = "queue:RUN_NOW"
 LABEL_RUNNING = "runner:running"
 LABEL_DONE = "runner:done"
 LABEL_BLOCKED = "runner:blocked"
+LABEL_NEEDS_OPERATOR = "runner:needs-operator"
 LABEL_AGENT_TASK = "agent:task"
 LABEL_WAITING_DEPENDENCY = "runner:waiting-dependency"
 RUNNER_LANE_LABELS = {
@@ -13975,7 +13976,7 @@ QUEUE_REPLENISHER_TERMINAL_LABELS = frozenset(
 )
 QUEUE_REPLENISHER_NEEDS_OPERATOR_LABELS = frozenset(
     (
-        "runner:needs-operator",
+        LABEL_NEEDS_OPERATOR,
         "needs-operator",
         "NEEDS_OPERATOR",
         "status:NEEDS_OPERATOR",
@@ -14237,6 +14238,87 @@ def _reconcile_terminal_issue_active_labels(issue: Mapping[str, Any]) -> bool:
     if code != 0:
         raise RuntimeError(f"gh issue edit failed:\n{output}")
     return True
+
+
+def _issue_waiting_dependency_without_ready(issue: Mapping[str, Any]) -> bool:
+    labels = _issue_label_names(issue)
+    return LABEL_WAITING_DEPENDENCY in labels and LABEL_READY not in labels
+
+
+def _explicit_dependency_hold_reason(
+    issue: Mapping[str, Any],
+    *,
+    repository: str = REPO,
+) -> str | None:
+    number = _queue_replenisher_issue_number(issue)
+    if number is None:
+        return "dependency_current_issue_unresolved"
+    body = str(issue.get("body") or "")
+    runner_task, task_reason = extract_runner_task(
+        body,
+        default_repository=repository,
+    )
+    if task_reason is not None:
+        return task_reason if task_reason.startswith("dependency_") else None
+    if runner_task is not None:
+        if not runner_task.dependencies:
+            return "dependency_metadata_missing"
+        return runner_dependency_hold_reason(
+            number,
+            runner_task,
+            repository=repository,
+        )
+    queue_dependencies_valid, queue_dependencies = _queue_replenisher_dependency_parse(
+        issue
+    )
+    if not queue_dependencies_valid:
+        return "dependency_malformed"
+    if queue_dependencies:
+        return runner_dependency_hold_reason(
+            number,
+            RunnerTask(
+                content="",
+                dependencies=tuple(
+                    RunnerIssueDependency(dependency)
+                    for dependency in sorted(queue_dependencies)
+                ),
+            ),
+            repository=repository,
+        )
+    if not _runner_dependency_field_present(body):
+        return "dependency_metadata_missing"
+    dependencies, dependency_parse_reason = parse_runner_dependencies(body)
+    if dependency_parse_reason is not None:
+        return dependency_parse_reason
+    if not dependencies:
+        return "dependency_metadata_missing"
+    return runner_dependency_hold_reason(
+        number,
+        RunnerTask(content="", dependencies=dependencies),
+        repository=repository,
+    )
+
+
+def _release_waiting_dependency_issue(issue: Mapping[str, Any]) -> bool:
+    number = _queue_replenisher_issue_number(issue)
+    if number is None or not _issue_waiting_dependency_without_ready(issue):
+        return False
+    if _explicit_dependency_hold_reason(issue) is not None:
+        return False
+    _promote_queue_replenisher_issue(issue)
+    return True
+
+
+def reconcile_waiting_dependency_issues(limit: int = 50) -> int:
+    reconciled = 0
+    for issue in _queue_replenisher_issue_list_for_label(LABEL_WAITING_DEPENDENCY):
+        if not _issue_waiting_dependency_without_ready(issue):
+            continue
+        if _release_waiting_dependency_issue(issue):
+            reconciled += 1
+            if reconciled >= limit:
+                return reconciled
+    return reconciled
 
 
 def reconcile_terminal_issues_active_execution_labels(limit: int = 50) -> int:
@@ -14560,8 +14642,12 @@ def replenish_runner_queue(body: str) -> str:
     selected = list(selection.selected)
     for issue in selected:
         _promote_queue_replenisher_issue(issue)
+    released_waiting = 0
     for issue in selection.waiting_dependency:
-        _route_queue_replenisher_dependency_wait(issue)
+        if _release_waiting_dependency_issue(issue):
+            released_waiting += 1
+        else:
+            _route_queue_replenisher_dependency_wait(issue)
 
     selected_numbers = [
         str(number)
@@ -14576,6 +14662,7 @@ def replenish_runner_queue(body: str) -> str:
             f"selected_count={len(selected_numbers)}",
             "selected_issues=" + (",".join(selected_numbers) or "none"),
             f"waiting_dependency_count={len(selection.waiting_dependency)}",
+            f"released_waiting_dependency_count={released_waiting}",
             "telegram_notifications=0",
         ],
         "met",
@@ -22482,6 +22569,10 @@ def poll_once(workdir: str | None = None) -> int:
         pass
     try:
         reconcile_terminal_issues_active_execution_labels()
+    except Exception:
+        pass
+    try:
+        reconcile_waiting_dependency_issues()
     except Exception:
         pass
     source_token = _QUEUE_RECOVERY_SOURCE.set("poll")

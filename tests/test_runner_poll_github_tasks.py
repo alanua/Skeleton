@@ -2933,6 +2933,91 @@ def test_terminal_run_now_reconciliation_removes_active_labels_without_closing()
     assert all("close" not in command for command in commands for command in command)
 
 
+def test_waiting_dependency_reconciliation_releases_satisfied_dependency() -> None:
+    waiting = _queue_candidate_issue(
+        2610,
+        allowed_files=("docs/waiting-release.md",),
+        idempotency_key="waiting-release",
+        labels=(runner.LABEL_AGENT_TASK, runner.LABEL_WAITING_DEPENDENCY),
+        body_lines=("Depends on: #2609",),
+    )
+    commands: list[list[str]] = []
+
+    def issue_list(label: str) -> list[dict[str, object]]:
+        return [waiting] if label == runner.LABEL_WAITING_DEPENDENCY else []
+
+    def run(command: list[str], **_kwargs: object) -> tuple[int, str]:
+        commands.append(command)
+        if command[:3] == ["gh", "issue", "view"]:
+            assert command[3] == "2609"
+            return 0, json.dumps(
+                {
+                    "number": 2609,
+                    "body": "",
+                    "state": "OPEN",
+                    "closed": False,
+                    "labels": [{"name": runner.LABEL_DONE}],
+                }
+            )
+        return 0, ""
+
+    with mock.patch.object(
+        runner, "_queue_replenisher_issue_list_for_label", side_effect=issue_list
+    ), mock.patch.object(runner, "run_command", side_effect=run):
+        count = runner.reconcile_waiting_dependency_issues()
+
+    assert count == 1
+    assert [
+        "gh",
+        "issue",
+        "edit",
+        "2610",
+        "--repo",
+        runner.REPO,
+        "--remove-label",
+        runner.LABEL_WAITING_DEPENDENCY,
+        "--add-label",
+        runner.LABEL_READY,
+    ] in commands
+
+
+def test_waiting_dependency_reconciliation_keeps_unsatisfied_dependency_waiting() -> None:
+    waiting = _queue_candidate_issue(
+        2612,
+        allowed_files=("docs/waiting-hold.md",),
+        idempotency_key="waiting-hold",
+        labels=(runner.LABEL_AGENT_TASK, runner.LABEL_WAITING_DEPENDENCY),
+        body_lines=("Depends on: #2611",),
+    )
+    commands: list[list[str]] = []
+
+    def issue_list(label: str) -> list[dict[str, object]]:
+        return [waiting] if label == runner.LABEL_WAITING_DEPENDENCY else []
+
+    def run(command: list[str], **_kwargs: object) -> tuple[int, str]:
+        commands.append(command)
+        if command[:3] == ["gh", "issue", "view"]:
+            assert command[3] == "2611"
+            return 0, json.dumps(
+                {
+                    "number": 2611,
+                    "body": "",
+                    "state": "OPEN",
+                    "closed": False,
+                    "labels": [{"name": runner.LABEL_RUNNING}],
+                }
+            )
+        return 0, ""
+
+    with mock.patch.object(
+        runner, "_queue_replenisher_issue_list_for_label", side_effect=issue_list
+    ), mock.patch.object(runner, "run_command", side_effect=run):
+        count = runner.reconcile_waiting_dependency_issues()
+
+    assert count == 0
+    assert not any(command[:3] == ["gh", "issue", "edit"] for command in commands)
+
+
 def test_ineligible_run_now_pool_falls_back_to_general_replenisher_candidates() -> None:
     waiting_run_now = _queue_candidate_issue(
         2517,
