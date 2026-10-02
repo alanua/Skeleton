@@ -49,6 +49,7 @@ def test_success_archives_then_sends_one_rich_package_report(tmp_path) -> None:
     assert "Лист" in sent[0]
     assert rt.outbox.state_counts() == {"DONE": 1}
     assert rt.outbox.work_state_counts() == {"DONE": 1}
+    assert rt.outbox.pending_lifecycle_work() == []
     receipts = rt.outbox.receipts()
     assert receipts[0]["payload"]["receipt_type"] == "package_part"
 
@@ -90,6 +91,7 @@ def test_replay_restart_does_not_duplicate_successful_sends(tmp_path) -> None:
     assert len(sent) == 1
     assert restarted.outbox.state_counts() == {"DONE": 1}
     assert restarted.outbox.work_state_counts() == {"DONE": 1}
+    assert restarted.outbox.pending_lifecycle_work() == []
 
 
 def test_multipart_partial_failure_retries_only_unsent_part(tmp_path) -> None:
@@ -133,6 +135,10 @@ def test_work_failure_has_bounded_backoff_then_review(tmp_path) -> None:
     assert state == "REVIEW"
     assert outbox.should_process("source", "a" * 64, now=999999) is False
     assert outbox.work_state_counts() == {"REVIEW": 1}
+    pending = outbox.pending_lifecycle_work()
+    assert pending[0]["state"] == "BLOCKED"
+    assert pending[0]["blocker_reason"] == "OcrFailure"
+    assert pending[0]["next_action"] == "operator_review_failed_document_intake"
 
 
 def test_outbox_missing_credentials_routes_retry(tmp_path, monkeypatch) -> None:

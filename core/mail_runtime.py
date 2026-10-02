@@ -7,7 +7,7 @@ import json
 import time
 from typing import Any, Final
 
-from core.mail_operations import process_important_mail, public_mail_operation_receipt
+from core.mail_operations import MailOperationError, process_important_mail, public_mail_operation_receipt
 from core.mail_provider import MailProvider, MailProviderAccount, MailProviderCursor
 from core.mail_state import MailStateStore
 from core.shared_dispatch import (
@@ -61,7 +61,27 @@ class MailRuntime:
 
         self.state_store.initialize()
         cursor = MailProviderCursor(account.account_ref, self.state_store.get_cursor(account.account_ref))
-        batch = provider.poll(account, cursor, max_messages=account.max_messages_per_poll)
+        try:
+            batch = provider.poll(account, cursor, max_messages=account.max_messages_per_poll)
+        except MailOperationError as exc:
+            if _gmail_reauthorization_required(exc.reason_code):
+                blocked = self.state_store.record_account_blocked(
+                    account_ref=account.account_ref,
+                    reason="GMAIL_OAUTH_REAUTHORIZATION_REQUIRED",
+                    next_action="operator_reauthorize_gmail_oauth_then_resume_checkpoint",
+                    now=now,
+                )
+                receipt = _receipt(
+                    "BLOCKED",
+                    "GMAIL_OAUTH_REAUTHORIZATION_REQUIRED",
+                    account,
+                    now=now,
+                )
+                receipt["pending_lifecycle_work"] = [blocked]
+                receipt["resume_from_cursor_ref"] = cursor.cursor_ref
+                return receipt
+            raise
+        self.state_store.record_account_resumed(account_ref=account.account_ref, now=now)
         processed = ignored = operator = replayed = failed = 0
         message_receipts: list[dict[str, Any]] = []
 
@@ -76,6 +96,14 @@ class MailRuntime:
             if not should_process:
                 replayed += 1
                 continue
+            self.state_store.record_lifecycle(
+                message_hash=message_hash,
+                account_ref=account.account_ref,
+                state="PROCESSING",
+                blocker_reason="MAIL_PROCESSING_IN_PROGRESS",
+                next_action="classify_mail_for_operator_action",
+                now=now,
+            )
             try:
                 receipt = process_important_mail(envelope.__dict__, now=now)
             except Exception:
@@ -128,6 +156,7 @@ class MailRuntime:
             "replayed": replayed,
             "failed": failed,
             "message_receipts": message_receipts,
+            "pending_lifecycle_work": self.state_store.pending_lifecycle_work(),
             "idempotency_key": _stable_hash(
                 {"account_ref": account.account_ref, "cursor": cursor.cursor_ref, "now": now}
             )[:32],
@@ -190,3 +219,12 @@ def _receipt(
 def _stable_hash(value: Any) -> str:
     encoded = json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _gmail_reauthorization_required(reason_code: str) -> bool:
+    return reason_code in {
+        "GMAIL_AUTHORIZATION_FAILED",
+        "GMAIL_OAUTH_REVOKED",
+        "GMAIL_OAUTH_REFRESH_FAILED",
+        "GMAIL_CREDENTIAL_UNAVAILABLE",
+    }

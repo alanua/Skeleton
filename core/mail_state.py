@@ -5,6 +5,8 @@ from pathlib import Path
 import sqlite3
 from typing import Any
 
+from core.intake_lifecycle import IntakeLifecycleStore, stable_intake_id
+
 
 @dataclass(frozen=True)
 class MailMessageState:
@@ -20,6 +22,7 @@ class MailMessageState:
 class MailStateStore:
     def __init__(self, db_path: str | Path) -> None:
         self.db_path = Path(db_path)
+        self.lifecycle = IntakeLifecycleStore(db_path)
 
     def initialize(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -44,6 +47,7 @@ class MailStateStore:
                 );
                 """
             )
+        self.lifecycle.initialize()
 
     def get_cursor(self, account_ref: str) -> str | None:
         with self._connect() as connection:
@@ -142,6 +146,78 @@ class MailStateStore:
                 True,
             )
 
+    def record_lifecycle(
+        self,
+        *,
+        message_hash: str,
+        account_ref: str,
+        state: str,
+        blocker_reason: str,
+        next_action: str,
+        provenance_refs: tuple[str, ...] = (),
+        canonical_ref: str | None = None,
+        record_ref: str | None = None,
+        now: int,
+    ) -> dict[str, Any]:
+        item = self.lifecycle.record(
+            item_kind="mail",
+            source_ref=account_ref,
+            source_hash=message_hash,
+            state=state,
+            blocker_reason=blocker_reason,
+            next_action=next_action,
+            provenance_refs=provenance_refs or (f"mail:{message_hash[:24]}",),
+            canonical_ref=canonical_ref,
+            record_ref=record_ref,
+            now=now,
+        )
+        return item.public_mapping()
+
+    def record_account_blocked(
+        self,
+        *,
+        account_ref: str,
+        reason: str,
+        next_action: str,
+        now: int,
+    ) -> dict[str, Any]:
+        import hashlib
+
+        digest = hashlib.sha256(account_ref.encode("utf-8")).hexdigest()
+        item = self.lifecycle.record(
+            item_kind="mail",
+            source_ref=account_ref,
+            source_hash=digest,
+            state="BLOCKED",
+            blocker_reason=reason,
+            next_action=next_action,
+            provenance_refs=(f"mail-account:{digest[:24]}",),
+            now=now,
+        )
+        return item.public_mapping()
+
+    def record_account_resumed(self, *, account_ref: str, now: int) -> dict[str, Any] | None:
+        import hashlib
+
+        digest = hashlib.sha256(account_ref.encode("utf-8")).hexdigest()
+        intake_id = stable_intake_id(item_kind="mail", source_ref=account_ref, source_hash=digest)
+        if self.lifecycle.get(intake_id) is None:
+            return None
+        item = self.lifecycle.record(
+            item_kind="mail",
+            source_ref=account_ref,
+            source_hash=digest,
+            state="DONE",
+            blocker_reason="COMPLETED",
+            next_action="none",
+            provenance_refs=(f"mail-account:{digest[:24]}",),
+            now=now,
+        )
+        return item.public_mapping()
+
+    def pending_lifecycle_work(self, *, limit: int = 100) -> list[dict[str, Any]]:
+        return self.lifecycle.pending_work(item_kind="mail", limit=limit)
+
     def mark_message(self, *, message_hash: str, status: str, reason: str, now: int) -> None:
         if status not in {"done", "ignored", "failed", "needs_operator"}:
             raise ValueError("invalid mail message status")
@@ -154,6 +230,26 @@ class MailStateStore:
                 """,
                 (status, now, reason, message_hash),
             )
+        lifecycle_state = {
+            "done": "DONE",
+            "ignored": "DONE",
+            "failed": "DEFERRED",
+            "needs_operator": "BLOCKED",
+        }[status]
+        next_action = {
+            "done": "none",
+            "ignored": "none",
+            "failed": "resume_mail_processing_after_backoff",
+            "needs_operator": "operator_review_action_required_mail",
+        }[status]
+        self.record_lifecycle(
+            message_hash=message_hash,
+            account_ref=self.get_message(message_hash).account_ref if self.get_message(message_hash) else "acct:unknown",
+            state=lifecycle_state,
+            blocker_reason=reason,
+            next_action=next_action,
+            now=now,
+        )
 
     def get_message(self, message_hash: str) -> MailMessageState | None:
         with self._connect() as connection:
