@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Union
+from typing import Iterable, Union
 
 import yaml
 
 from core.capability_checker import CapabilityChecker
+from core.capability_runtime_truth import RuntimeCapabilityEvidence
 
 
 class BootReport(dict):
@@ -36,10 +37,19 @@ class BootReport(dict):
 
 
 class BootLoader:
-    def __init__(self, repo_root: Union[str, Path]) -> None:
+    def __init__(
+        self,
+        repo_root: Union[str, Path],
+        runtime_evidence: Iterable[RuntimeCapabilityEvidence] = (),
+    ) -> None:
         self.root = Path(repo_root)
+        self.runtime_evidence = tuple(runtime_evidence)
 
-    def load(self, manifest_path: str = "BOOT_MANIFEST.yaml") -> dict:
+    def load(
+        self,
+        manifest_path: str = "BOOT_MANIFEST.yaml",
+        runtime_evidence: Iterable[RuntimeCapabilityEvidence] | None = None,
+    ) -> dict:
         manifest_file = self.root / manifest_path
         manifest = yaml.safe_load(manifest_file.read_text(encoding="utf-8"))
 
@@ -66,7 +76,9 @@ class BootLoader:
             "mode": "boot",
             "active_project_status": "ACTIVE_PROJECT_WAITING",
             "source_trust_map": self._build_trust_map(),
-            "capability_runtime_truth": self._build_capability_runtime_truth(),
+            "capability_runtime_truth": self._build_capability_runtime_truth(
+                self.runtime_evidence if runtime_evidence is None else runtime_evidence
+            ),
             "writes": "none",
         })
 
@@ -93,11 +105,13 @@ class BootLoader:
                 trust_map[source_name] = source_data["trust"]
         return trust_map
 
-    def _build_capability_runtime_truth(self) -> dict:
+    def _build_capability_runtime_truth(
+        self, runtime_evidence: Iterable[RuntimeCapabilityEvidence] = ()
+    ) -> dict:
         registry_path = self.root / "CAPABILITY_REGISTRY.yaml"
         if not registry_path.is_file():
             return {}
-        return CapabilityChecker(registry_path).runtime_truth()
+        return CapabilityChecker(registry_path).runtime_truth(runtime_evidence)
 
 
 def main() -> int:

@@ -19,6 +19,7 @@ def test_capability_checker_runtime_truth_is_bounded_read_only() -> None:
     assert truth["runtime_probe_performed"] is False
     assert truth["runtime_mutation_performed"] is False
     assert truth["summary"]["typed_runtime_evidence_count"] == 0
+    assert truth["summary"]["fresh_verified_runtime_evidence_count"] == 0
 
 
 def test_capability_checker_runtime_truth_accepts_typed_evidence() -> None:
@@ -36,4 +37,8 @@ def test_capability_checker_runtime_truth_accepts_typed_evidence() -> None:
 
     assert boot_loader["registry_status"] == "available"
     assert boot_loader["runtime_states"] == ["available"]
-    assert boot_loader["truth_status"] == "registry_available_runtime_confirmed"
+    assert boot_loader["fresh_verified_runtime_states"] == ["available"]
+    assert boot_loader["effective_state"] == "available"
+    assert boot_loader["freshness"] == "fresh_verified_runtime_evidence"
+    assert boot_loader["drift"] == "no_drift"
+    assert boot_loader["parity"] == "registry_runtime_parity"

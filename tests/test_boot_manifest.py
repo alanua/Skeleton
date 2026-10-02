@@ -82,3 +82,27 @@ def test_boot_report_includes_bounded_capability_runtime_truth() -> None:
     assert truth["read_model"] == "bounded_typed_evidence_only"
     assert truth["runtime_probe_performed"] is False
     assert truth["runtime_mutation_performed"] is False
+
+
+def test_boot_loader_accepts_optional_typed_runtime_evidence_boundary() -> None:
+    from core.boot_loader import BootLoader
+    from core.capability_runtime_truth import RuntimeCapabilityEvidence
+
+    report = BootLoader(ROOT).load(
+        runtime_evidence=[
+            RuntimeCapabilityEvidence(
+                capability_id="boot_loader",
+                runtime_state="available",
+                source="unit_test",
+                evidence_ref="test_boot_manifest",
+            )
+        ]
+    )
+    truth = report["capability_runtime_truth"]
+    boot_loader = next(
+        item for item in truth["capabilities"] if item["capability_id"] == "boot_loader"
+    )
+
+    assert boot_loader["effective_state"] == "available"
+    assert boot_loader["freshness"] == "fresh_verified_runtime_evidence"
+    assert boot_loader["drift"] == "no_drift"
