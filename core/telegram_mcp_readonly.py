@@ -1,15 +1,9 @@
 from __future__ import annotations
 
 import json
-import os
 from collections.abc import Mapping
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Protocol
-
-import yaml
-
-from core.telegram_gateway import TelegramGateway
 
 
 MCP_SCHEMA = "skeleton.telegram_mcp_readonly.v1"
@@ -24,8 +18,14 @@ SYNC_SOURCE_TOOL = "sync_source"
 LIST_ALLOWED_SOURCES_TOOL = "list_allowed_sources"
 
 READ_MODES = ("READ_PUBLIC", "READ_ALLOWED_PRIVATE")
-DEFAULT_SOURCES_CONFIG = Path("config/telegram_sources.example.yaml")
-DEFAULT_STORE_PATH = Path(".skeleton") / "telegram-readonly-mcp.db"
+TELEGRAM_TOOL_NAMES = (
+    RESOLVE_SOURCE_TOOL,
+    GET_HISTORY_TOOL,
+    GET_MESSAGE_TOOL,
+    SEARCH_TOOL,
+    SYNC_SOURCE_TOOL,
+    LIST_ALLOWED_SOURCES_TOOL,
+)
 
 
 class TelegramReadonlyBackend(Protocol):
@@ -66,6 +66,52 @@ class TelegramReadonlyBackend(Protocol):
     ) -> dict[str, object]: ...
 
     def list_allowed_sources(self) -> dict[str, object]: ...
+
+
+class UnavailableTelegramReadonlyBackend:
+    def resolve_source(self, source_ref: str, *, mode: str = "READ_PUBLIC") -> dict[str, object]:
+        return _backend_unavailable()
+
+    def get_history(
+        self,
+        source_ref: str,
+        *,
+        mode: str = "READ_PUBLIC",
+        limit: int | None = None,
+        offset_id: int = 0,
+        min_date: str | None = None,
+        max_date: str | None = None,
+    ) -> dict[str, object]:
+        return _backend_unavailable()
+
+    def get_message(self, source_ref: str, message_id: int, *, mode: str = "READ_PUBLIC") -> dict[str, object]:
+        return _backend_unavailable()
+
+    def search(
+        self,
+        query: str,
+        *,
+        source_ref: str | None = None,
+        mode: str = "READ_PUBLIC",
+        limit: int = 20,
+        min_date: str | None = None,
+        max_date: str | None = None,
+        semantic: bool = False,
+    ) -> dict[str, object]:
+        return _backend_unavailable()
+
+    def sync_source(
+        self,
+        source_ref: str,
+        *,
+        mode: str = "READ_PUBLIC",
+        limit: int | None = None,
+        overlap: int = 2,
+    ) -> dict[str, object]:
+        return _backend_unavailable()
+
+    def list_allowed_sources(self) -> dict[str, object]:
+        return _backend_unavailable()
 
 
 def tool_descriptions() -> tuple[dict[str, object], ...]:
@@ -165,19 +211,12 @@ class TelegramReadonlyMcpDispatcher:
     backend: TelegramReadonlyBackend
 
     @classmethod
-    def production(
-        cls,
-        *,
-        sources_config: Path | None = None,
-        store_path: Path | None = None,
-    ) -> "TelegramReadonlyMcpDispatcher":
-        root = Path(__file__).resolve().parents[1]
-        config_path = sources_config or Path(os.environ.get("SKELETON_TELEGRAM_SOURCES_CONFIG", root / DEFAULT_SOURCES_CONFIG))
-        db_path = store_path or Path(os.environ.get("SKELETON_TELEGRAM_STORE_PATH", root / DEFAULT_STORE_PATH))
-        loaded = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-        if not isinstance(loaded, Mapping) or not isinstance(loaded.get("sources"), list):
-            raise ValueError("TELEGRAM_SOURCES_CONFIG_INVALID")
-        return cls(backend=TelegramGateway.for_sources(loaded["sources"], store_path=db_path))
+    def unavailable(cls) -> "TelegramReadonlyMcpDispatcher":
+        return cls(backend=UnavailableTelegramReadonlyBackend())
+
+    @classmethod
+    def production(cls) -> "TelegramReadonlyMcpDispatcher":
+        return cls.unavailable()
 
     def list_tools(self) -> tuple[dict[str, object], ...]:
         return tool_descriptions()
@@ -295,6 +334,10 @@ def _blocked(reason: str, *, tool: str | None = None) -> dict[str, object]:
             "reason": _safe_reason(reason),
         },
     }
+
+
+def _backend_unavailable() -> dict[str, object]:
+    return {"status": "BLOCKED", "reason_code": "BACKEND_UNAVAILABLE"}
 
 
 def _is_error_result(result: Mapping[str, object]) -> bool:

@@ -9,6 +9,7 @@ from core.telegram_mcp_readonly import (
     RESOLVE_SOURCE_TOOL,
     SEARCH_TOOL,
     SYNC_SOURCE_TOOL,
+    TELEGRAM_TOOL_NAMES,
     MCP_SCHEMA,
     TelegramReadonlyMcpDispatcher,
     handle_jsonrpc_message,
@@ -104,6 +105,7 @@ def test_tools_are_exact_six_readonly_canonical_backend_facades() -> None:
         SYNC_SOURCE_TOOL,
         LIST_ALLOWED_SOURCES_TOOL,
     ]
+    assert tuple(tool["name"] for tool in tools) == TELEGRAM_TOOL_NAMES
     assert len(tools) == 6
 
     exposed_properties = {
@@ -212,6 +214,32 @@ def test_backend_blocked_status_marks_mcp_call_as_error() -> None:
     payload = json.loads(called["result"]["content"][0]["text"])
     assert payload["schema"] == MCP_SCHEMA
     assert payload["result"]["reason_code"] == "AUTH_REQUIRED"
+
+
+def test_production_backend_is_unbound_and_fails_closed_without_runtime_state() -> None:
+    active = TelegramReadonlyMcpDispatcher.production()
+
+    result = active.call_tool(SEARCH_TOOL, {"query": "quantum"})
+
+    assert result["schema"] == MCP_SCHEMA
+    assert result["tool"] == SEARCH_TOOL
+    assert result["result"] == {"status": "BLOCKED", "reason_code": "BACKEND_UNAVAILABLE"}
+
+
+def test_jsonrpc_without_injected_dispatcher_does_not_construct_local_runtime() -> None:
+    called = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {"name": LIST_ALLOWED_SOURCES_TOOL, "arguments": {}},
+        },
+    )
+
+    assert called is not None
+    assert called["result"]["isError"] is True
+    payload = json.loads(called["result"]["content"][0]["text"])
+    assert payload["result"] == {"status": "BLOCKED", "reason_code": "BACKEND_UNAVAILABLE"}
 
 
 def test_jsonrpc_boundary_lists_and_calls_tools() -> None:
