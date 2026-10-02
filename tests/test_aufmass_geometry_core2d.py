@@ -10,17 +10,24 @@ from pathlib import Path
 
 import pytest
 
-from core.aufmass_geometry import build_capability_report, process_geometry, process_geometry_file
-from core.aufmass_geometry.io_dxf import extract_dxf_source_entities
+_MISSING_AUFMASS_GEOMETRY_DEPS = [
+    name
+    for name in ("numpy", "ezdxf", "shapely", "networkx")
+    if importlib.util.find_spec(name) is None
+]
+pytestmark = pytest.mark.skipif(
+    _MISSING_AUFMASS_GEOMETRY_DEPS,
+    reason="aufmass-geometry optional dependencies are not installed",
+)
+
+if not _MISSING_AUFMASS_GEOMETRY_DEPS:
+    from core.aufmass_geometry import build_capability_report, process_geometry, process_geometry_file
+    from core.aufmass_geometry.io_dxf import extract_dxf_source_entities
 
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = ROOT / "tests" / "fixtures" / "aufmass_synthetic" / "seitenfluegel_room.json"
 SCHEMA = ROOT / "schemas" / "aufmass_geometry_manifest.schema.json"
-pytestmark = pytest.mark.skipif(
-    any(importlib.util.find_spec(name) is None for name in ("numpy", "ezdxf", "shapely", "networkx")),
-    reason="aufmass-geometry optional dependencies are not installed",
-)
 
 
 def test_imports_and_deterministic_capability_report() -> None:
