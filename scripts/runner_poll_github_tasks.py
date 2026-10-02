@@ -6833,9 +6833,7 @@ def finalize_existing_pr_success(
             "Existing PR update post-push verification failed: "
             f"{post_reason or 'pr_head_branch_mismatch'}"
         )
-    pr_url = _existing_pr_publish_pr_url(post_state or {})
-    if pr_url is None:
-        raise RuntimeError("Existing PR update post-push PR URL unavailable.")
+    pr_url = f"https://github.com/{REPO}/pull/{request.pr_number}"
 
     pytest_output = next(
         output for command, output in checks if command == "python3 -m pytest -q"
