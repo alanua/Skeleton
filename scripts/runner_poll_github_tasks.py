@@ -216,6 +216,7 @@ from core.runner_retry_policy import (
     RetryCondition,
     RetryDecision,
     append_retry_fields,
+    bounded_public_reason,
     evaluate_retry_policy,
     expected_output_validation,
     extract_retry_override,
@@ -1626,7 +1627,12 @@ def _validation_command_uses_pytest(args: list[str]) -> bool:
 
 
 def _validation_pytest_temp_parent(cwd_path: Path) -> Path:
-    candidates = [Path(tempfile.gettempdir()), Path("/tmp")]
+    candidates = [
+        Path(tempfile.gettempdir()),
+        Path("/tmp"),
+        Path("/var/tmp"),
+        cwd_path.parent,
+    ]
     for candidate in candidates:
         candidate_path = candidate.resolve(strict=False)
         if candidate_path.is_relative_to(cwd_path):
@@ -1638,11 +1644,7 @@ def _validation_pytest_temp_parent(cwd_path: Path) -> Path:
 
 def _create_validation_pytest_temp_root(cwd: str | Path) -> Path:
     cwd_path = Path(cwd)
-    if not cwd_path.is_dir():
-        raise FileNotFoundError(
-            f"pytest validation cwd is not an existing directory: {cwd_path}"
-        )
-    temp_parent = _validation_pytest_temp_parent(cwd_path.resolve(strict=True))
+    temp_parent = _validation_pytest_temp_parent(cwd_path.resolve(strict=False))
     return Path(
         tempfile.mkdtemp(
             prefix=".runner-validation-pytest-",
@@ -1654,7 +1656,7 @@ def _create_validation_pytest_temp_root(cwd: str | Path) -> Path:
 def _remove_validation_pytest_temp_root(path: Path) -> None:
     allowed_parents = {
         candidate.resolve(strict=False)
-        for candidate in (Path(tempfile.gettempdir()), Path("/tmp"))
+        for candidate in (Path(tempfile.gettempdir()), Path("/tmp"), Path("/var/tmp"))
         if candidate.is_dir()
     }
     try:
@@ -1908,6 +1910,26 @@ def _path_is_relative_to(path: Path, parent: Path) -> bool:
     except ValueError:
         return False
     return True
+
+
+def _path_is_runner_pytest_temp(path: Path) -> bool:
+    try:
+        relative = path.resolve(strict=False).relative_to(ROOT.resolve(strict=False))
+    except ValueError:
+        return False
+    parts = relative.parts
+    return (
+        len(parts) >= 3
+        and parts[0].startswith(".runner-codex-state")
+        and any(part.startswith("pytest-") for part in parts)
+    )
+
+
+def _path_is_public_repo_private_forbidden(path: Path) -> bool:
+    resolved = path.resolve(strict=False)
+    if not (resolved == ROOT or _path_is_relative_to(resolved, ROOT)):
+        return False
+    return not _path_is_runner_pytest_temp(resolved)
 
 
 def _validated_registered_target_path(
@@ -7095,12 +7117,17 @@ def _maintenance_report(
 
 
 def _loop_state_db_path() -> tuple[Path | None, str | None]:
+    def loop_path_is_relative_to(path: Path, parent: Path) -> bool:
+        if parent.resolve(strict=False) == ROOT.resolve(strict=False) and _path_is_runner_pytest_temp(path):
+            return False
+        return _path_is_relative_to(path, parent)
+
     return _executor_loop_state_db_path(
         environment=os.environ,
         env_var_name=LOOP_STATE_DB_ENV,
         root=ROOT,
         path_has_symlink_component=_path_has_symlink_component,
-        path_is_relative_to=_path_is_relative_to,
+        path_is_relative_to=loop_path_is_relative_to,
     )
 
 
@@ -8893,9 +8920,9 @@ def _aufmass_private_registered_paths() -> tuple[Path | None, Path | None, str |
         if not _path_is_under_allowed_target_base(path):
             return None, None, f"reason={name}_unsafe"
 
-    if workspace_root == ROOT or _path_is_relative_to(workspace_root, ROOT):
+    if _path_is_public_repo_private_forbidden(workspace_root):
         return None, None, "reason=private_workspace_inside_public_repo"
-    if checkout_path == ROOT or _path_is_relative_to(checkout_path, ROOT):
+    if _path_is_public_repo_private_forbidden(checkout_path):
         return None, None, "reason=private_checkout_inside_public_repo"
 
     return checkout_path, workspace_root, None
@@ -9114,7 +9141,7 @@ def _resolve_private_registry_path(
     resolved_registry = registry_path.resolve(strict=False)
     if not _path_is_relative_to(resolved_registry, workspace_root):
         return None, "registry_outside_private_workspace"
-    if resolved_registry == ROOT or _path_is_relative_to(resolved_registry, ROOT):
+    if _path_is_public_repo_private_forbidden(resolved_registry):
         return None, "registry_inside_public_repo"
     if not resolved_registry.is_file():
         return None, "registry_missing"
@@ -9134,7 +9161,7 @@ def _private_registry_relative_path(
     resolved = (workspace_root / candidate).resolve(strict=False)
     if not _path_is_relative_to(resolved, workspace_root):
         return None, f"{label}_outside_private_workspace"
-    if resolved == ROOT or _path_is_relative_to(resolved, ROOT):
+    if _path_is_public_repo_private_forbidden(resolved):
         return None, f"{label}_inside_public_repo"
     return resolved, None
 
@@ -9780,7 +9807,7 @@ def _write_private_shortlist_artifacts(
         resolved = path.resolve(strict=False)
         if not _path_is_relative_to(resolved, resolved_output_root):
             return "shortlist_artifact_path_unsafe"
-        if resolved == ROOT or _path_is_relative_to(resolved, ROOT):
+        if _path_is_public_repo_private_forbidden(resolved):
             return "shortlist_artifact_inside_public_repo"
     payload = {
         "schema": "skeleton.aufmass_private_shortlist.v1",
@@ -9926,7 +9953,7 @@ def _write_private_area_schedule_artifacts(
         resolved = path.resolve(strict=False)
         if not _path_is_relative_to(resolved, resolved_output_root):
             return "area_schedule_artifact_path_unsafe"
-        if resolved == ROOT or _path_is_relative_to(resolved, ROOT):
+        if _path_is_public_repo_private_forbidden(resolved):
             return "area_schedule_artifact_inside_public_repo"
     payload = {
         "schema": "skeleton.aufmass_private_area_schedule.v1",
@@ -14340,6 +14367,305 @@ def reconcile_terminal_issues_active_execution_labels(limit: int = 50) -> int:
     return reconciled
 
 
+BLOCKED_SELF_HEAL_LIMIT = 10
+_BLOCKED_SELF_HEAL_POLICY_RE = re.compile(
+    r"(?i)\b(policy|authority|secret|protected|approval|credential|token)\b"
+)
+_BLOCKED_SELF_HEAL_FIELD_RE = re.compile(
+    r"(?m)^(?P<key>[A-Za-z][A-Za-z0-9_ -]{0,80})=(?P<value>\S(?:.*\S)?)\s*$"
+)
+_BLOCKED_SELF_HEAL_SAFE_FILE_RE = re.compile(
+    r"\b(?:[A-Za-z0-9._-]+/)+[A-Za-z0-9._-]+\b"
+)
+
+
+@dataclass(frozen=True)
+class BlockedSelfHealingAction:
+    action: str
+    reason: str
+    receipt_reason: str
+    pr_number: int | None = None
+    pushed_head_sha: str | None = None
+    corrected_allowed_files: tuple[str, ...] = ()
+
+
+def _blocked_recovery_latest_report(issue: Mapping[str, Any]) -> str | None:
+    comments = get_issue_comments(dict(issue))
+    if comments is None:
+        return None
+    for comment in reversed(comments):
+        body = comment.get("body") if isinstance(comment, Mapping) else None
+        if not isinstance(body, str):
+            continue
+        if blocked_output_marker(body) is not None or body.lstrip().startswith(
+            "NEEDS_OPERATOR:"
+        ):
+            return body
+    return None
+
+
+def _blocked_recovery_report_fields(report: str) -> dict[str, str]:
+    fields: dict[str, str] = {}
+    for match in _BLOCKED_SELF_HEAL_FIELD_RE.finditer(report or ""):
+        key = match.group("key").strip().lower().replace(" ", "_").replace("-", "_")
+        fields[key] = match.group("value").strip()
+    return fields
+
+
+def _blocked_recovery_pr_state(pr_number: int) -> dict[str, Any] | None:
+    code, output = run_command(
+        [
+            "gh",
+            "pr",
+            "view",
+            str(pr_number),
+            "--repo",
+            REPO,
+            "--json",
+            "number,state,isDraft,headRefOid,headRefName,baseRefName,files",
+        ]
+    )
+    if code != 0:
+        return None
+    try:
+        parsed = json.loads(output or "{}")
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _blocked_recovery_pr_changed_files(pr_state: Mapping[str, Any]) -> frozenset[str]:
+    files = pr_state.get("files")
+    if not isinstance(files, list):
+        return frozenset()
+    changed: set[str] = set()
+    for item in files:
+        path = item.get("path") if isinstance(item, Mapping) else None
+        if isinstance(path, str) and _safe_issue_publish_file_path(path):
+            changed.add(path)
+    return frozenset(changed)
+
+
+def _blocked_recovery_expected_push_landed(
+    *,
+    issue: Mapping[str, Any],
+    fields: Mapping[str, str],
+) -> bool:
+    pr_text = fields.get("pull_request") or fields.get("existing_pr")
+    pushed_head_sha = fields.get("pushed_head_sha")
+    if pr_text is None or pushed_head_sha is None:
+        return False
+    try:
+        pr_number = int(pr_text.lstrip("#"))
+    except ValueError:
+        return False
+    if _HEAD_SHA_RE.fullmatch(pushed_head_sha.lower()) is None:
+        return False
+    allowed_files = _queue_replenisher_allowed_files(issue)
+    if not allowed_files:
+        return False
+    pr_state = _blocked_recovery_pr_state(pr_number)
+    if pr_state is None:
+        return False
+    if pr_state.get("number") != pr_number:
+        return False
+    if str(pr_state.get("state") or "").upper() != "OPEN":
+        return False
+    if str(pr_state.get("headRefOid") or "").lower() != pushed_head_sha.lower():
+        return False
+    changed_files = _blocked_recovery_pr_changed_files(pr_state)
+    return bool(changed_files) and changed_files <= allowed_files
+
+
+def _blocked_recovery_infer_allowed_files(report: str) -> tuple[str, ...]:
+    fields = _blocked_recovery_report_fields(report)
+    explicit = fields.get("deterministic_allowed_file")
+    candidates = [explicit] if explicit else []
+    candidates.extend(_BLOCKED_SELF_HEAL_SAFE_FILE_RE.findall(report or ""))
+    safe = {
+        path
+        for path in candidates
+        if isinstance(path, str) and _safe_issue_publish_file_path(path)
+    }
+    return tuple(sorted(safe)) if len(safe) == 1 else ()
+
+
+def classify_blocked_self_healing_action(
+    issue: Mapping[str, Any], latest_report: str | None
+) -> BlockedSelfHealingAction | None:
+    labels = _issue_label_names(issue)
+    if LABEL_BLOCKED not in labels:
+        return None
+    if latest_report is None:
+        if labels & ACTIVE_EXECUTION_LABELS:
+            return BlockedSelfHealingAction(
+                "resume_stale_active_labels",
+                "stale_active_queue_labels",
+                "STALE_ACTIVE_QUEUE_LABELS",
+            )
+        return None
+
+    fields = _blocked_recovery_report_fields(latest_report)
+    reason = fields.get("reason") or bounded_public_reason(latest_report)
+    if latest_report.lstrip().startswith("NEEDS_OPERATOR:") or _BLOCKED_SELF_HEAL_POLICY_RE.search(reason):
+        return BlockedSelfHealingAction(
+            "needs_operator",
+            bounded_public_reason(reason),
+            "POLICY_BLOCK_REQUIRES_OPERATOR",
+        )
+    if reason == "post_push_pr_url_unavailable":
+        pr_text = fields.get("pull_request") or fields.get("existing_pr")
+        pushed_head_sha = fields.get("pushed_head_sha")
+        if pr_text is None or pushed_head_sha is None:
+            return None
+        try:
+            pr_number = int(pr_text.lstrip("#"))
+        except ValueError:
+            return None
+        return BlockedSelfHealingAction(
+            "reconcile_done",
+            reason,
+            "POST_PUSH_EXPECTED_HEAD_LANDED",
+            pr_number=pr_number,
+            pushed_head_sha=pushed_head_sha.lower(),
+        )
+    if reason.startswith("retained_dirty_") or "retained_dirty_continuation_gate" in latest_report:
+        return BlockedSelfHealingAction(
+            "resume_retained_dirty",
+            bounded_public_reason(reason),
+            "RETAINED_DIRTY_WORKTREE_ROUTED",
+        )
+    if reason == "missing_allowed_files":
+        corrected = _blocked_recovery_infer_allowed_files(latest_report)
+        if corrected:
+            return BlockedSelfHealingAction(
+                "repair_metadata",
+                reason,
+                "DETERMINISTIC_METADATA_REPAIRED",
+                corrected_allowed_files=corrected,
+            )
+    return None
+
+
+def _blocked_recovery_store_allows(
+    issue_number: int, action: BlockedSelfHealingAction
+) -> bool:
+    store = RecoveryStore(_autonomous_queue_store_path())
+    packet = public_safe_failure_packet(
+        failure_class=FailureClass.QUEUE_LABEL_STATE_STUCK,
+        failure_key=f"control:blocked-self-heal:{issue_number}:{action.receipt_reason.lower()}",
+        reason_class=action.receipt_reason,
+        task_kind="runner_poll",
+        phase="blocked_self_healing",
+        capability="queue:label",
+        operation=action.action,
+    )
+
+    def run_action(action_id: str) -> str:
+        if action_id != "queue_reactivate":
+            return _autonomous_queue_blocked_report("BLOCKED_SELF_HEAL_ACTION_NOT_ALLOWLISTED")
+        return _maintenance_report(
+            "DONE",
+            REPLENISH_RUNNER_QUEUE,
+            [f"reason={action.receipt_reason}", "telegram_notifications=0"],
+            "met",
+        )
+
+    receipt = execute_recovery_packet(
+        packet,
+        store=store,
+        now=int(time.time()),
+        action_executor=run_action,
+        canary_executor=lambda _canary: True,
+    )
+    return str(receipt.get("status") or "") == "RECOVERED"
+
+
+def _blocked_recovery_receipt(issue_number: int, action: BlockedSelfHealingAction) -> str:
+    lines = [
+        f"source_issue={issue_number}",
+        f"reason={action.receipt_reason}",
+        f"recovery_action={action.action}",
+        "public_safe=true",
+        "telegram_notifications=0",
+    ]
+    if action.pr_number is not None:
+        lines.append(f"pull_request={action.pr_number}")
+    if action.corrected_allowed_files:
+        lines.append(f"corrected_allowed_files_count={len(action.corrected_allowed_files)}")
+    return _maintenance_report("DONE", "blocked_self_healing", lines, "met")
+
+
+def _blocked_recovery_apply_metadata_repair(
+    issue: Mapping[str, Any], action: BlockedSelfHealingAction
+) -> bool:
+    if not action.corrected_allowed_files:
+        return False
+    body = str(issue.get("body") or "")
+    metadata = _metadata_before_task(body)
+    if _issue_publish_allowed_files(metadata)[1] is None:
+        return False
+    insertion = "\n".join(
+        ["allowed_files:", *(f"  - {path}" for path in action.corrected_allowed_files)]
+    )
+    if "```task" in body:
+        repaired = body.replace("```task", f"{insertion}\n```task", 1)
+    else:
+        repaired = f"{body.rstrip()}\n{insertion}\n"
+    number = _queue_replenisher_issue_number(issue)
+    if number is None:
+        return False
+    code, output = run_command(
+        ["gh", "issue", "edit", str(number), "--repo", REPO, "--body", repaired]
+    )
+    if code != 0:
+        raise RuntimeError(f"gh issue edit failed:\n{output}")
+    return True
+
+
+def recover_blocked_issue_if_safe(issue: Mapping[str, Any]) -> bool:
+    number = _queue_replenisher_issue_number(issue)
+    if number is None:
+        return False
+    latest_report = _blocked_recovery_latest_report(issue)
+    action = classify_blocked_self_healing_action(issue, latest_report)
+    if action is None:
+        return False
+    if not _blocked_recovery_store_allows(number, action):
+        return False
+
+    if action.action == "needs_operator":
+        post_issue_comment(number, _blocked_recovery_receipt(number, action))
+        set_issue_label(number, LABEL_BLOCKED, LABEL_NEEDS_OPERATOR)
+        return True
+    if action.action == "reconcile_done":
+        fields = _blocked_recovery_report_fields(latest_report or "")
+        if not _blocked_recovery_expected_push_landed(issue=issue, fields=fields):
+            return False
+        post_issue_comment(number, _blocked_recovery_receipt(number, action))
+        set_issue_label(number, LABEL_BLOCKED, LABEL_DONE)
+        return True
+    if action.action == "repair_metadata":
+        if not _blocked_recovery_apply_metadata_repair(issue, action):
+            return False
+        post_issue_comment(number, _blocked_recovery_receipt(number, action))
+        set_issue_label(number, LABEL_BLOCKED, LABEL_READY)
+        return True
+    if action.action in {"resume_retained_dirty", "resume_stale_active_labels"}:
+        post_issue_comment(number, _blocked_recovery_receipt(number, action))
+        set_issue_label(number, LABEL_BLOCKED, LABEL_READY)
+        return True
+    return False
+
+
+def recover_blocked_issues_on_poll(limit: int = BLOCKED_SELF_HEAL_LIMIT) -> int:
+    recovered = 0
+    for issue in get_blocked_issues_for_recovery()[:limit]:
+        if recover_blocked_issue_if_safe(issue):
+            recovered += 1
+    return recovered
+
+
 @dataclass(frozen=True)
 class RunnerQueueReplenishmentSelection:
     selected: tuple[dict[str, Any], ...]
@@ -14464,6 +14790,10 @@ def _queue_replenisher_issue_list_for_label(label: str) -> list[dict[str, Any]]:
     if not isinstance(parsed, list):
         raise RuntimeError("gh issue list returned non-list JSON")
     return [issue for issue in parsed if isinstance(issue, dict)]
+
+
+def get_blocked_issues_for_recovery() -> list[dict[str, Any]]:
+    return _queue_replenisher_issue_list_for_label(LABEL_BLOCKED)
 
 
 def get_queue_replenisher_candidate_issues() -> list[dict[str, Any]]:
@@ -22573,6 +22903,10 @@ def poll_once(workdir: str | None = None) -> int:
         pass
     try:
         reconcile_waiting_dependency_issues()
+    except Exception:
+        pass
+    try:
+        recover_blocked_issues_on_poll()
     except Exception:
         pass
     source_token = _QUEUE_RECOVERY_SOURCE.set("poll")

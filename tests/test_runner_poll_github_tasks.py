@@ -2933,6 +2933,184 @@ def test_terminal_run_now_reconciliation_removes_active_labels_without_closing()
     assert all("close" not in command for command in commands for command in command)
 
 
+def test_blocked_self_healing_false_post_push_pr_url_failure_reconciles_done(
+    tmp_path: Path,
+) -> None:
+    issue = _queue_candidate_issue(
+        4401,
+        allowed_files=("scripts/example.py",),
+        labels=(runner.LABEL_AGENT_TASK, runner.LABEL_BLOCKED),
+    )
+    report = "\n".join(
+        (
+            "BLOCKED: Runner host maintenance task did not complete.",
+            "reason=post_push_pr_url_unavailable",
+            "pull_request=77",
+            "pushed_head_sha=" + "a" * 40,
+            "success_criteria=not_met",
+        )
+    )
+    issue["comments"] = [{"body": report}]
+    pr_state = {
+        "number": 77,
+        "state": "OPEN",
+        "isDraft": True,
+        "headRefOid": "a" * 40,
+        "files": [{"path": "scripts/example.py"}],
+    }
+
+    with mock.patch.object(
+        runner, "control_recovery_db_path", return_value=tmp_path / "control.sqlite3"
+    ), mock.patch.object(
+        runner, "run_command", return_value=(0, json.dumps(pr_state))
+    ) as run, mock.patch.object(
+        runner, "post_issue_comment"
+    ) as comment, mock.patch.object(
+        runner, "set_issue_label"
+    ) as labels:
+        assert runner.recover_blocked_issue_if_safe(issue)
+
+    assert any(command[:3] == ["gh", "pr", "view"] for command, *_ in (call.args for call in run.call_args_list))
+    labels.assert_called_once_with(4401, runner.LABEL_BLOCKED, runner.LABEL_DONE)
+    assert "reason=POST_PUSH_EXPECTED_HEAD_LANDED" in comment.call_args.args[1]
+
+
+def test_blocked_self_healing_retained_dirty_worktree_routes_ready(
+    tmp_path: Path,
+) -> None:
+    issue = _queue_candidate_issue(
+        4402,
+        allowed_files=("core/example.py",),
+        labels=(runner.LABEL_AGENT_TASK, runner.LABEL_BLOCKED),
+    )
+    issue["comments"] = [
+        {
+            "body": "\n".join(
+                (
+                    "BLOCKED: Issue worktree preparation failed.",
+                    "reason=retained_dirty_changed_files_outside_allowlist",
+                )
+            )
+        }
+    ]
+
+    with mock.patch.object(
+        runner, "control_recovery_db_path", return_value=tmp_path / "control.sqlite3"
+    ), mock.patch.object(
+        runner, "post_issue_comment"
+    ) as comment, mock.patch.object(
+        runner, "set_issue_label"
+    ) as labels:
+        assert runner.recover_blocked_issue_if_safe(issue)
+
+    labels.assert_called_once_with(4402, runner.LABEL_BLOCKED, runner.LABEL_READY)
+    assert "reason=RETAINED_DIRTY_WORKTREE_ROUTED" in comment.call_args.args[1]
+
+
+def test_blocked_self_healing_repairs_deterministic_missing_allowed_files_metadata(
+    tmp_path: Path,
+) -> None:
+    issue = _queue_candidate_issue(
+        4403,
+        allowed_files=(),
+        labels=(runner.LABEL_AGENT_TASK, runner.LABEL_BLOCKED),
+    )
+    issue["body"] = "\n".join(
+        (
+            "schema: skeleton.runner_task.v1",
+            "privacy_boundary: PUBLIC_SAFE_CONTROL_ONLY",
+            "```task",
+            "Update scripts/example.py.",
+            "```",
+        )
+    )
+    issue["comments"] = [
+        {
+            "body": "\n".join(
+                (
+                    "BLOCKED: runner task metadata contract failed.",
+                    "reason=missing_allowed_files",
+                    "deterministic_allowed_file=scripts/example.py",
+                )
+            )
+        }
+    ]
+    commands: list[list[str]] = []
+
+    def run(command: list[str], **_kwargs: object) -> tuple[int, str]:
+        commands.append(command)
+        return 0, ""
+
+    with mock.patch.object(
+        runner, "control_recovery_db_path", return_value=tmp_path / "control.sqlite3"
+    ), mock.patch.object(
+        runner, "run_command", side_effect=run
+    ), mock.patch.object(
+        runner, "post_issue_comment"
+    ) as comment, mock.patch.object(
+        runner, "set_issue_label"
+    ) as labels:
+        assert runner.recover_blocked_issue_if_safe(issue)
+
+    edit_body = next(command for command in commands if command[:3] == ["gh", "issue", "edit"])
+    assert "allowed_files:\n  - scripts/example.py\n```task" in edit_body[-1]
+    labels.assert_called_once_with(4403, runner.LABEL_BLOCKED, runner.LABEL_READY)
+    assert "reason=DETERMINISTIC_METADATA_REPAIRED" in comment.call_args.args[1]
+
+
+def test_blocked_self_healing_stale_active_labels_resume_ready(tmp_path: Path) -> None:
+    issue = _queue_candidate_issue(
+        4404,
+        allowed_files=("docs/stale.md",),
+        labels=(runner.LABEL_AGENT_TASK, runner.LABEL_BLOCKED, runner.LABEL_RUNNING),
+    )
+    issue["comments"] = []
+
+    with mock.patch.object(
+        runner, "control_recovery_db_path", return_value=tmp_path / "control.sqlite3"
+    ), mock.patch.object(
+        runner, "post_issue_comment"
+    ) as comment, mock.patch.object(
+        runner, "set_issue_label"
+    ) as labels:
+        assert runner.recover_blocked_issue_if_safe(issue)
+
+    labels.assert_called_once_with(4404, runner.LABEL_BLOCKED, runner.LABEL_READY)
+    assert "reason=STALE_ACTIVE_QUEUE_LABELS" in comment.call_args.args[1]
+
+
+def test_blocked_self_healing_policy_block_routes_needs_operator(tmp_path: Path) -> None:
+    issue = _queue_candidate_issue(
+        4405,
+        allowed_files=("core/protected.py",),
+        labels=(runner.LABEL_AGENT_TASK, runner.LABEL_BLOCKED),
+    )
+    issue["comments"] = [
+        {
+            "body": "\n".join(
+                (
+                    "NEEDS_OPERATOR: protected action requires explicit approval.",
+                    "reason=protected_action",
+                )
+            )
+        }
+    ]
+
+    with mock.patch.object(
+        runner, "control_recovery_db_path", return_value=tmp_path / "control.sqlite3"
+    ), mock.patch.object(
+        runner, "post_issue_comment"
+    ) as comment, mock.patch.object(
+        runner, "set_issue_label"
+    ) as labels:
+        assert runner.recover_blocked_issue_if_safe(issue)
+
+    labels.assert_called_once_with(
+        4405, runner.LABEL_BLOCKED, runner.LABEL_NEEDS_OPERATOR
+    )
+    assert "reason=POLICY_BLOCK_REQUIRES_OPERATOR" in comment.call_args.args[1]
+
+
 def test_waiting_dependency_reconciliation_releases_satisfied_dependency() -> None:
     waiting = _queue_candidate_issue(
         2610,
