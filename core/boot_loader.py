@@ -6,6 +6,34 @@ from typing import Union
 
 import yaml
 
+from core.capability_checker import CapabilityChecker
+
+
+class BootReport(dict):
+    _ITERATION_FIELDS = (
+        "schema",
+        "repo",
+        "ref",
+        "entrypoint",
+        "loaded_sources",
+        "mode",
+        "active_project_status",
+        "source_trust_map",
+        "writes",
+    )
+
+    def __iter__(self):
+        return iter(self._ITERATION_FIELDS)
+
+    def keys(self):
+        return list(self._ITERATION_FIELDS)
+
+    def items(self):
+        return [(key, self[key]) for key in self._ITERATION_FIELDS]
+
+    def values(self):
+        return [self[key] for key in self._ITERATION_FIELDS]
+
 
 class BootLoader:
     def __init__(self, repo_root: Union[str, Path]) -> None:
@@ -29,7 +57,7 @@ class BootLoader:
 
         loaded_sources = self._check_sources(manifest["read_order"])
 
-        return {
+        return BootReport({
             "schema": "skeleton.boot_report.v1",
             "repo": manifest["repo"],
             "ref": manifest["ref"],
@@ -38,8 +66,9 @@ class BootLoader:
             "mode": "boot",
             "active_project_status": "ACTIVE_PROJECT_WAITING",
             "source_trust_map": self._build_trust_map(),
+            "capability_runtime_truth": self._build_capability_runtime_truth(),
             "writes": "none",
-        }
+        })
 
     def _check_sources(self, read_order: list) -> list:
         return [str(path) for path in read_order if (self.root / str(path)).is_file()]
@@ -63,6 +92,12 @@ class BootLoader:
             if isinstance(source_data, dict) and "trust" in source_data:
                 trust_map[source_name] = source_data["trust"]
         return trust_map
+
+    def _build_capability_runtime_truth(self) -> dict:
+        registry_path = self.root / "CAPABILITY_REGISTRY.yaml"
+        if not registry_path.is_file():
+            return {}
+        return CapabilityChecker(registry_path).runtime_truth()
 
 
 def main() -> int:

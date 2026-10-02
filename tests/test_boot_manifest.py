@@ -69,3 +69,16 @@ def test_boot_output_required_fields() -> None:
         "source_trust_map",
         "writes",
     }
+
+
+def test_boot_report_includes_bounded_capability_runtime_truth() -> None:
+    from core.boot_loader import BootLoader
+
+    report = BootLoader(ROOT).load()
+    truth = report["capability_runtime_truth"]
+
+    assert truth["schema"] == "skeleton.capability_runtime_truth.v1"
+    assert truth["registry_authority"] == "CAPABILITY_REGISTRY.yaml"
+    assert truth["read_model"] == "bounded_typed_evidence_only"
+    assert truth["runtime_probe_performed"] is False
+    assert truth["runtime_mutation_performed"] is False

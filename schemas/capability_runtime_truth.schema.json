@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.capability_runtime_truth.schema.json",
+  "type": "object",
+  "required": [
+    "schema",
+    "registry_authority",
+    "read_model",
+    "runtime_probe_performed",
+    "runtime_mutation_performed",
+    "summary",
+    "capabilities"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "skeleton.capability_runtime_truth.v1"},
+    "registry_authority": {"const": "CAPABILITY_REGISTRY.yaml"},
+    "read_model": {"const": "bounded_typed_evidence_only"},
+    "runtime_probe_performed": {"const": false},
+    "runtime_mutation_performed": {"const": false},
+    "summary": {
+      "type": "object",
+      "required": [
+        "registry_capability_count",
+        "registry_available_count",
+        "typed_runtime_evidence_count",
+        "registry_available_with_runtime_evidence_count"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "registry_capability_count": {"type": "integer", "minimum": 0},
+        "registry_available_count": {"type": "integer", "minimum": 0},
+        "typed_runtime_evidence_count": {"type": "integer", "minimum": 0},
+        "registry_available_with_runtime_evidence_count": {"type": "integer", "minimum": 0}
+      }
+    },
+    "capabilities": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "capability_id",
+          "registry_status",
+          "registry_module",
+          "registry_tested",
+          "live_runtime_execution",
+          "runtime_evidence",
+          "runtime_states",
+          "truth_status"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "capability_id": {"type": "string", "minLength": 1},
+          "registry_status": {"type": ["string", "null"]},
+          "registry_module": {"type": ["string", "null"]},
+          "registry_tested": {"type": "boolean"},
+          "live_runtime_execution": {"type": "boolean"},
+          "runtime_evidence": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "schema",
+                "capability_id",
+                "runtime_state",
+                "source",
+                "evidence_ref"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "schema": {"const": "skeleton.capability_runtime_evidence.v1"},
+                "capability_id": {"type": "string", "minLength": 1},
+                "runtime_state": {
+                  "enum": ["available", "degraded", "unavailable"]
+                },
+                "source": {"type": "string", "minLength": 1},
+                "evidence_ref": {"type": "string", "minLength": 1}
+              }
+            }
+          },
+          "runtime_states": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {"enum": ["available", "degraded", "unavailable"]}
+          },
+          "truth_status": {
+            "enum": [
+              "registry_authoritative_no_runtime_evidence",
+              "registry_authoritative_runtime_evidence_ignored",
+              "registry_available_runtime_confirmed",
+              "registry_available_runtime_degraded",
+              "registry_available_runtime_unavailable"
+            ]
+          }
+        }
+      }
+    }
+  }
+}
