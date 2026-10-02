@@ -4,7 +4,8 @@ import json
 
 import pytest
 
-from core.mail_provider import MailProviderAccount, StaticMailProvider
+from core.mail_operations import MailOperationError
+from core.mail_provider import MailProviderAccount, MailProviderBatch, MailProviderCursor, StaticMailProvider
 from core.mail_runtime import MailRuntime, build_mail_dispatcher, build_mail_poll_payload
 from core.mail_state import MailStateStore
 from core.scheduler_engine import SchedulerEngine, SchedulerEngineConfig
@@ -72,6 +73,9 @@ def test_mail_runtime_is_idempotent_across_replayed_polls(tmp_path) -> None:
     assert second["processed"] == 0
     assert second["replayed"] == 1
     assert first["message_receipts"][0]["operator_packet"]["policy"]["category"] == "technical"
+    pending = runtime.state_store.pending_lifecycle_work()
+    assert pending[0]["state"] == "BLOCKED"
+    assert pending[0]["next_action"] == "operator_review_action_required_mail"
 
 
 def test_scheduler_dispatches_mail_poll_route_without_second_authority(tmp_path) -> None:
@@ -113,3 +117,87 @@ def test_explicit_fixture_mode_remains_offline_and_deterministic(tmp_path) -> No
     provider = mail_operations_worker._provider(_gmail_account(), fixture)
 
     assert isinstance(provider, StaticMailProvider)
+
+
+def test_gmail_oauth_reauthorization_blocks_and_preserves_checkpoint(tmp_path) -> None:
+    class RevokedGmailProvider:
+        provider = "gmail"
+
+        def poll(self, account: MailProviderAccount, cursor: MailProviderCursor, *, max_messages: int):
+            raise MailOperationError("GMAIL_OAUTH_REVOKED", "reauthorization required")
+
+    account = _gmail_account()
+    state = MailStateStore(tmp_path / "mail.sqlite3")
+    state.initialize()
+    state.update_cursor(
+        account_ref=account.account_ref,
+        provider="gmail",
+        cursor_ref="gmail-cursor-1",
+        now=100,
+    )
+    runtime = MailRuntime(
+        state_store=state,
+        providers={"gmail": RevokedGmailProvider()},
+        clock=lambda: 120,
+    )
+
+    receipt = runtime.process_poll_packet(build_mail_poll_payload(account)["task_packet"])
+
+    assert receipt["status"] == "BLOCKED"
+    assert receipt["reason"] == "GMAIL_OAUTH_REAUTHORIZATION_REQUIRED"
+    assert receipt["resume_from_cursor_ref"] == "gmail-cursor-1"
+    assert state.get_cursor(account.account_ref) == "gmail-cursor-1"
+    pending = state.pending_lifecycle_work()
+    assert pending[0]["state"] == "BLOCKED"
+    assert pending[0]["next_action"] == "operator_reauthorize_gmail_oauth_then_resume_checkpoint"
+
+
+def test_mail_resume_after_authorization_uses_existing_cursor(tmp_path) -> None:
+    class RevokedGmailProvider:
+        provider = "gmail"
+
+        def poll(self, account: MailProviderAccount, cursor: MailProviderCursor, *, max_messages: int):
+            raise MailOperationError("GMAIL_OAUTH_REVOKED", "reauthorization required")
+
+    account = _gmail_account()
+    state = MailStateStore(tmp_path / "mail.sqlite3")
+    state.initialize()
+    state.update_cursor(
+        account_ref=account.account_ref,
+        provider="gmail",
+        cursor_ref="gmail-cursor-1",
+        now=100,
+    )
+    blocked_runtime = MailRuntime(
+        state_store=state,
+        providers={"gmail": RevokedGmailProvider()},
+        clock=lambda: 120,
+    )
+    blocked_runtime.process_poll_packet(build_mail_poll_payload(account)["task_packet"])
+    assert state.pending_lifecycle_work()[0]["blocker_reason"] == "GMAIL_OAUTH_REAUTHORIZATION_REQUIRED"
+
+    runtime = MailRuntime(
+        state_store=state,
+        providers={
+            "gmail": StaticMailProvider(
+                [
+                    _message(
+                        provider="gmail",
+                        provider_message_ref="gmail-msg-2",
+                        subject_hint="Newsletter",
+                        body_preview="FYI digest",
+                        deadline_hint=None,
+                    )
+                ]
+            )
+        },
+        clock=lambda: 130,
+    )
+
+    receipt = runtime.process_poll_packet(build_mail_poll_payload(account)["task_packet"])
+
+    assert receipt["status"] == "DONE"
+    assert receipt["processed"] == 1
+    assert receipt["ignored"] == 1
+    assert state.get_cursor(account.account_ref) == "gmail-msg-2"
+    assert state.pending_lifecycle_work() == []

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from core.family_document_report import render_package_report
+from core.intake_lifecycle import IntakeLifecycleStore
 from core.private_memory_history import canonical_json, content_hash
 from core.telegram_notifications import TelegramNotificationError, send_telegram_notification
 
@@ -21,6 +22,8 @@ class FamilyDocumentState(Protocol):
     def mark_work_done(self, source_id: str, source_sha256: str) -> None: ...
     def mark_work_failure(self, source_id: str, source_sha256: str, reason: str, *, now: int | None = None, max_attempts: int = 5, base_delay_seconds: int = 30) -> str: ...
     def work_state_counts(self) -> dict[str, int]: ...
+    def record_lifecycle(self, **kwargs: Any) -> Mapping[str, Any]: ...
+    def pending_lifecycle_work(self, *, limit: int = 100) -> list[dict[str, Any]]: ...
     def drain(self, *, sender: Callable[[str], None] = send_telegram_notification, limit: int = 20) -> dict[str, object]: ...
     def state_counts(self) -> dict[str, int]: ...
 
@@ -30,6 +33,7 @@ class FamilyDocumentReceiptOutbox:
 
     def __init__(self, db_path: Path) -> None:
         self.db_path = db_path
+        self.lifecycle = IntakeLifecycleStore(db_path)
         self._ensure_schema()
 
     def enqueue(self, receipt: Mapping[str, Any]) -> bool:
@@ -55,6 +59,13 @@ class FamilyDocumentReceiptOutbox:
                 )
         return True
 
+    def record_lifecycle(self, **kwargs: Any) -> Mapping[str, Any]:
+        item = self.lifecycle.record(item_kind="document", **kwargs)
+        return item.public_mapping()
+
+    def pending_lifecycle_work(self, *, limit: int = 100) -> list[dict[str, Any]]:
+        return self.lifecycle.pending_work(item_kind="document", limit=limit)
+
     def should_process(self, source_id: str, source_sha256: str, *, now: int | None = None) -> bool:
         current = int(time.time()) if now is None else int(now)
         with closing(sqlite3.connect(str(self.db_path))) as connection:
@@ -79,6 +90,15 @@ class FamilyDocumentReceiptOutbox:
                     """,
                     (source_id, source_sha256),
                 )
+        self.record_lifecycle(
+            source_ref=source_id,
+            source_hash=source_sha256,
+            state="DONE",
+            blocker_reason="COMPLETED",
+            next_action="none",
+            provenance_refs=(f"document:{source_id}",),
+            now=int(time.time()),
+        )
 
     def mark_work_failure(
         self,
@@ -113,6 +133,17 @@ class FamilyDocumentReceiptOutbox:
                     """,
                     (source_id, source_sha256, state, attempts, current + delay, safe_reason),
                 )
+        lifecycle_state = "BLOCKED" if state == "REVIEW" else "DEFERRED"
+        next_action = "operator_review_failed_document_intake" if state == "REVIEW" else "retry_document_intake_after_backoff"
+        self.record_lifecycle(
+            source_ref=source_id,
+            source_hash=source_sha256,
+            state=lifecycle_state,
+            blocker_reason=safe_reason or "DOCUMENT_INTAKE_FAILED",
+            next_action=next_action,
+            provenance_refs=(f"document:{source_id}",),
+            now=current,
+        )
         return state
 
     def work_state_counts(self) -> dict[str, int]:
@@ -237,4 +268,5 @@ class FamilyDocumentReceiptOutbox:
                 """
             )
             connection.commit()
+        self.lifecycle.initialize()
         self.db_path.chmod(0o600)
