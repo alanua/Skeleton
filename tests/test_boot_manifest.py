@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import yaml
@@ -89,9 +90,12 @@ def test_boot_report_mapping_methods_include_capability_runtime_truth() -> None:
 
     report = BootLoader(ROOT).load()
 
+    assert type(report) is dict
     assert "capability_runtime_truth" in report.keys()
+    assert "capability_runtime_truth" in list(report)
     assert "capability_runtime_truth" in dict(report.items())
     assert report["capability_runtime_truth"] in report.values()
+    assert "capability_runtime_truth" in json.loads(json.dumps(report))
 
 
 def test_boot_loader_accepts_optional_typed_runtime_evidence_boundary() -> None:
@@ -105,17 +109,23 @@ def test_boot_loader_accepts_optional_typed_runtime_evidence_boundary() -> None:
                 runtime_state="available",
                 source="unit_test",
                 evidence_ref="test_boot_manifest",
+                observed_at="2026-10-01T00:00:00Z",
+                runtime_bound=True,
+                source_runtime_parity=True,
+                usable_interfaces=("BootLoader.load",),
             )
-        ]
+        ],
+        runtime_truth_checked_at="2026-10-02T00:00:00Z",
     )
     truth = report["capability_runtime_truth"]
     boot_loader = next(
         item for item in truth["capabilities"] if item["capability_id"] == "boot_loader"
     )
 
-    assert boot_loader["derived_runtime_state"] == "available"
-    assert boot_loader["runtime_evidence_state"] == "accepted_runtime_evidence"
-    assert boot_loader["registry_runtime_relation"] == "runtime_matches_registry"
+    assert boot_loader["effective_status"] == "LIVE"
+    assert boot_loader["freshness"] == "FRESH"
+    assert boot_loader["runtime_bound"] is True
+    assert boot_loader["source_runtime_parity"] is True
 
 
 def test_boot_loader_accepts_deterministic_runtime_truth_clock() -> None:

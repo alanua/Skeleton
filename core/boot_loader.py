@@ -11,25 +11,6 @@ from core.capability_checker import CapabilityChecker
 from core.capability_runtime_truth import RuntimeCapabilityEvidence
 
 
-class BootReport(dict):
-    """Boot report mapping with legacy v1 iteration compatibility."""
-
-    _ITERATION_FIELDS = (
-        "schema",
-        "repo",
-        "ref",
-        "entrypoint",
-        "loaded_sources",
-        "mode",
-        "active_project_status",
-        "source_trust_map",
-        "writes",
-    )
-
-    def __iter__(self):
-        return iter(self._ITERATION_FIELDS)
-
-
 class BootLoader:
     def __init__(
         self,
@@ -62,7 +43,7 @@ class BootLoader:
 
         loaded_sources = self._check_sources(manifest["read_order"])
 
-        return BootReport({
+        return {
             "schema": "skeleton.boot_report.v1",
             "repo": manifest["repo"],
             "ref": manifest["ref"],
@@ -76,7 +57,7 @@ class BootLoader:
                 now=runtime_truth_checked_at,
             ),
             "writes": "none",
-        })
+        }
 
     def _check_sources(self, read_order: list) -> list:
         return [str(path) for path in read_order if (self.root / str(path)).is_file()]

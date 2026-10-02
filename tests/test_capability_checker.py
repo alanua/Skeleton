@@ -8,6 +8,7 @@ from core.capability_runtime_truth import RuntimeCapabilityEvidence
 
 ROOT = Path(__file__).resolve().parents[1]
 REGISTRY_PATH = ROOT / "CAPABILITY_REGISTRY.yaml"
+NOW = "2026-10-02T00:00:00Z"
 
 
 def test_capability_checker_runtime_truth_is_bounded_read_only() -> None:
@@ -19,7 +20,7 @@ def test_capability_checker_runtime_truth_is_bounded_read_only() -> None:
     assert truth["runtime_probe_performed"] is False
     assert truth["runtime_mutation_performed"] is False
     assert truth["summary"]["typed_runtime_evidence_count"] == 0
-    assert truth["summary"]["accepted_runtime_evidence_count"] == 0
+    assert truth["summary"]["fresh_runtime_evidence_count"] == 0
 
 
 def test_capability_checker_runtime_truth_accepts_typed_evidence() -> None:
@@ -28,19 +29,23 @@ def test_capability_checker_runtime_truth_accepts_typed_evidence() -> None:
         runtime_state="available",
         source="unit_test",
         evidence_ref="test_capability_checker",
+        observed_at="2026-10-01T00:00:00Z",
+        runtime_bound=True,
+        source_runtime_parity=True,
+        usable_interfaces=("BootLoader.load",),
     )
 
-    truth = CapabilityChecker(REGISTRY_PATH).runtime_truth([evidence])
+    truth = CapabilityChecker(REGISTRY_PATH).runtime_truth([evidence], now=NOW)
     boot_loader = next(
         item for item in truth["capabilities"] if item["capability_id"] == "boot_loader"
     )
 
-    assert boot_loader["registry_status"] == "available"
-    assert boot_loader["runtime_states"] == ["available"]
-    assert boot_loader["accepted_runtime_states"] == ["available"]
-    assert boot_loader["derived_runtime_state"] == "available"
-    assert boot_loader["runtime_evidence_state"] == "accepted_runtime_evidence"
-    assert boot_loader["registry_runtime_relation"] == "runtime_matches_registry"
+    assert boot_loader["declared_status"] == "available"
+    assert boot_loader["effective_status"] == "LIVE"
+    assert boot_loader["freshness"] == "FRESH"
+    assert boot_loader["runtime_bound"] is True
+    assert boot_loader["source_runtime_parity"] is True
+    assert boot_loader["usable_interfaces"] == ["BootLoader.load"]
 
 
 def test_capability_checker_runtime_truth_accepts_deterministic_clock() -> None:
@@ -49,3 +54,13 @@ def test_capability_checker_runtime_truth_accepts_deterministic_clock() -> None:
     )
 
     assert truth["checked_at"] == "2026-10-02T00:00:00Z"
+
+
+def test_capability_checker_registry_available_without_evidence_is_not_live() -> None:
+    truth = CapabilityChecker(REGISTRY_PATH).runtime_truth(now=NOW)
+    boot_loader = next(
+        item for item in truth["capabilities"] if item["capability_id"] == "boot_loader"
+    )
+
+    assert boot_loader["declared_status"] == "available"
+    assert boot_loader["effective_status"] != "LIVE"
