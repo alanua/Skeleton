@@ -53,6 +53,22 @@ class FamilyDocumentRuntime:
         review_required = 0
         skipped = 0
         for document in self.source.scan():
+            artifact_ref = f"document:{document.source_id}"
+            self.state.record_lifecycle(
+                source_ref=document.source_id,
+                source_hash=document.sha256,
+                state="RECEIVED",
+                blocker_reason="AWAITING_PRESERVATION",
+                next_action="preserve_original_artifact",
+                provenance_refs=(artifact_ref,),
+                artifact_refs=(
+                    {
+                        "artifact_ref": artifact_ref,
+                        "artifact_sha256": document.sha256,
+                        "kind": "original",
+                    },
+                ),
+            )
             if not self.state.should_process(document.source_id, document.sha256):
                 skipped += 1
                 continue
@@ -62,14 +78,49 @@ class FamilyDocumentRuntime:
                     source_id=document.source_id,
                     source_sha256=document.sha256,
                 )
+                self.state.record_lifecycle(
+                    source_ref=document.source_id,
+                    source_hash=document.sha256,
+                    state="PRESERVED",
+                    blocker_reason="AWAITING_CLASSIFICATION",
+                    next_action="classify_document",
+                    provenance_refs=(artifact_ref,),
+                    artifact_refs=(
+                        {
+                            "artifact_ref": artifact_ref,
+                            "artifact_sha256": document.sha256,
+                            "kind": "original",
+                        },
+                    ),
+                )
                 classification = self.classifier(request.ocr_text) if self.classifier else {
                     "route": "REVIEW",
                     "reason_codes": ["CLASSIFIER_NOT_CONFIGURED"],
                     "event_candidates": [],
                 }
                 record = build_family_document_record(request, classification)
+                self.state.record_lifecycle(
+                    source_ref=document.source_id,
+                    source_hash=document.sha256,
+                    state="CLASSIFIED",
+                    blocker_reason="AWAITING_MEMORY_ARCHIVE",
+                    next_action="archive_document_record",
+                    provenance_refs=(artifact_ref,),
+                    record_ref=f"family_document:{record['record_id']}",
+                )
                 archive_receipt = self.archive_sink.archive(record, source_path=document.path)
                 _require_authoritative_archive_receipt(archive_receipt)
+                canonical_ref = str(archive_receipt.get("canonical_ref") or f"family_document:{record['record_id']}")
+                self.state.record_lifecycle(
+                    source_ref=document.source_id,
+                    source_hash=document.sha256,
+                    state="INDEXED",
+                    blocker_reason="AWAITING_COMPLETION_RECEIPT",
+                    next_action="finish_document_intake",
+                    provenance_refs=(artifact_ref, canonical_ref),
+                    canonical_ref=canonical_ref,
+                    record_ref=f"family_document:{record['record_id']}",
+                )
                 calendar_receipt = self.calendar.upsert(record)
                 _require_calendar_receipt(calendar_receipt)
                 report_record = dict(record)
