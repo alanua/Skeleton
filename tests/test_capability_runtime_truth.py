@@ -59,10 +59,14 @@ def test_reconciler_preserves_registry_authority_without_evidence() -> None:
         "registry_available_count": 1,
         "typed_runtime_evidence_count": 0,
         "fresh_verified_runtime_evidence_count": 0,
-        "effective_available_count": 1,
+        "effective_available_count": 0,
         "drift_count": 0,
         "parity_match_count": 0,
     }
+    assert {item["effective_state"] for item in truth["capabilities"]} == {
+        "unavailable"
+    }
+    assert {item["live_runtime_execution"] for item in truth["capabilities"]} == {False}
     assert {item["freshness"] for item in truth["capabilities"]} == {
         "no_runtime_evidence"
     }
@@ -105,6 +109,7 @@ def test_fresh_verified_runtime_evidence_derives_effective_state_without_mutatin
     capabilities = {item["capability_id"]: item for item in truth["capabilities"]}
 
     assert capabilities["available_capability"]["effective_state"] == "available"
+    assert capabilities["available_capability"]["live_runtime_execution"] is True
     assert capabilities["available_capability"]["drift"] == "no_drift"
     assert capabilities["available_capability"]["parity"] == "registry_runtime_parity"
     assert capabilities["planned_capability"]["registry_status"] == "planned"
@@ -147,7 +152,8 @@ def test_stale_or_unverified_runtime_evidence_cannot_override_registry() -> None
         "stale_or_unverified_runtime_evidence"
     )
     assert capabilities["planned_capability"]["parity"] == "registry_runtime_drift"
-    assert capabilities["available_capability"]["effective_state"] == "available"
+    assert capabilities["available_capability"]["effective_state"] == "unavailable"
+    assert capabilities["available_capability"]["live_runtime_execution"] is False
 
 
 def test_conflicting_fresh_runtime_evidence_uses_most_restrictive_effective_state() -> None:
@@ -188,6 +194,7 @@ def test_conflicting_fresh_runtime_evidence_uses_most_restrictive_effective_stat
         "unavailable",
     ]
     assert available["effective_state"] == "unavailable"
+    assert available["live_runtime_execution"] is False
     assert available["drift"] == "runtime_conflicts_with_registry"
     assert available["parity"] == "registry_runtime_drift"
     assert "RUNTIME_CONFLICTS_WITH_REGISTRY" in available["reason_codes"]
@@ -242,7 +249,7 @@ def test_legacy_and_superseded_registry_statuses_are_never_effectively_available
     assert "SUPERSEDED_CAPABILITY" in by_id["newer"]["reason_codes"]
 
 
-def test_source_presence_and_interface_usability_are_static_registry_checks(
+def test_source_presence_and_interface_usability_require_fresh_verified_runtime_truth(
     tmp_path: Path,
 ) -> None:
     (tmp_path / "present.py").write_text("# fixture\n", encoding="utf-8")
@@ -262,10 +269,30 @@ def test_source_presence_and_interface_usability_are_static_registry_checks(
     by_id = {item["capability_id"]: item for item in truth["capabilities"]}
 
     assert by_id["present"]["source_presence"] == "present"
-    assert by_id["present"]["interface_usable"] is True
+    assert by_id["present"]["interface_usable"] is False
     assert by_id["missing"]["source_presence"] == "missing"
     assert by_id["missing"]["interface_usable"] is False
     assert "REGISTRY_SOURCE_MISSING" in by_id["missing"]["reason_codes"]
+
+    verified_truth = reconcile_capability_runtime_truth(
+        source,
+        [
+            RuntimeCapabilityEvidence(
+                capability_id="present",
+                runtime_state="available",
+                source="fixture",
+                evidence_ref="typed",
+            )
+        ],
+        source_root=tmp_path,
+        now="2026-10-02T00:00:00Z",
+    )
+    verified_by_id = {
+        item["capability_id"]: item for item in verified_truth["capabilities"]
+    }
+
+    assert verified_by_id["present"]["interface_usable"] is True
+    assert verified_by_id["missing"]["interface_usable"] is False
 
 
 def test_reconciler_rejects_untyped_evidence() -> None:

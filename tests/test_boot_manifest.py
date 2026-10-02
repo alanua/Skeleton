@@ -116,3 +116,13 @@ def test_boot_loader_accepts_optional_typed_runtime_evidence_boundary() -> None:
     assert boot_loader["effective_state"] == "available"
     assert boot_loader["freshness"] == "fresh_verified_runtime_evidence"
     assert boot_loader["drift"] == "no_drift"
+
+
+def test_boot_loader_accepts_deterministic_runtime_truth_clock() -> None:
+    from core.boot_loader import BootLoader
+
+    report = BootLoader(ROOT).load(
+        runtime_truth_checked_at="2026-10-02T00:00:00Z",
+    )
+
+    assert report["capability_runtime_truth"]["checked_at"] == "2026-10-02T00:00:00Z"

@@ -154,16 +154,18 @@ def reconcile_capability_runtime_truth(
         fresh_verified_evidence = tuple(
             item for item in capability_evidence if item.fresh_verified(checked_at)
         )
-        effective_state = _effective_state(registry_state, fresh_verified_evidence)
+        effective_state = _effective_state(fresh_verified_evidence)
         freshness = _freshness(capability_evidence, fresh_verified_evidence)
         drift = _drift(registry_state, effective_state, freshness)
         parity = _parity(freshness, drift)
         source_presence = _source_presence(capability, source_root)
         interface_usable = _interface_usable(
             capability,
-            registry_state=registry_state,
+            effective_state=effective_state,
+            freshness=freshness,
             source_presence=source_presence,
         )
+        live_runtime_execution = _live_runtime_execution(effective_state, freshness)
         evidence_binding = (
             "all_runtime_evidence_bound"
             if capability_evidence
@@ -189,9 +191,7 @@ def reconcile_capability_runtime_truth(
                 "registry_lifecycle": _registry_lifecycle(status),
                 "registry_module": capability.get("module"),
                 "registry_tested": bool(capability.get("tested", False)),
-                "live_runtime_execution": bool(
-                    capability.get("live_runtime_execution", False)
-                ),
+                "live_runtime_execution": live_runtime_execution,
                 "runtime_evidence": [
                     item.to_dict(checked_at) for item in capability_evidence
                 ],
@@ -280,10 +280,10 @@ def _normalized_status(registry_status: Any) -> str:
 
 
 def _effective_state(
-    registry_state: str, fresh_verified_evidence: tuple[RuntimeCapabilityEvidence, ...]
+    fresh_verified_evidence: tuple[RuntimeCapabilityEvidence, ...],
 ) -> str:
     if not fresh_verified_evidence:
-        return registry_state
+        return "unavailable"
     return max(
         (item.runtime_state for item in fresh_verified_evidence),
         key=lambda state: RUNTIME_STATE_SEVERITY[state],
@@ -335,14 +335,24 @@ def _source_presence(capability: Mapping[str, Any], source_root: str | Path | No
 def _interface_usable(
     capability: Mapping[str, Any],
     *,
-    registry_state: str,
+    effective_state: str,
+    freshness: str,
     source_presence: str,
 ) -> bool:
-    if registry_state != "available":
+    if freshness != "fresh_verified_runtime_evidence":
+        return False
+    if effective_state != "available":
         return False
     if not bool(capability.get("tested", False)):
         return False
     return source_presence in {"present", "not_checked"}
+
+
+def _live_runtime_execution(effective_state: str, freshness: str) -> bool:
+    return (
+        freshness == "fresh_verified_runtime_evidence"
+        and effective_state == "available"
+    )
 
 
 def _reason_codes(

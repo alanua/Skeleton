@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
 from typing import Iterable, Union
 
@@ -42,6 +43,7 @@ class BootLoader:
         self,
         manifest_path: str = "BOOT_MANIFEST.yaml",
         runtime_evidence: Iterable[RuntimeCapabilityEvidence] | None = None,
+        runtime_truth_checked_at: datetime | str | None = None,
     ) -> dict:
         manifest_file = self.root / manifest_path
         manifest = yaml.safe_load(manifest_file.read_text(encoding="utf-8"))
@@ -70,7 +72,8 @@ class BootLoader:
             "active_project_status": "ACTIVE_PROJECT_WAITING",
             "source_trust_map": self._build_trust_map(),
             "capability_runtime_truth": self._build_capability_runtime_truth(
-                self.runtime_evidence if runtime_evidence is None else runtime_evidence
+                self.runtime_evidence if runtime_evidence is None else runtime_evidence,
+                now=runtime_truth_checked_at,
             ),
             "writes": "none",
         })
@@ -99,12 +102,15 @@ class BootLoader:
         return trust_map
 
     def _build_capability_runtime_truth(
-        self, runtime_evidence: Iterable[RuntimeCapabilityEvidence] = ()
+        self,
+        runtime_evidence: Iterable[RuntimeCapabilityEvidence] = (),
+        *,
+        now: datetime | str | None = None,
     ) -> dict:
         registry_path = self.root / "CAPABILITY_REGISTRY.yaml"
         if not registry_path.is_file():
             return {}
-        return CapabilityChecker(registry_path).runtime_truth(runtime_evidence)
+        return CapabilityChecker(registry_path).runtime_truth(runtime_evidence, now=now)
 
 
 def main() -> int:

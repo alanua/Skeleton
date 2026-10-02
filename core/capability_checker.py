@@ -1,3 +1,4 @@
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable, Union
 
@@ -38,10 +39,14 @@ class CapabilityChecker:
         return bool(capability and capability.get("status") == "available")
 
     def runtime_truth(
-        self, evidence: Iterable[RuntimeCapabilityEvidence] = ()
+        self,
+        evidence: Iterable[RuntimeCapabilityEvidence] = (),
+        *,
+        now: datetime | str | None = None,
     ) -> dict[str, Any]:
         return reconcile_capability_runtime_truth(
             self.load(),
             evidence,
             source_root=self.registry_path.parent,
+            now=now,
         )

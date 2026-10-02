@@ -42,3 +42,11 @@ def test_capability_checker_runtime_truth_accepts_typed_evidence() -> None:
     assert boot_loader["freshness"] == "fresh_verified_runtime_evidence"
     assert boot_loader["drift"] == "no_drift"
     assert boot_loader["parity"] == "registry_runtime_parity"
+
+
+def test_capability_checker_runtime_truth_accepts_deterministic_clock() -> None:
+    truth = CapabilityChecker(REGISTRY_PATH).runtime_truth(
+        now="2026-10-02T00:00:00Z",
+    )
+
+    assert truth["checked_at"] == "2026-10-02T00:00:00Z"
