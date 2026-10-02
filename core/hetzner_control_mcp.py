@@ -7,6 +7,11 @@ from typing import Protocol
 
 from core.action_gate import ActionGateRequest, validate_action_request
 from core.runner_controller_privileged_gateway import LocalSudoGatewayTransport
+from core.telegram_mcp_readonly import (
+    TELEGRAM_TOOL_NAMES,
+    TelegramReadonlyMcpDispatcher,
+    tool_descriptions as telegram_tool_descriptions,
+)
 
 
 MCP_SCHEMA = "skeleton.hetzner_control_mcp.v1"
@@ -72,13 +77,17 @@ def tool_descriptions() -> tuple[dict[str, object], ...]:
 @dataclass(frozen=True)
 class HetznerControlMcpDispatcher:
     privileged_gateway: PrivilegedGatewayTransport
+    telegram_readonly: TelegramReadonlyMcpDispatcher
 
     @classmethod
     def production(cls) -> "HetznerControlMcpDispatcher":
-        return cls(privileged_gateway=LocalSudoGatewayTransport())
+        return cls(
+            privileged_gateway=LocalSudoGatewayTransport(),
+            telegram_readonly=TelegramReadonlyMcpDispatcher.production(),
+        )
 
     def list_tools(self) -> tuple[dict[str, object], ...]:
-        return tool_descriptions()
+        return (*tool_descriptions(), *telegram_tool_descriptions())
 
     def call_tool(self, name: str, arguments: Mapping[str, object]) -> dict[str, object]:
         if not isinstance(arguments, Mapping):
@@ -87,6 +96,8 @@ class HetznerControlMcpDispatcher:
             return self._action_gate(arguments)
         if name == RUNNER_PRIVILEGED_TOOL:
             return self._runner_privileged_gateway(arguments)
+        if name in TELEGRAM_TOOL_NAMES:
+            return self.telegram_readonly.call_tool(name, arguments)
         return _blocked("UNSUPPORTED_TOOL")
 
     def _action_gate(self, arguments: Mapping[str, object]) -> dict[str, object]:
@@ -194,7 +205,13 @@ def _blocked(reason: str, *, tool: str | None = None) -> dict[str, object]:
 
 def _is_error_result(result: Mapping[str, object]) -> bool:
     payload = result.get("result")
-    return isinstance(payload, Mapping) and payload.get("status") in {"blocked", "NEEDS_OPERATOR"}
+    return isinstance(payload, Mapping) and payload.get("status") in {
+        "blocked",
+        "BLOCKED",
+        "AUTH_REQUIRED",
+        "FLOOD_WAIT",
+        "NEEDS_OPERATOR",
+    }
 
 
 def _required_str(arguments: Mapping[str, object], key: str) -> str:

@@ -12,6 +12,7 @@ from core.hetzner_control_mcp import (
     HetznerControlMcpDispatcher,
     handle_jsonrpc_message,
 )
+from core.telegram_mcp_readonly import SEARCH_TOOL, TELEGRAM_TOOL_NAMES, TelegramReadonlyMcpDispatcher
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -45,12 +46,15 @@ class CapturingPrivilegedGateway:
 
 
 def dispatcher() -> HetznerControlMcpDispatcher:
-    return HetznerControlMcpDispatcher(privileged_gateway=CapturingPrivilegedGateway())
+    return HetznerControlMcpDispatcher(
+        privileged_gateway=CapturingPrivilegedGateway(),
+        telegram_readonly=TelegramReadonlyMcpDispatcher.production(),
+    )
 
 
-def test_tools_are_minimal_named_gateway_facades_without_exec_arguments() -> None:
+def test_tools_include_control_gateways_and_exact_six_telegram_readonly_facades() -> None:
     tools = dispatcher().list_tools()
-    assert [tool["name"] for tool in tools] == [ACTION_GATE_TOOL, RUNNER_PRIVILEGED_TOOL]
+    assert [tool["name"] for tool in tools] == [ACTION_GATE_TOOL, RUNNER_PRIVILEGED_TOOL, *TELEGRAM_TOOL_NAMES]
 
     exposed_properties = {
         property_name
@@ -84,7 +88,10 @@ def test_action_gate_tool_reuses_existing_action_gate_contract() -> None:
 
 def test_runner_privileged_tool_delegates_exact_request_to_gateway_transport() -> None:
     gateway = CapturingPrivilegedGateway()
-    active = HetznerControlMcpDispatcher(privileged_gateway=gateway)
+    active = HetznerControlMcpDispatcher(
+        privileged_gateway=gateway,
+        telegram_readonly=TelegramReadonlyMcpDispatcher.production(),
+    )
     request = {"schema": "skeleton.runner_controller_privileged_request.v1", "request_id": "req"}
 
     result = active.call_tool(RUNNER_PRIVILEGED_TOOL, {"request": request})
@@ -96,13 +103,49 @@ def test_runner_privileged_tool_delegates_exact_request_to_gateway_transport() -
 
 def test_unsupported_tools_fail_closed_before_gateway() -> None:
     gateway = CapturingPrivilegedGateway()
-    active = HetznerControlMcpDispatcher(privileged_gateway=gateway)
+    active = HetznerControlMcpDispatcher(
+        privileged_gateway=gateway,
+        telegram_readonly=TelegramReadonlyMcpDispatcher.production(),
+    )
 
     result = active.call_tool("shell", {"argv": ["id"]})
 
     assert result["result"]["status"] == "blocked"
     assert result["result"]["reason"] == "UNSUPPORTED_TOOL"
     assert gateway.requests == []
+
+
+def test_global_telegram_tools_fail_closed_until_runtime_binding_exists() -> None:
+    gateway = CapturingPrivilegedGateway()
+    active = HetznerControlMcpDispatcher(
+        privileged_gateway=gateway,
+        telegram_readonly=TelegramReadonlyMcpDispatcher.production(),
+    )
+
+    result = active.call_tool(SEARCH_TOOL, {"query": "quantum"})
+
+    assert result["tool"] == SEARCH_TOOL
+    assert result["result"] == {"status": "BLOCKED", "reason_code": "BACKEND_UNAVAILABLE"}
+    assert gateway.requests == []
+
+
+def test_global_telegram_jsonrpc_failure_is_marked_as_error() -> None:
+    active = dispatcher()
+
+    called = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {"name": SEARCH_TOOL, "arguments": {"query": "quantum"}},
+        },
+        dispatcher=active,
+    )
+
+    assert called is not None
+    assert called["result"]["isError"] is True
+    payload = json.loads(called["result"]["content"][0]["text"])
+    assert payload["result"] == {"status": "BLOCKED", "reason_code": "BACKEND_UNAVAILABLE"}
 
 
 def test_jsonrpc_boundary_lists_and_calls_tools() -> None:
@@ -182,5 +225,5 @@ def test_installed_form_launcher_resolves_registered_checkout_outside_repo_cwd(t
     responses = [json.loads(line) for line in completed.stdout.splitlines()]
     assert responses[0]["result"]["serverInfo"]["name"] == "skeleton-control-hetzner"
     tools = responses[1]["result"]["tools"]
-    assert [tool["name"] for tool in tools] == [ACTION_GATE_TOOL, RUNNER_PRIVILEGED_TOOL]
-    assert len(tools) == 2
+    assert [tool["name"] for tool in tools] == [ACTION_GATE_TOOL, RUNNER_PRIVILEGED_TOOL, *TELEGRAM_TOOL_NAMES]
+    assert len(tools) == 8
