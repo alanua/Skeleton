@@ -6,6 +6,7 @@
     "schema",
     "registry_authority",
     "read_model",
+    "checked_at",
     "runtime_probe_performed",
     "runtime_mutation_performed",
     "summary",
@@ -16,6 +17,7 @@
     "schema": {"const": "skeleton.capability_runtime_truth.v1"},
     "registry_authority": {"const": "CAPABILITY_REGISTRY.yaml"},
     "read_model": {"const": "bounded_typed_evidence_only"},
+    "checked_at": {"type": "string", "minLength": 1},
     "runtime_probe_performed": {"const": false},
     "runtime_mutation_performed": {"const": false},
     "summary": {
@@ -27,7 +29,10 @@
         "fresh_verified_runtime_evidence_count",
         "effective_available_count",
         "drift_count",
-        "parity_match_count"
+        "parity_match_count",
+        "source_present_count",
+        "source_missing_count",
+        "interface_usable_count"
       ],
       "additionalProperties": false,
       "properties": {
@@ -37,7 +42,10 @@
         "fresh_verified_runtime_evidence_count": {"type": "integer", "minimum": 0},
         "effective_available_count": {"type": "integer", "minimum": 0},
         "drift_count": {"type": "integer", "minimum": 0},
-        "parity_match_count": {"type": "integer", "minimum": 0}
+        "parity_match_count": {"type": "integer", "minimum": 0},
+        "source_present_count": {"type": "integer", "minimum": 0},
+        "source_missing_count": {"type": "integer", "minimum": 0},
+        "interface_usable_count": {"type": "integer", "minimum": 0}
       }
     },
     "capabilities": {
@@ -48,6 +56,7 @@
           "capability_id",
           "registry_status",
           "registry_effective_state",
+          "registry_lifecycle",
           "registry_module",
           "registry_tested",
           "live_runtime_execution",
@@ -57,7 +66,11 @@
           "effective_state",
           "freshness",
           "drift",
-          "parity"
+          "parity",
+          "source_presence",
+          "interface_usable",
+          "evidence_binding",
+          "reason_codes"
         ],
         "additionalProperties": false,
         "properties": {
@@ -65,6 +78,9 @@
           "registry_status": {"type": ["string", "null"]},
           "registry_effective_state": {
             "enum": ["available", "unavailable"]
+          },
+          "registry_lifecycle": {
+            "enum": ["active", "legacy", "superseded"]
           },
           "registry_module": {"type": ["string", "null"]},
           "registry_tested": {"type": "boolean"},
@@ -80,7 +96,9 @@
                 "source",
                 "evidence_ref",
                 "fresh",
-                "verified"
+                "verified",
+                "time_fresh",
+                "fresh_verified"
               ],
               "additionalProperties": false,
               "properties": {
@@ -92,7 +110,11 @@
                 "source": {"type": "string", "minLength": 1},
                 "evidence_ref": {"type": "string", "minLength": 1},
                 "fresh": {"type": "boolean"},
-                "verified": {"type": "boolean"}
+                "verified": {"type": "boolean"},
+                "time_fresh": {"type": "boolean"},
+                "fresh_verified": {"type": "boolean"},
+                "observed_at": {"type": "string", "minLength": 1},
+                "expires_at": {"type": "string", "minLength": 1}
               }
             }
           },
@@ -130,6 +152,18 @@
               "registry_runtime_parity",
               "registry_runtime_drift"
             ]
+          },
+          "source_presence": {
+            "enum": ["present", "missing", "not_checked"]
+          },
+          "interface_usable": {"type": "boolean"},
+          "evidence_binding": {
+            "enum": ["no_runtime_evidence", "all_runtime_evidence_bound"]
+          },
+          "reason_codes": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {"type": "string", "pattern": "^[A-Z0-9_]+$"}
           }
         }
       }

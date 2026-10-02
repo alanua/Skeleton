@@ -84,6 +84,16 @@ def test_boot_report_includes_bounded_capability_runtime_truth() -> None:
     assert truth["runtime_mutation_performed"] is False
 
 
+def test_boot_report_mapping_methods_include_capability_runtime_truth() -> None:
+    from core.boot_loader import BootLoader
+
+    report = BootLoader(ROOT).load()
+
+    assert "capability_runtime_truth" in report.keys()
+    assert "capability_runtime_truth" in dict(report.items())
+    assert report["capability_runtime_truth"] in report.values()
+
+
 def test_boot_loader_accepts_optional_typed_runtime_evidence_boundary() -> None:
     from core.boot_loader import BootLoader
     from core.capability_runtime_truth import RuntimeCapabilityEvidence

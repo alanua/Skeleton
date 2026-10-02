@@ -40,4 +40,8 @@ class CapabilityChecker:
     def runtime_truth(
         self, evidence: Iterable[RuntimeCapabilityEvidence] = ()
     ) -> dict[str, Any]:
-        return reconcile_capability_runtime_truth(self.load(), evidence)
+        return reconcile_capability_runtime_truth(
+            self.load(),
+            evidence,
+            source_root=self.registry_path.parent,
+        )

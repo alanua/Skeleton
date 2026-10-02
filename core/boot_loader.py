@@ -11,6 +11,8 @@ from core.capability_runtime_truth import RuntimeCapabilityEvidence
 
 
 class BootReport(dict):
+    """Boot report mapping with legacy v1 iteration compatibility."""
+
     _ITERATION_FIELDS = (
         "schema",
         "repo",
@@ -25,15 +27,6 @@ class BootReport(dict):
 
     def __iter__(self):
         return iter(self._ITERATION_FIELDS)
-
-    def keys(self):
-        return list(self._ITERATION_FIELDS)
-
-    def items(self):
-        return [(key, self[key]) for key in self._ITERATION_FIELDS]
-
-    def values(self):
-        return [self[key] for key in self._ITERATION_FIELDS]
 
 
 class BootLoader:
