@@ -165,6 +165,81 @@ def test_blocked_and_deferred_items_resume_with_explicit_transition_policy(tmp_p
     assert resumed_again.state == "PROCESSING"
 
 
+def test_invalid_backward_record_transition_raises_and_preserves_prior_row(tmp_path) -> None:
+    store = IntakeLifecycleStore(tmp_path / "state.sqlite3")
+    original = store.record(
+        item_kind="document",
+        source_ref="document:backward",
+        source_hash="f" * 64,
+        state="PROCESSING",
+        blocker_reason="WORK_IN_PROGRESS",
+        next_action="finish_document_intake",
+        provenance_refs=("document:backward",),
+        artifact_refs=(
+            {
+                "artifact_ref": "artifact:before",
+                "artifact_sha256": "f" * 64,
+                "kind": "original",
+            },
+        ),
+        record_ref="family_document:before",
+        branch_ref="chat-before",
+        now=50,
+    )
+    before = store.get(original.intake_id)
+    assert before is not None
+
+    with pytest.raises(IntakeLifecycleError, match="PROCESSING -> CLASSIFIED"):
+        store.record(
+            item_kind="document",
+            source_ref="document:backward",
+            source_hash="f" * 64,
+            state="CLASSIFIED",
+            blocker_reason="AWAITING_MEMORY_ARCHIVE",
+            next_action="archive_document_record",
+            provenance_refs=("family_document:after",),
+            artifact_refs=(
+                {
+                    "artifact_ref": "artifact:after",
+                    "artifact_sha256": "1" * 64,
+                    "kind": "derived",
+                },
+            ),
+            record_ref="family_document:after",
+            branch_ref="chat-after",
+            now=60,
+        )
+
+    assert store.get(original.intake_id) == before
+
+
+def test_invalid_backward_update_existing_transition_raises_and_preserves_prior_row(tmp_path) -> None:
+    store = IntakeLifecycleStore(tmp_path / "state.sqlite3")
+    original = store.record(
+        item_kind="mail",
+        source_ref="acct:backward",
+        source_hash="9" * 64,
+        state="DONE",
+        blocker_reason="NONE",
+        next_action="none",
+        provenance_refs=("mail:done",),
+        now=70,
+    )
+    before = store.get(original.intake_id)
+    assert before is not None
+
+    with pytest.raises(IntakeLifecycleError, match="DONE -> PROCESSING"):
+        store.update_existing(
+            original.intake_id,
+            state="PROCESSING",
+            blocker_reason="MAIL_PROCESSING_IN_PROGRESS",
+            next_action="classify_mail_for_operator_action",
+            now=80,
+        )
+
+    assert store.get(original.intake_id) == before
+
+
 def test_shared_pending_lifecycle_work_is_public_safe_and_read_only(tmp_path) -> None:
     document_store = IntakeLifecycleStore(tmp_path / "document.sqlite3")
     mail_store = IntakeLifecycleStore(tmp_path / "mail.sqlite3")

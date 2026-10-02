@@ -19,16 +19,6 @@ INTAKE_STATES: Final = frozenset(
     {"RECEIVED", "PRESERVED", "CLASSIFIED", "INDEXED", "PROCESSING", "DONE", "BLOCKED", "DEFERRED"}
 )
 NONTERMINAL_STATES: Final = INTAKE_STATES - {"DONE"}
-STATE_ORDER: Final = {
-    "RECEIVED": 10,
-    "PRESERVED": 20,
-    "CLASSIFIED": 30,
-    "INDEXED": 40,
-    "PROCESSING": 50,
-    "DONE": 60,
-    "DEFERRED": 70,
-    "BLOCKED": 80,
-}
 ACTIVE_RESUME_STATES: Final = frozenset({"RECEIVED", "PRESERVED", "CLASSIFIED", "INDEXED", "PROCESSING"})
 INTAKE_TRANSITION_POLICY: Final = {
     "RECEIVED": frozenset({"RECEIVED", "PRESERVED", "CLASSIFIED", "INDEXED", "PROCESSING", "DONE", "BLOCKED", "DEFERRED"}),
@@ -540,11 +530,7 @@ def _merged_state(current: str, new: str) -> str:
     new = _state(new)
     if new in INTAKE_TRANSITION_POLICY[current]:
         return new
-    if current == "BLOCKED" and new not in {"DONE", *ACTIVE_RESUME_STATES, "DEFERRED"}:
-        return current
-    if current == "DONE":
-        return current
-    return new if STATE_ORDER[new] >= STATE_ORDER[current] else current
+    raise IntakeLifecycleError(f"invalid lifecycle transition: {current} -> {new}")
 
 
 def _merge_json_arrays(first: str, second: str) -> str:

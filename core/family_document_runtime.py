@@ -54,6 +54,9 @@ class FamilyDocumentRuntime:
         skipped = 0
         for document in self.source.scan():
             artifact_ref = f"document:{document.source_id}"
+            if not self.state.should_process(document.source_id, document.sha256):
+                skipped += 1
+                continue
             self.state.record_lifecycle(
                 source_ref=document.source_id,
                 source_hash=document.sha256,
@@ -69,9 +72,6 @@ class FamilyDocumentRuntime:
                     },
                 ),
             )
-            if not self.state.should_process(document.source_id, document.sha256):
-                skipped += 1
-                continue
             try:
                 request = build_intake_request(
                     document.path,
