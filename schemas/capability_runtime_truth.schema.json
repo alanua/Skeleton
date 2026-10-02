@@ -26,10 +26,12 @@
         "registry_capability_count",
         "registry_available_count",
         "typed_runtime_evidence_count",
-        "fresh_verified_runtime_evidence_count",
-        "effective_available_count",
-        "drift_count",
-        "parity_match_count",
+        "accepted_runtime_evidence_count",
+        "derived_available_count",
+        "derived_degraded_count",
+        "derived_unavailable_count",
+        "registry_runtime_conflict_count",
+        "runtime_override_count",
         "source_present_count",
         "source_missing_count",
         "interface_usable_count"
@@ -39,10 +41,12 @@
         "registry_capability_count": {"type": "integer", "minimum": 0},
         "registry_available_count": {"type": "integer", "minimum": 0},
         "typed_runtime_evidence_count": {"type": "integer", "minimum": 0},
-        "fresh_verified_runtime_evidence_count": {"type": "integer", "minimum": 0},
-        "effective_available_count": {"type": "integer", "minimum": 0},
-        "drift_count": {"type": "integer", "minimum": 0},
-        "parity_match_count": {"type": "integer", "minimum": 0},
+        "accepted_runtime_evidence_count": {"type": "integer", "minimum": 0},
+        "derived_available_count": {"type": "integer", "minimum": 0},
+        "derived_degraded_count": {"type": "integer", "minimum": 0},
+        "derived_unavailable_count": {"type": "integer", "minimum": 0},
+        "registry_runtime_conflict_count": {"type": "integer", "minimum": 0},
+        "runtime_override_count": {"type": "integer", "minimum": 0},
         "source_present_count": {"type": "integer", "minimum": 0},
         "source_missing_count": {"type": "integer", "minimum": 0},
         "interface_usable_count": {"type": "integer", "minimum": 0}
@@ -55,36 +59,31 @@
         "required": [
           "capability_id",
           "registry_status",
-          "registry_effective_state",
           "registry_lifecycle",
+          "registry_declared_state",
           "registry_module",
           "registry_tested",
-          "live_runtime_execution",
           "runtime_evidence",
           "runtime_states",
-          "fresh_verified_runtime_states",
-          "effective_state",
-          "freshness",
-          "drift",
-          "parity",
-          "source_presence",
+          "accepted_runtime_states",
+          "derived_runtime_state",
+          "runtime_evidence_state",
+          "registry_runtime_relation",
+          "source_state",
           "interface_usable",
-          "evidence_binding",
+          "live_runtime_execution",
           "reason_codes"
         ],
         "additionalProperties": false,
         "properties": {
           "capability_id": {"type": "string", "minLength": 1},
           "registry_status": {"type": ["string", "null"]},
-          "registry_effective_state": {
-            "enum": ["available", "unavailable"]
-          },
-          "registry_lifecycle": {
-            "enum": ["active", "legacy", "superseded"]
+          "registry_lifecycle": {"enum": ["active", "legacy", "superseded"]},
+          "registry_declared_state": {
+            "enum": ["declared_available", "declared_unavailable"]
           },
           "registry_module": {"type": ["string", "null"]},
           "registry_tested": {"type": "boolean"},
-          "live_runtime_execution": {"type": "boolean"},
           "runtime_evidence": {
             "type": "array",
             "items": {
@@ -93,26 +92,24 @@
                 "schema",
                 "capability_id",
                 "runtime_state",
-                "source",
+                "evidence_source",
                 "evidence_ref",
                 "fresh",
                 "verified",
-                "time_fresh",
-                "fresh_verified"
+                "time_current",
+                "accepted_for_truth"
               ],
               "additionalProperties": false,
               "properties": {
                 "schema": {"const": "skeleton.capability_runtime_evidence.v1"},
                 "capability_id": {"type": "string", "minLength": 1},
-                "runtime_state": {
-                  "enum": ["available", "degraded", "unavailable"]
-                },
-                "source": {"type": "string", "minLength": 1},
+                "runtime_state": {"enum": ["available", "degraded", "unavailable"]},
+                "evidence_source": {"type": "string", "minLength": 1},
                 "evidence_ref": {"type": "string", "minLength": 1},
                 "fresh": {"type": "boolean"},
                 "verified": {"type": "boolean"},
-                "time_fresh": {"type": "boolean"},
-                "fresh_verified": {"type": "boolean"},
+                "time_current": {"type": "boolean"},
+                "accepted_for_truth": {"type": "boolean"},
                 "observed_at": {"type": "string", "minLength": 1},
                 "expires_at": {"type": "string", "minLength": 1}
               }
@@ -123,43 +120,31 @@
             "uniqueItems": true,
             "items": {"enum": ["available", "degraded", "unavailable"]}
           },
-          "fresh_verified_runtime_states": {
+          "accepted_runtime_states": {
             "type": "array",
             "uniqueItems": true,
             "items": {"enum": ["available", "degraded", "unavailable"]}
           },
-          "effective_state": {
-            "enum": ["available", "degraded", "unavailable"]
-          },
-          "freshness": {
+          "derived_runtime_state": {"enum": ["available", "degraded", "unavailable"]},
+          "runtime_evidence_state": {
             "enum": [
               "no_runtime_evidence",
-              "fresh_verified_runtime_evidence",
-              "stale_or_unverified_runtime_evidence"
+              "accepted_runtime_evidence",
+              "stale_runtime_evidence"
             ]
           },
-          "drift": {
-            "enum": [
-              "not_evaluated_without_fresh_evidence",
-              "no_drift",
-              "runtime_overrides_stale_registry",
-              "runtime_conflicts_with_registry"
-            ]
-          },
-          "parity": {
+          "registry_runtime_relation": {
             "enum": [
               "registry_only",
-              "registry_runtime_parity",
-              "registry_runtime_drift"
+              "runtime_matches_registry",
+              "runtime_overrides_registry",
+              "runtime_conflicts_with_registry",
+              "runtime_not_accepted"
             ]
           },
-          "source_presence": {
-            "enum": ["present", "missing", "not_checked"]
-          },
+          "source_state": {"enum": ["present", "missing", "not_checked"]},
           "interface_usable": {"type": "boolean"},
-          "evidence_binding": {
-            "enum": ["no_runtime_evidence", "all_runtime_evidence_bound"]
-          },
+          "live_runtime_execution": {"type": "boolean"},
           "reason_codes": {
             "type": "array",
             "uniqueItems": true,

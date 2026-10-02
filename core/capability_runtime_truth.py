@@ -10,6 +10,7 @@ SCHEMA = "skeleton.capability_runtime_truth.v1"
 EVIDENCE_SCHEMA = "skeleton.capability_runtime_evidence.v1"
 REGISTRY_AUTHORITY = "CAPABILITY_REGISTRY.yaml"
 READ_MODEL = "bounded_typed_evidence_only"
+
 RUNTIME_STATES = frozenset(("available", "degraded", "unavailable"))
 RUNTIME_STATE_SEVERITY = {
     "available": 0,
@@ -19,24 +20,25 @@ RUNTIME_STATE_SEVERITY = {
 REGISTRY_AVAILABLE_STATUS = "available"
 LEGACY_STATUS = "legacy"
 SUPERSEDED_STATUS = "superseded"
-FRESHNESS_STATES = frozenset(
+
+REGISTRY_DECLARED_STATES = frozenset(("declared_available", "declared_unavailable"))
+EVIDENCE_STATES = frozenset(
     (
         "no_runtime_evidence",
-        "fresh_verified_runtime_evidence",
-        "stale_or_unverified_runtime_evidence",
+        "accepted_runtime_evidence",
+        "stale_runtime_evidence",
     )
 )
-DRIFT_STATES = frozenset(
+REGISTRY_RUNTIME_RELATIONS = frozenset(
     (
-        "not_evaluated_without_fresh_evidence",
-        "no_drift",
-        "runtime_overrides_stale_registry",
+        "registry_only",
+        "runtime_matches_registry",
+        "runtime_overrides_registry",
         "runtime_conflicts_with_registry",
+        "runtime_not_accepted",
     )
 )
-PARITY_STATES = frozenset(
-    ("registry_only", "registry_runtime_parity", "registry_runtime_drift")
-)
+SOURCE_STATES = frozenset(("present", "missing", "not_checked"))
 
 
 @dataclass(frozen=True)
@@ -75,34 +77,34 @@ class RuntimeCapabilityEvidence:
             if value is not None:
                 _parse_utc_timestamp(value, field_name)
 
-    def fresh_verified(self, now: datetime | None = None) -> bool:
-        return self.fresh and self.verified and not self.time_stale(now)
-
-    def time_stale(self, now: datetime | None = None) -> bool:
+    def time_current(self, now: datetime | None = None) -> bool:
         checked_at = _coerce_now(now)
         if (
             self.expires_at is not None
             and _parse_utc_timestamp(self.expires_at, "expires_at") <= checked_at
         ):
-            return True
+            return False
         if (
             self.observed_at is not None
             and _parse_utc_timestamp(self.observed_at, "observed_at") > checked_at
         ):
-            return True
-        return False
+            return False
+        return True
+
+    def accepted_for_truth(self, now: datetime | None = None) -> bool:
+        return self.fresh and self.verified and self.time_current(now)
 
     def to_dict(self, now: datetime | None = None) -> dict[str, str | bool]:
         payload: dict[str, str | bool] = {
             "schema": self.schema,
             "capability_id": self.capability_id,
             "runtime_state": self.runtime_state,
-            "source": self.source,
+            "evidence_source": self.source,
             "evidence_ref": self.evidence_ref,
             "fresh": self.fresh,
             "verified": self.verified,
-            "time_fresh": not self.time_stale(now),
-            "fresh_verified": self.fresh_verified(now),
+            "time_current": self.time_current(now),
+            "accepted_for_truth": self.accepted_for_truth(now),
         }
         if self.observed_at is not None:
             payload["observed_at"] = self.observed_at
@@ -140,8 +142,8 @@ def reconcile_capability_runtime_truth(
             + ", ".join(unknown_evidence)
         )
 
-    records = []
     checked_at = _coerce_now(now)
+    records = []
     for capability_id in sorted(capabilities):
         capability = capabilities[capability_id]
         if not isinstance(capability, Mapping):
@@ -149,75 +151,72 @@ def reconcile_capability_runtime_truth(
 
         status = capability.get("status")
         capability_evidence = tuple(evidence_by_capability.get(capability_id, ()))
-        runtime_states = sorted({item.runtime_state for item in capability_evidence})
-        registry_state = _registry_effective_state(status)
-        fresh_verified_evidence = tuple(
-            item for item in capability_evidence if item.fresh_verified(checked_at)
+        accepted_evidence = tuple(
+            item for item in capability_evidence if item.accepted_for_truth(checked_at)
         )
-        effective_state = _effective_state(fresh_verified_evidence)
-        freshness = _freshness(capability_evidence, fresh_verified_evidence)
-        drift = _drift(registry_state, effective_state, freshness)
-        parity = _parity(freshness, drift)
-        source_presence = _source_presence(capability, source_root)
+        runtime_states = sorted({item.runtime_state for item in capability_evidence})
+        accepted_states = sorted({item.runtime_state for item in accepted_evidence})
+        declared_state = _registry_declared_state(status)
+        derived_state = _derived_runtime_state(accepted_evidence)
+        evidence_state = _runtime_evidence_state(capability_evidence, accepted_evidence)
+        relation = _registry_runtime_relation(
+            declared_state=declared_state,
+            derived_state=derived_state,
+            evidence_state=evidence_state,
+        )
+        source_state = _source_state(capability, source_root)
         interface_usable = _interface_usable(
             capability,
-            effective_state=effective_state,
-            freshness=freshness,
-            source_presence=source_presence,
-        )
-        live_runtime_execution = _live_runtime_execution(effective_state, freshness)
-        evidence_binding = (
-            "all_runtime_evidence_bound"
-            if capability_evidence
-            else "no_runtime_evidence"
+            derived_state=derived_state,
+            evidence_state=evidence_state,
+            source_state=source_state,
         )
         reason_codes = _reason_codes(
             status=status,
-            registry_state=registry_state,
-            effective_state=effective_state,
+            declared_state=declared_state,
+            derived_state=derived_state,
             capability=capability,
             evidence=capability_evidence,
-            fresh_verified_evidence=fresh_verified_evidence,
-            source_presence=source_presence,
+            accepted_evidence=accepted_evidence,
+            source_state=source_state,
             interface_usable=interface_usable,
-            evidence_binding=evidence_binding,
+            relation=relation,
             now=checked_at,
         )
         records.append(
             {
                 "capability_id": capability_id,
                 "registry_status": status,
-                "registry_effective_state": registry_state,
                 "registry_lifecycle": _registry_lifecycle(status),
+                "registry_declared_state": declared_state,
                 "registry_module": capability.get("module"),
                 "registry_tested": bool(capability.get("tested", False)),
-                "live_runtime_execution": live_runtime_execution,
                 "runtime_evidence": [
                     item.to_dict(checked_at) for item in capability_evidence
                 ],
                 "runtime_states": runtime_states,
-                "fresh_verified_runtime_states": sorted(
-                    {item.runtime_state for item in fresh_verified_evidence}
-                ),
-                "effective_state": effective_state,
-                "freshness": freshness,
-                "drift": drift,
-                "parity": parity,
-                "source_presence": source_presence,
+                "accepted_runtime_states": accepted_states,
+                "derived_runtime_state": derived_state,
+                "runtime_evidence_state": evidence_state,
+                "registry_runtime_relation": relation,
+                "source_state": source_state,
                 "interface_usable": interface_usable,
-                "evidence_binding": evidence_binding,
+                "live_runtime_execution": (
+                    evidence_state == "accepted_runtime_evidence"
+                    and derived_state == "available"
+                ),
                 "reason_codes": reason_codes,
             }
         )
 
     available = [item for item in records if item["registry_status"] == "available"]
     evidence_count = sum(len(item["runtime_evidence"]) for item in records)
-    fresh_verified_count = sum(
+    accepted_count = sum(
         len(
             [
                 evidence
                 for evidence in item["runtime_evidence"]
-                if evidence["fresh_verified"]
+                if evidence["accepted_for_truth"]
             ]
         )
         for item in records
@@ -234,21 +233,40 @@ def reconcile_capability_runtime_truth(
             "registry_capability_count": len(records),
             "registry_available_count": len(available),
             "typed_runtime_evidence_count": evidence_count,
-            "fresh_verified_runtime_evidence_count": fresh_verified_count,
-            "effective_available_count": len(
-                [item for item in records if item["effective_state"] == "available"]
+            "accepted_runtime_evidence_count": accepted_count,
+            "derived_available_count": len(
+                [item for item in records if item["derived_runtime_state"] == "available"]
             ),
-            "drift_count": len(
-                [item for item in records if item["parity"] == "registry_runtime_drift"]
+            "derived_degraded_count": len(
+                [item for item in records if item["derived_runtime_state"] == "degraded"]
             ),
-            "parity_match_count": len(
-                [item for item in records if item["parity"] == "registry_runtime_parity"]
+            "derived_unavailable_count": len(
+                [
+                    item
+                    for item in records
+                    if item["derived_runtime_state"] == "unavailable"
+                ]
+            ),
+            "registry_runtime_conflict_count": len(
+                [
+                    item
+                    for item in records
+                    if item["registry_runtime_relation"]
+                    == "runtime_conflicts_with_registry"
+                ]
+            ),
+            "runtime_override_count": len(
+                [
+                    item
+                    for item in records
+                    if item["registry_runtime_relation"] == "runtime_overrides_registry"
+                ]
             ),
             "source_present_count": len(
-                [item for item in records if item["source_presence"] == "present"]
+                [item for item in records if item["source_state"] == "present"]
             ),
             "source_missing_count": len(
-                [item for item in records if item["source_presence"] == "missing"]
+                [item for item in records if item["source_state"] == "missing"]
             ),
             "interface_usable_count": len(
                 [item for item in records if item["interface_usable"]]
@@ -258,11 +276,11 @@ def reconcile_capability_runtime_truth(
     }
 
 
-def _registry_effective_state(registry_status: Any) -> str:
+def _registry_declared_state(registry_status: Any) -> str:
     return (
-        "available"
+        "declared_available"
         if _normalized_status(registry_status) == REGISTRY_AVAILABLE_STATUS
-        else "unavailable"
+        else "declared_unavailable"
     )
 
 
@@ -279,47 +297,46 @@ def _normalized_status(registry_status: Any) -> str:
     return registry_status.strip().lower() if isinstance(registry_status, str) else ""
 
 
-def _effective_state(
-    fresh_verified_evidence: tuple[RuntimeCapabilityEvidence, ...],
+def _derived_runtime_state(
+    accepted_evidence: tuple[RuntimeCapabilityEvidence, ...],
 ) -> str:
-    if not fresh_verified_evidence:
+    if not accepted_evidence:
         return "unavailable"
     return max(
-        (item.runtime_state for item in fresh_verified_evidence),
+        (item.runtime_state for item in accepted_evidence),
         key=lambda state: RUNTIME_STATE_SEVERITY[state],
     )
 
 
-def _freshness(
+def _runtime_evidence_state(
     evidence: tuple[RuntimeCapabilityEvidence, ...],
-    fresh_verified_evidence: tuple[RuntimeCapabilityEvidence, ...],
+    accepted_evidence: tuple[RuntimeCapabilityEvidence, ...],
 ) -> str:
-    if fresh_verified_evidence:
-        return "fresh_verified_runtime_evidence"
+    if accepted_evidence:
+        return "accepted_runtime_evidence"
     if evidence:
-        return "stale_or_unverified_runtime_evidence"
+        return "stale_runtime_evidence"
     return "no_runtime_evidence"
 
 
-def _drift(registry_state: str, effective_state: str, freshness: str) -> str:
-    if freshness != "fresh_verified_runtime_evidence":
-        return "not_evaluated_without_fresh_evidence"
-    if registry_state == effective_state:
-        return "no_drift"
-    if effective_state == "available":
-        return "runtime_overrides_stale_registry"
+def _registry_runtime_relation(
+    *,
+    declared_state: str,
+    derived_state: str,
+    evidence_state: str,
+) -> str:
+    if evidence_state == "no_runtime_evidence":
+        return "registry_only"
+    if evidence_state != "accepted_runtime_evidence":
+        return "runtime_not_accepted"
+    if declared_state == "declared_available" and derived_state == "available":
+        return "runtime_matches_registry"
+    if declared_state == "declared_unavailable" and derived_state == "available":
+        return "runtime_overrides_registry"
     return "runtime_conflicts_with_registry"
 
 
-def _parity(freshness: str, drift: str) -> str:
-    if freshness == "no_runtime_evidence":
-        return "registry_only"
-    if drift == "no_drift":
-        return "registry_runtime_parity"
-    return "registry_runtime_drift"
-
-
-def _source_presence(capability: Mapping[str, Any], source_root: str | Path | None) -> str:
+def _source_state(capability: Mapping[str, Any], source_root: str | Path | None) -> str:
     module = capability.get("module")
     if not isinstance(module, str) or not module.strip():
         return "missing"
@@ -335,37 +352,30 @@ def _source_presence(capability: Mapping[str, Any], source_root: str | Path | No
 def _interface_usable(
     capability: Mapping[str, Any],
     *,
-    effective_state: str,
-    freshness: str,
-    source_presence: str,
+    derived_state: str,
+    evidence_state: str,
+    source_state: str,
 ) -> bool:
-    if freshness != "fresh_verified_runtime_evidence":
+    if evidence_state != "accepted_runtime_evidence":
         return False
-    if effective_state != "available":
+    if derived_state != "available":
         return False
     if not bool(capability.get("tested", False)):
         return False
-    return source_presence in {"present", "not_checked"}
-
-
-def _live_runtime_execution(effective_state: str, freshness: str) -> bool:
-    return (
-        freshness == "fresh_verified_runtime_evidence"
-        and effective_state == "available"
-    )
+    return source_state in {"present", "not_checked"}
 
 
 def _reason_codes(
     *,
     status: Any,
-    registry_state: str,
-    effective_state: str,
+    declared_state: str,
+    derived_state: str,
     capability: Mapping[str, Any],
     evidence: tuple[RuntimeCapabilityEvidence, ...],
-    fresh_verified_evidence: tuple[RuntimeCapabilityEvidence, ...],
-    source_presence: str,
+    accepted_evidence: tuple[RuntimeCapabilityEvidence, ...],
+    source_state: str,
     interface_usable: bool,
-    evidence_binding: str,
+    relation: str,
     now: datetime,
 ) -> list[str]:
     codes: list[str] = []
@@ -374,21 +384,19 @@ def _reason_codes(
         codes.append("LEGACY_CAPABILITY")
     if normalized_status == SUPERSEDED_STATUS:
         codes.append("SUPERSEDED_CAPABILITY")
-    if registry_state != "available":
-        codes.append("REGISTRY_EFFECTIVE_UNAVAILABLE")
+    if declared_state == "declared_unavailable":
+        codes.append("REGISTRY_DECLARED_UNAVAILABLE")
     if not bool(capability.get("tested", False)):
         codes.append("REGISTRY_TEST_EVIDENCE_MISSING")
-    if source_presence == "present":
+    if source_state == "present":
         codes.append("REGISTRY_SOURCE_PRESENT")
-    elif source_presence == "missing":
+    elif source_state == "missing":
         codes.append("REGISTRY_SOURCE_MISSING")
     else:
         codes.append("REGISTRY_SOURCE_NOT_CHECKED")
 
     if not evidence:
         codes.append("NO_RUNTIME_EVIDENCE")
-    elif evidence_binding == "all_runtime_evidence_bound":
-        codes.append("RUNTIME_EVIDENCE_BOUND")
     for item in evidence:
         if not item.fresh:
             codes.append("STALE_RUNTIME_EVIDENCE")
@@ -404,14 +412,20 @@ def _reason_codes(
             and _parse_utc_timestamp(item.observed_at, "observed_at") > now
         ):
             codes.append("RUNTIME_EVIDENCE_FROM_FUTURE")
-    if fresh_verified_evidence:
-        codes.append("FRESH_VERIFIED_RUNTIME_EVIDENCE")
-        if registry_state == effective_state:
-            codes.append("RUNTIME_STATE_MATCHES_REGISTRY")
-        elif effective_state == "available":
-            codes.append("RUNTIME_OVERRIDES_STALE_REGISTRY")
+    if accepted_evidence:
+        codes.append("ACCEPTED_RUNTIME_EVIDENCE")
+        if relation == "runtime_matches_registry":
+            codes.append("RUNTIME_MATCHES_REGISTRY")
+        elif relation == "runtime_overrides_registry":
+            codes.append("RUNTIME_OVERRIDES_REGISTRY")
         else:
             codes.append("RUNTIME_CONFLICTS_WITH_REGISTRY")
+    elif evidence:
+        codes.append("RUNTIME_EVIDENCE_NOT_ACCEPTED")
+    if derived_state == "degraded":
+        codes.append("RUNTIME_DERIVED_DEGRADED")
+    if derived_state == "unavailable":
+        codes.append("RUNTIME_DERIVED_UNAVAILABLE")
     if interface_usable:
         codes.append("INTERFACE_USABLE")
     else:

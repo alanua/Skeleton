@@ -113,9 +113,9 @@ def test_boot_loader_accepts_optional_typed_runtime_evidence_boundary() -> None:
         item for item in truth["capabilities"] if item["capability_id"] == "boot_loader"
     )
 
-    assert boot_loader["effective_state"] == "available"
-    assert boot_loader["freshness"] == "fresh_verified_runtime_evidence"
-    assert boot_loader["drift"] == "no_drift"
+    assert boot_loader["derived_runtime_state"] == "available"
+    assert boot_loader["runtime_evidence_state"] == "accepted_runtime_evidence"
+    assert boot_loader["registry_runtime_relation"] == "runtime_matches_registry"
 
 
 def test_boot_loader_accepts_deterministic_runtime_truth_clock() -> None:

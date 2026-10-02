@@ -14,6 +14,16 @@ from core.capability_runtime_truth import (
 
 ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_PATH = ROOT / "schemas" / "capability_runtime_truth.schema.json"
+OLD_PUBLIC_FIELDS = {
+    "effective_state",
+    "freshness",
+    "drift",
+    "parity",
+    "registry_effective_state",
+    "fresh_verified_runtime_states",
+    "evidence_binding",
+    "source_presence",
+}
 
 
 def registry() -> dict:
@@ -49,44 +59,47 @@ def test_reconciler_preserves_registry_authority_without_evidence() -> None:
             "registry_capability_count",
             "registry_available_count",
             "typed_runtime_evidence_count",
-            "fresh_verified_runtime_evidence_count",
-            "effective_available_count",
-            "drift_count",
-            "parity_match_count",
+            "accepted_runtime_evidence_count",
+            "derived_available_count",
+            "derived_degraded_count",
+            "derived_unavailable_count",
+            "registry_runtime_conflict_count",
+            "runtime_override_count",
         )
     } == {
         "registry_capability_count": 2,
         "registry_available_count": 1,
         "typed_runtime_evidence_count": 0,
-        "fresh_verified_runtime_evidence_count": 0,
-        "effective_available_count": 0,
-        "drift_count": 0,
-        "parity_match_count": 0,
+        "accepted_runtime_evidence_count": 0,
+        "derived_available_count": 0,
+        "derived_degraded_count": 0,
+        "derived_unavailable_count": 2,
+        "registry_runtime_conflict_count": 0,
+        "runtime_override_count": 0,
     }
-    assert {item["effective_state"] for item in truth["capabilities"]} == {
+    assert {item["derived_runtime_state"] for item in truth["capabilities"]} == {
         "unavailable"
     }
     assert {item["live_runtime_execution"] for item in truth["capabilities"]} == {False}
-    assert {item["freshness"] for item in truth["capabilities"]} == {
+    assert {item["runtime_evidence_state"] for item in truth["capabilities"]} == {
         "no_runtime_evidence"
     }
-    assert {item["drift"] for item in truth["capabilities"]} == {
-        "not_evaluated_without_fresh_evidence"
+    assert {item["registry_runtime_relation"] for item in truth["capabilities"]} == {
+        "registry_only"
     }
-    assert {item["parity"] for item in truth["capabilities"]} == {"registry_only"}
-    assert {item["source_presence"] for item in truth["capabilities"]} == {
+    assert {item["source_state"] for item in truth["capabilities"]} == {
         "not_checked"
     }
     assert all(
         "NO_RUNTIME_EVIDENCE" in item["reason_codes"]
         for item in truth["capabilities"]
     )
-    assert {item["evidence_binding"] for item in truth["capabilities"]} == {
-        "no_runtime_evidence"
-    }
+    assert all(
+        not (OLD_PUBLIC_FIELDS & item.keys()) for item in truth["capabilities"]
+    )
 
 
-def test_fresh_verified_runtime_evidence_derives_effective_state_without_mutating_registry() -> None:
+def test_accepted_runtime_evidence_derives_state_without_mutating_registry() -> None:
     source_registry = registry()
     truth = reconcile_capability_runtime_truth(
         source_registry,
@@ -108,23 +121,24 @@ def test_fresh_verified_runtime_evidence_derives_effective_state_without_mutatin
 
     capabilities = {item["capability_id"]: item for item in truth["capabilities"]}
 
-    assert capabilities["available_capability"]["effective_state"] == "available"
+    assert capabilities["available_capability"]["derived_runtime_state"] == "available"
     assert capabilities["available_capability"]["live_runtime_execution"] is True
-    assert capabilities["available_capability"]["drift"] == "no_drift"
-    assert capabilities["available_capability"]["parity"] == "registry_runtime_parity"
-    assert capabilities["planned_capability"]["registry_status"] == "planned"
-    assert capabilities["planned_capability"]["registry_effective_state"] == "unavailable"
-    assert capabilities["planned_capability"]["effective_state"] == "available"
-    assert capabilities["planned_capability"]["drift"] == "runtime_overrides_stale_registry"
-    assert capabilities["planned_capability"]["parity"] == "registry_runtime_drift"
-    assert capabilities["planned_capability"]["evidence_binding"] == (
-        "all_runtime_evidence_bound"
+    assert capabilities["available_capability"]["registry_runtime_relation"] == (
+        "runtime_matches_registry"
     )
-    assert "RUNTIME_EVIDENCE_BOUND" in capabilities["planned_capability"]["reason_codes"]
+    assert capabilities["planned_capability"]["registry_status"] == "planned"
+    assert capabilities["planned_capability"]["registry_declared_state"] == (
+        "declared_unavailable"
+    )
+    assert capabilities["planned_capability"]["derived_runtime_state"] == "available"
+    assert capabilities["planned_capability"]["registry_runtime_relation"] == (
+        "runtime_overrides_registry"
+    )
+    assert "ACCEPTED_RUNTIME_EVIDENCE" in capabilities["planned_capability"]["reason_codes"]
     assert source_registry["capabilities"]["planned_capability"]["status"] == "planned"
 
 
-def test_stale_or_unverified_runtime_evidence_cannot_override_registry() -> None:
+def test_stale_or_unverified_runtime_evidence_cannot_be_accepted_for_truth() -> None:
     truth = reconcile_capability_runtime_truth(
         registry(),
         [
@@ -147,16 +161,23 @@ def test_stale_or_unverified_runtime_evidence_cannot_override_registry() -> None
 
     capabilities = {item["capability_id"]: item for item in truth["capabilities"]}
 
-    assert capabilities["planned_capability"]["effective_state"] == "unavailable"
-    assert capabilities["planned_capability"]["freshness"] == (
-        "stale_or_unverified_runtime_evidence"
+    assert capabilities["planned_capability"]["derived_runtime_state"] == "unavailable"
+    assert capabilities["planned_capability"]["runtime_evidence_state"] == (
+        "stale_runtime_evidence"
     )
-    assert capabilities["planned_capability"]["parity"] == "registry_runtime_drift"
-    assert capabilities["available_capability"]["effective_state"] == "unavailable"
+    assert capabilities["planned_capability"]["registry_runtime_relation"] == (
+        "runtime_not_accepted"
+    )
+    assert capabilities["available_capability"]["derived_runtime_state"] == "unavailable"
     assert capabilities["available_capability"]["live_runtime_execution"] is False
+    assert all(
+        evidence["accepted_for_truth"] is False
+        for item in capabilities.values()
+        for evidence in item["runtime_evidence"]
+    )
 
 
-def test_conflicting_fresh_runtime_evidence_uses_most_restrictive_effective_state() -> None:
+def test_conflicting_accepted_runtime_evidence_uses_most_restrictive_state() -> None:
     truth = reconcile_capability_runtime_truth(
         registry(),
         [
@@ -188,19 +209,18 @@ def test_conflicting_fresh_runtime_evidence_uses_most_restrictive_effective_stat
         if item["capability_id"] == "available_capability"
     )
 
-    assert available["fresh_verified_runtime_states"] == [
+    assert available["accepted_runtime_states"] == [
         "available",
         "degraded",
         "unavailable",
     ]
-    assert available["effective_state"] == "unavailable"
+    assert available["derived_runtime_state"] == "unavailable"
     assert available["live_runtime_execution"] is False
-    assert available["drift"] == "runtime_conflicts_with_registry"
-    assert available["parity"] == "registry_runtime_drift"
+    assert available["registry_runtime_relation"] == "runtime_conflicts_with_registry"
     assert "RUNTIME_CONFLICTS_WITH_REGISTRY" in available["reason_codes"]
 
 
-def test_time_expired_runtime_evidence_cannot_override_registry() -> None:
+def test_time_expired_runtime_evidence_cannot_be_accepted_for_truth() -> None:
     truth = reconcile_capability_runtime_truth(
         registry(),
         [
@@ -222,14 +242,14 @@ def test_time_expired_runtime_evidence_cannot_override_registry() -> None:
         if item["capability_id"] == "planned_capability"
     )
 
-    assert planned["effective_state"] == "unavailable"
-    assert planned["freshness"] == "stale_or_unverified_runtime_evidence"
+    assert planned["derived_runtime_state"] == "unavailable"
+    assert planned["runtime_evidence_state"] == "stale_runtime_evidence"
     assert "RUNTIME_EVIDENCE_EXPIRED" in planned["reason_codes"]
-    assert planned["runtime_evidence"][0]["time_fresh"] is False
-    assert planned["runtime_evidence"][0]["fresh_verified"] is False
+    assert planned["runtime_evidence"][0]["time_current"] is False
+    assert planned["runtime_evidence"][0]["accepted_for_truth"] is False
 
 
-def test_legacy_and_superseded_registry_statuses_are_never_effectively_available() -> None:
+def test_legacy_and_superseded_registry_statuses_are_declared_unavailable() -> None:
     source = {
         "version": "1.0.0",
         "capabilities": {
@@ -242,14 +262,14 @@ def test_legacy_and_superseded_registry_statuses_are_never_effectively_available
     by_id = {item["capability_id"]: item for item in truth["capabilities"]}
 
     assert by_id["old"]["registry_lifecycle"] == "legacy"
-    assert by_id["old"]["registry_effective_state"] == "unavailable"
+    assert by_id["old"]["registry_declared_state"] == "declared_unavailable"
     assert "LEGACY_CAPABILITY" in by_id["old"]["reason_codes"]
     assert by_id["newer"]["registry_lifecycle"] == "superseded"
-    assert by_id["newer"]["registry_effective_state"] == "unavailable"
+    assert by_id["newer"]["registry_declared_state"] == "declared_unavailable"
     assert "SUPERSEDED_CAPABILITY" in by_id["newer"]["reason_codes"]
 
 
-def test_source_presence_and_interface_usability_require_fresh_verified_runtime_truth(
+def test_source_state_and_interface_usability_require_accepted_runtime_truth(
     tmp_path: Path,
 ) -> None:
     (tmp_path / "present.py").write_text("# fixture\n", encoding="utf-8")
@@ -268,9 +288,9 @@ def test_source_presence_and_interface_usability_require_fresh_verified_runtime_
     )
     by_id = {item["capability_id"]: item for item in truth["capabilities"]}
 
-    assert by_id["present"]["source_presence"] == "present"
+    assert by_id["present"]["source_state"] == "present"
     assert by_id["present"]["interface_usable"] is False
-    assert by_id["missing"]["source_presence"] == "missing"
+    assert by_id["missing"]["source_state"] == "missing"
     assert by_id["missing"]["interface_usable"] is False
     assert "REGISTRY_SOURCE_MISSING" in by_id["missing"]["reason_codes"]
 
