@@ -27520,3 +27520,80 @@ def test_runner_vnext_readonly_preflight_rejects_colliding_or_memory_stores(
     assert report.startswith("BLOCKED:")
     assert "ledger_file_backed=false" in report
     assert "lease_file_backed=false" in report
+
+def test_run_codex_task_bounds_primary_codex_invocation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    monkeypatch.setattr(runner, "private_memory_bootstrap_request", lambda *_args: None)
+    monkeypatch.setattr(runner, "codex_exec_command", lambda *_args: ["codex", "exec"])
+    monkeypatch.setattr(
+        runner,
+        "sanitize_codegen_child_environment",
+        lambda _env: {"PATH": "/usr/bin"},
+    )
+    monkeypatch.setattr(runner.shutil, "which", lambda *_args, **_kwargs: None)
+    completed = runner.subprocess.CompletedProcess(
+        args=["codex"],
+        returncode=0,
+        stdout="RESULT: DONE\n",
+        stderr="",
+    )
+
+    with mock.patch.object(
+        runner.subprocess,
+        "run",
+        return_value=completed,
+    ) as subprocess_run:
+        code, output = runner.run_codex_task("Task body", str(worktree), None)
+
+    assert code == 0
+    assert output.startswith("RESULT: DONE\n")
+    assert subprocess_run.call_args.args[0] == ["codex", "exec"]
+    assert subprocess_run.call_args.kwargs["cwd"] == str(worktree)
+    assert (
+        subprocess_run.call_args.kwargs["timeout"]
+        == runner.RUNNER_CODEX_PRIMARY_CODEGEN_TIMEOUT_SECONDS
+    )
+
+
+def test_run_codex_task_primary_timeout_fails_closed_with_retained_worktree(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    task_content = """requested_capabilities: [repository_read, repository_write, test_execution]
+privacy_boundary: PUBLIC_SAFE_REPOSITORY_ONLY
+"""
+    monkeypatch.setattr(runner, "private_memory_bootstrap_request", lambda *_args: None)
+    monkeypatch.setattr(
+        runner, "sanitize_codegen_child_environment", lambda _env: {"PATH": "/usr/bin"}
+    )
+    monkeypatch.setattr(runner, "codex_exec_command", lambda *_args: ["codex"])
+    monkeypatch.setattr(
+        runner,
+        "select_openhands_secondary_route",
+        mock.Mock(side_effect=AssertionError("secondary must not run after timeout")),
+    )
+    calls: list[list[str]] = []
+
+    def fake_run(args, cwd=None, *, timeout=None, **_kwargs):
+        calls.append(list(args))
+        raise runner.subprocess.TimeoutExpired(
+            cmd=args, timeout=runner.RUNNER_CODEX_PRIMARY_CODEGEN_TIMEOUT_SECONDS
+        )
+
+    monkeypatch.setattr(runner, "run_command", fake_run)
+
+    code, output = runner.run_codex_task(task_content, str(tmp_path))
+
+    assert code == 1
+    assert "RESULT: BLOCKED" in output
+    assert "SKELETON_CODEGEN_PRIMARY_FAILURE=PRIMARY_CODEGEN_TIMEOUT" in output
+    assert (
+        f"primary_codegen_timeout_seconds={runner.RUNNER_CODEX_PRIMARY_CODEGEN_TIMEOUT_SECONDS}"
+        in output
+    )
+    assert "retained_worktree_status=preserved_for_operator_review" in output
+    assert calls == [["codex"]]
+
