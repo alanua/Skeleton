@@ -68,6 +68,7 @@ jobs:
               echo "repository_verified=${repository_verified}"
               echo "dirty_state_preserved=${dirty_state_preserved}"
               echo "bundle_verified=${bundle_verified}"
+              echo "hung_poller_terminated=${hung_poller_terminated:-false}"
               echo "final_branch=${final_branch}"
               echo "final_sha=${final_sha}"
               echo "final_clean_state=${final_clean_state}"
@@ -120,6 +121,7 @@ jobs:
             | grep -Fx "${EXPECTED_SOURCE_BASE_SHA}" >/dev/null
 
           poller_quiet=false
+          hung_poller_terminated=false
           for _attempt in $(seq 1 30); do
             if ! pgrep -f '(^|/)runner_poll_github_tasks[.]py([[:space:]]|$)' >/dev/null; then
               poller_quiet=true
@@ -127,6 +129,20 @@ jobs:
             fi
             sleep 2
           done
+
+          if test "${poller_quiet}" != "true"; then
+            runner_service="skeleton-runner-poll.service"
+            test "$(systemctl --user show "${runner_service}" --property=LoadState --value)" = "loaded"
+            systemctl --user kill --kill-who=all --signal=TERM "${runner_service}" || true
+            for _attempt in $(seq 1 10); do
+              if ! pgrep -f '(^|/)runner_poll_github_tasks[.]py([[:space:]]|$)' >/dev/null; then
+                poller_quiet=true
+                hung_poller_terminated=true
+                break
+              fi
+              sleep 1
+            done
+          fi
           test "${poller_quiet}" = "true"
 
           status_file="$(mktemp "${RUNNER_TEMP}/skeleton-runtime-status.XXXXXX")"
