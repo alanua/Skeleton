@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.skeleton.local/awareness_context.schema.json",
+  "title": "Skeleton Awareness Context Public Receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "status",
+    "project_id",
+    "task_route",
+    "privacy_boundary",
+    "derivation_mode",
+    "checked_at",
+    "awareness_hash",
+    "section_hashes",
+    "counts",
+    "limits",
+    "truncated",
+    "labels",
+    "public_safe",
+    "private_payloads_included",
+    "runtime_mutation_performed",
+    "canonical_store_mutation_performed",
+    "receipt_hash"
+  ],
+  "properties": {
+    "schema": {"const": "skeleton.awareness_context.public_receipt.v1"},
+    "status": {"const": "DONE"},
+    "project_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "task_route": {"type": "string", "minLength": 1, "maxLength": 128},
+    "privacy_boundary": {"const": "PRIVATE_RUNTIME_CONTEXT_PUBLIC_SAFE_RECEIPTS_ONLY"},
+    "derivation_mode": {"const": "ephemeral_read_only_derived_packet"},
+    "checked_at": {"type": "string", "minLength": 1},
+    "awareness_hash": {"$ref": "#/$defs/hash"},
+    "section_hashes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["memory", "pending_work", "capability_truth"],
+      "properties": {
+        "memory": {"$ref": "#/$defs/hash"},
+        "pending_work": {"$ref": "#/$defs/hash"},
+        "capability_truth": {"$ref": "#/$defs/hash"}
+      }
+    },
+    "counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["memory_records", "pending_items", "capability_records"],
+      "properties": {
+        "memory_records": {"type": "integer", "minimum": 0, "maximum": 10},
+        "pending_items": {"type": "integer", "minimum": 0, "maximum": 10},
+        "capability_records": {"type": "integer", "minimum": 0, "maximum": 20}
+      }
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["memory_records", "pending_items", "capability_records"],
+      "properties": {
+        "memory_records": {"type": "integer", "minimum": 0, "maximum": 10},
+        "pending_items": {"type": "integer", "minimum": 0, "maximum": 10},
+        "capability_records": {"type": "integer", "minimum": 0, "maximum": 20}
+      }
+    },
+    "truncated": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["memory", "pending_work", "capability_truth"],
+      "properties": {
+        "memory": {"type": "boolean"},
+        "pending_work": {"type": "boolean"},
+        "capability_truth": {"type": "boolean"}
+      }
+    },
+    "labels": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["freshness", "conflict", "epistemic"],
+      "properties": {
+        "freshness": {"enum": ["FRESH", "STALE", "UNKNOWN", "MIXED"]},
+        "conflict": {"enum": ["NONE", "CONFLICTS_PRESENT"]},
+        "epistemic": {"enum": ["OBSERVED", "DERIVED", "DECLARED", "UNKNOWN"]}
+      }
+    },
+    "public_safe": {"const": true},
+    "private_payloads_included": {"const": false},
+    "runtime_mutation_performed": {"const": false},
+    "canonical_store_mutation_performed": {"const": false},
+    "receipt_hash": {"$ref": "#/$defs/hash"}
+  },
+  "$defs": {
+    "hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+  }
+}
