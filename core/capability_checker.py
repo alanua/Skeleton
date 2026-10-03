@@ -1,7 +1,12 @@
 from pathlib import Path
-from typing import Any, Union
+from typing import Any, Iterable, Union
 
 import yaml
+
+from core.capability_runtime_truth import (
+    RuntimeCapabilityEvidence,
+    reconcile_capability_runtime_truth,
+)
 
 
 class CapabilityChecker:
@@ -31,3 +36,17 @@ class CapabilityChecker:
         capabilities = self.load().get("capabilities", {})
         capability = capabilities.get(capability_id)
         return bool(capability and capability.get("status") == "available")
+
+    def runtime_truth(
+        self,
+        evidence: Iterable[RuntimeCapabilityEvidence] = (),
+        *,
+        source_root: str | Path | None = None,
+        now: object | None = None,
+    ) -> dict[str, Any]:
+        return reconcile_capability_runtime_truth(
+            self.load(),
+            evidence,
+            source_root=source_root,
+            now=now,
+        )
