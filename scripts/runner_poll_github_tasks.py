@@ -6674,8 +6674,27 @@ def finalize_success(issue: dict[str, Any], workdir: str, codex_output: str) -> 
     )
 
 
+def _inferred_single_task_allowed_file(body: str) -> frozenset[str]:
+    task_fields = _shadow_task_block_mapping(body)
+    value = task_fields.get("allowed_files")
+    if (
+        not isinstance(value, list)
+        or len(value) != 1
+        or not isinstance(value[0], str)
+        or not _safe_issue_publish_file_path(value[0])
+    ):
+        return frozenset()
+    return frozenset((value[0],))
+
+
 def _codegen_publish_allowed_files(body: str) -> tuple[frozenset[str], str | None]:
-    return _issue_publish_allowed_files(_metadata_before_task(body))
+    allowed_files, reason = _issue_publish_allowed_files(_metadata_before_task(body))
+    if reason != "missing_allowed_files":
+        return allowed_files, reason
+    inferred = _inferred_single_task_allowed_file(body)
+    if inferred:
+        return inferred, None
+    return allowed_files, reason
 
 
 def _codegen_existing_pr_publish_preflight(
@@ -21706,9 +21725,7 @@ def _codegen_dirty_continuation_gate_for_issue(
         retry_decision.changed_condition or retry_decision.override_used
     ):
         return None
-    allowed_files, allowed_reason = _issue_publish_allowed_files(
-        _metadata_before_task(issue_body)
-    )
+    allowed_files, allowed_reason = _codegen_publish_allowed_files(issue_body)
     if allowed_reason is not None:
         allowed_files = frozenset()
     return CodegenDirtyContinuationGate(
@@ -21722,9 +21739,7 @@ def _codegen_dirty_continuation_gate_for_issue(
 
 
 def _recoverable_blocked_allowed_files(body: str) -> frozenset[str]:
-    allowed_files, allowed_reason = _issue_publish_allowed_files(
-        _metadata_before_task(body)
-    )
+    allowed_files, allowed_reason = _codegen_publish_allowed_files(body)
     if allowed_reason is not None:
         return frozenset()
     return allowed_files
