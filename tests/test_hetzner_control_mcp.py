@@ -6,16 +6,51 @@ import subprocess
 import sys
 from pathlib import Path
 
+from core.awareness_context import AWARENESS_CONTEXT_SCHEMA, PRIVACY_BOUNDARY
 from core.hetzner_control_mcp import (
     ACTION_GATE_TOOL,
+    AWARENESS_CONTEXT_TOOL,
     RUNNER_PRIVILEGED_TOOL,
+    AwarenessContextProviderError,
     HetznerControlMcpDispatcher,
+    PrivateHandoffAwarenessContextProvider,
     handle_jsonrpc_message,
 )
+from core.memory_bootstrap import (
+    MEMORY_BOOTSTRAP_RESPONSE_SCHEMA,
+    PRIVATE_CONTEXT_ENV,
+    PRIVATE_CONTEXT_MARKER,
+)
+from core.private_memory_history import content_hash
 
 
 ROOT = Path(__file__).resolve().parents[1]
 HEAD_SHA = "a1b2c3d4e5f60718293a4b5c6d7e8f901234abcd"
+
+
+class CapturingAwarenessProvider:
+    def __init__(self) -> None:
+        self.requests: list[object] = []
+
+    def read(self, request):
+        self.requests.append(request)
+        return {
+            "packet": {
+                "schema": AWARENESS_CONTEXT_SCHEMA,
+                "project_id": request.project_id,
+                "task_route": request.task_route,
+                "private_value": "synthetic-private",
+            },
+            "receipt": {
+                "schema": "skeleton.awareness_context.public_receipt.v1",
+                "public_safe": True,
+            },
+        }
+
+
+class FailingAwarenessProvider:
+    def read(self, request):
+        raise AwarenessContextProviderError("AWARENESS_PRIVATE_HANDOFF_UNAVAILABLE")
 
 
 class CapturingPrivilegedGateway:
@@ -45,12 +80,19 @@ class CapturingPrivilegedGateway:
 
 
 def dispatcher() -> HetznerControlMcpDispatcher:
-    return HetznerControlMcpDispatcher(privileged_gateway=CapturingPrivilegedGateway())
+    return HetznerControlMcpDispatcher(
+        privileged_gateway=CapturingPrivilegedGateway(),
+        awareness_provider=CapturingAwarenessProvider(),
+    )
 
 
 def test_tools_are_minimal_named_gateway_facades_without_exec_arguments() -> None:
     tools = dispatcher().list_tools()
-    assert [tool["name"] for tool in tools] == [ACTION_GATE_TOOL, RUNNER_PRIVILEGED_TOOL]
+    assert [tool["name"] for tool in tools] == [
+        ACTION_GATE_TOOL,
+        RUNNER_PRIVILEGED_TOOL,
+        AWARENESS_CONTEXT_TOOL,
+    ]
 
     exposed_properties = {
         property_name
@@ -92,6 +134,107 @@ def test_runner_privileged_tool_delegates_exact_request_to_gateway_transport() -
     assert gateway.requests == [request]
     assert result["result"]["status"] == "NEEDS_OPERATOR"
     assert result["result"]["receipt"]["reason"] == "SYNTHETIC"
+
+
+def test_awareness_tool_delegates_to_read_only_provider_and_returns_private_packet() -> None:
+    provider = CapturingAwarenessProvider()
+    active = HetznerControlMcpDispatcher(
+        privileged_gateway=CapturingPrivilegedGateway(),
+        awareness_provider=provider,
+    )
+
+    result = active.call_tool(
+        AWARENESS_CONTEXT_TOOL,
+        {
+            "project_id": "skeleton",
+            "task_route": "runner",
+            "task_body": "Continue the current Skeleton task.",
+            "requested_capabilities": ["memory"],
+        },
+    )
+
+    assert result["result"]["status"] == "DONE"
+    assert result["result"]["awareness"]["private_value"] == "synthetic-private"
+    assert result["result"]["receipt"]["public_safe"] is True
+    assert len(provider.requests) == 1
+    assert provider.requests[0].project_id == "skeleton"
+    assert provider.requests[0].requested_capabilities == ("memory",)
+
+
+def test_awareness_provider_failure_is_public_safe() -> None:
+    active = HetznerControlMcpDispatcher(
+        privileged_gateway=CapturingPrivilegedGateway(),
+        awareness_provider=FailingAwarenessProvider(),
+    )
+
+    result = active.call_tool(
+        AWARENESS_CONTEXT_TOOL,
+        {
+            "project_id": "skeleton",
+            "task_route": "runner",
+            "task_body": "Continue.",
+        },
+    )
+
+    assert result["result"] == {
+        "status": "blocked",
+        "reason": "AWARENESS_PRIVATE_HANDOFF_UNAVAILABLE",
+    }
+
+
+def test_private_handoff_awareness_provider_reuses_existing_boot_context(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    packet = {
+        "schema": AWARENESS_CONTEXT_SCHEMA,
+        "project_id": "skeleton",
+        "task_route": "runner",
+        "privacy_boundary": PRIVACY_BOUNDARY,
+        "derivation_mode": "ephemeral_read_only_derived_packet",
+        "checked_at": "2026-10-03T10:00:00Z",
+        "sections": {
+            "capability_truth": {
+                "records": [{"capability_id": "memory"}],
+                "section_hash": "b" * 64,
+            }
+        },
+        "labels": {"freshness": "FRESH"},
+        "runtime_mutation_performed": False,
+        "canonical_store_mutation_performed": False,
+    }
+    packet["awareness_hash"] = content_hash(packet)
+    handoff = tmp_path / "context.json"
+    handoff.write_text(
+        json.dumps(
+            {
+                "schema": MEMORY_BOOTSTRAP_RESPONSE_SCHEMA,
+                "marker": PRIVATE_CONTEXT_MARKER,
+                "awareness": packet,
+            }
+        ),
+        encoding="utf-8",
+    )
+    handoff.chmod(0o600)
+    monkeypatch.setenv(PRIVATE_CONTEXT_ENV, str(handoff))
+
+    provider = PrivateHandoffAwarenessContextProvider()
+    request = type(
+        "Request",
+        (),
+        {
+            "project_id": "skeleton",
+            "task_route": "runner",
+            "task_body": "Continue.",
+            "requested_capabilities": ("memory",),
+        },
+    )()
+    result = provider.read(request)
+
+    assert result["packet"]["awareness_hash"] == packet["awareness_hash"]
+    assert result["receipt"]["public_safe"] is True
+    assert result["receipt"]["private_payloads_included"] is False
+    assert "private_value" not in json.dumps(result["receipt"])
 
 
 def test_unsupported_tools_fail_closed_before_gateway() -> None:
@@ -182,5 +325,9 @@ def test_installed_form_launcher_resolves_registered_checkout_outside_repo_cwd(t
     responses = [json.loads(line) for line in completed.stdout.splitlines()]
     assert responses[0]["result"]["serverInfo"]["name"] == "skeleton-control-hetzner"
     tools = responses[1]["result"]["tools"]
-    assert [tool["name"] for tool in tools] == [ACTION_GATE_TOOL, RUNNER_PRIVILEGED_TOOL]
-    assert len(tools) == 2
+    assert [tool["name"] for tool in tools] == [
+        ACTION_GATE_TOOL,
+        RUNNER_PRIVILEGED_TOOL,
+        AWARENESS_CONTEXT_TOOL,
+    ]
+    assert len(tools) == 3
