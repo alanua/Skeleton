@@ -2363,6 +2363,35 @@ def test_runner_dependency_pr_status_requires_supported_merged_proof_and_exact_r
     assert "merged" not in json_fields
 
 
+def test_runner_dependency_pr_status_falls_back_when_gh_lacks_merged_fields() -> None:
+    dependency = runner.RunnerPrDependency(
+        number=4100,
+        base="main",
+        base_sha="b" * 40,
+        head="runner/issue-4100",
+        head_sha="c" * 40,
+    )
+    rest_state = {
+        "number": 4100,
+        "state": "MERGED",
+        "baseRefName": "main",
+        "baseRefOid": "b" * 40,
+        "headRefName": "runner/issue-4100",
+        "headRefOid": "c" * 40,
+    }
+
+    with mock.patch.object(
+        runner, "run_command", return_value=(1, "unknown json field mergedAt")
+    ), mock.patch.object(
+        runner, "_get_pr_branch_validation_state", return_value=(rest_state, "rest")
+    ):
+        state = runner._live_pr_dependency_state(runner.REPO, 4100)
+
+    assert state["mergedAt"] == "verified_via_rest"
+    with mock.patch.object(runner, "_live_pr_dependency_state", return_value=state):
+        assert runner._pr_dependency_hold_reason(runner.REPO, dependency) is None
+
+
 def test_runner_dependency_pr_status_open_and_ref_mismatch_remain_unsatisfied() -> None:
     dependency = runner.RunnerPrDependency(
         number=4100,
@@ -3969,6 +3998,46 @@ def test_codegen_existing_pr_allowed_files_accepts_3523_schema_contract_scope() 
             "tests/test_runner_poll_github_tasks.py",
         }
     )
+
+
+def test_missing_metadata_allowed_files_infers_exactly_one_safe_task_path() -> None:
+    body = """Expected Output: focused/full pytest PASS
+
+```task
+schema: skeleton.runner_task.v1
+repo: alanua/Skeleton
+task_kind: code_edit
+allowed_files:
+  - scripts/runner_poll_github_tasks.py
+payload:
+  operation: bounded_repair
+```
+"""
+    allowed_files, reason = runner._codegen_publish_allowed_files(body)
+
+    assert reason is None
+    assert allowed_files == frozenset({"scripts/runner_poll_github_tasks.py"})
+    assert runner._recoverable_blocked_allowed_files(body) == allowed_files
+
+
+def test_missing_metadata_allowed_files_does_not_infer_multiple_task_paths() -> None:
+    body = """Expected Output: focused/full pytest PASS
+
+```task
+schema: skeleton.runner_task.v1
+repo: alanua/Skeleton
+task_kind: code_edit
+allowed_files:
+  - scripts/runner_poll_github_tasks.py
+  - tests/test_runner_poll_github_tasks.py
+payload:
+  operation: bounded_repair
+```
+"""
+    allowed_files, reason = runner._codegen_publish_allowed_files(body)
+
+    assert allowed_files == frozenset()
+    assert reason == "missing_allowed_files"
 
 
 @pytest.mark.parametrize(
@@ -10766,17 +10835,82 @@ def test_retained_dirty_first_run_blocks_before_provider(
     assert "Existing issue worktree is dirty" in post.call_args.args[1]
 
 
-def test_retained_dirty_same_issue_without_override_blocks_before_provider(
+def test_retained_dirty_same_issue_recoverable_blocked_self_heals_without_body_override(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    coordinator, worktree_root, issue_path = _retained_dirty_worktree_fixture(tmp_path)
+    body = _retained_dirty_issue_body(retry_override=False)
+    issue = {
+        "number": 4019,
+        "title": "Retained dirty recoverable blocked",
+        "body": body,
+        "comments": [_prior_executor_invocation_blocked_comment(body)],
+    }
+    monkeypatch.setattr(runner, "worktree_root", lambda: worktree_root)
+
+    def run_codex(
+        task_content: str,
+        workdir: str,
+        task: runner.RunnerTask | None,
+    ) -> tuple[int, str]:
+        assert task_content == "Continue the retained dirty worktree."
+        assert Path(workdir) == issue_path
+        return 0, "RESULT: DONE\n"
+
+    with mock.patch.object(
+        runner, "run_codex_task", side_effect=run_codex
+    ) as codex, mock.patch.object(
+        runner, "finalize_success", return_value="DONE report"
+    ), mock.patch.object(
+        runner, "cleanup_issue_worktree", return_value=(0, "")
+    ), mock.patch.object(
+        runner, "post_issue_comment"
+    ), mock.patch.object(
+        runner, "set_issue_label"
+    ), mock.patch.object(
+        runner, "notify_task_finished"
+    ):
+        runner.process_issue(issue, workdir=str(coordinator))
+
+    codex.assert_called_once()
+
+
+def test_retained_dirty_recoverable_blocked_self_heal_is_one_time(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     coordinator, worktree_root, _issue_path = _retained_dirty_worktree_fixture(tmp_path)
     body = _retained_dirty_issue_body(retry_override=False)
+    condition = runner.retry_condition_for_issue(
+        body,
+        runner.ROUTE_CODE_GENERATION,
+        None,
+        "executor_invocation",
+    )
+    first = _prior_executor_invocation_blocked_comment(body)
+    prior_reports = runner.parse_prior_blocked_reports(
+        [first],
+        runner.trusted_runner_comment_authors(),
+    )
+    recovered_decision = runner._recoverable_blocked_self_heal_decision(
+        condition,
+        prior_reports,
+        runner.evaluate_retry_policy(condition, prior_reports),
+        body,
+    )
+    recovered_report = runner.append_retry_fields(
+        "BLOCKED: Codex output reported a blocked deliverable.",
+        recovered_decision,
+    )
     issue = {
         "number": 4019,
-        "title": "Retained dirty no override",
+        "title": "Retained dirty self heal spent",
         "body": body,
-        "comments": [_prior_executor_invocation_blocked_comment(body)],
+        "comments": [
+            first,
+            {"author": {"login": "alanua"}, "body": recovered_report},
+        ],
     }
     monkeypatch.setattr(runner, "worktree_root", lambda: worktree_root)
 
@@ -10788,7 +10922,43 @@ def test_retained_dirty_same_issue_without_override_blocks_before_provider(
         runner.process_issue(issue, workdir=str(coordinator))
 
     codex.assert_not_called()
-    assert "Existing issue worktree is dirty" in post.call_args.args[1]
+    assert (
+        "NEEDS_OPERATOR: Runner retry policy blocked repeated execution."
+        in post.call_args.args[1]
+    )
+
+
+def test_reconcile_recoverable_blocked_codegen_issue_requeues_only_label() -> None:
+    body = _retained_dirty_issue_body(retry_override=False)
+    issue = {
+        "number": 4021,
+        "title": "Recoverable blocked",
+        "body": body,
+        "state": "OPEN",
+        "closed": False,
+        "labels": [
+            {"name": runner.LABEL_AGENT_TASK},
+            {"name": runner.LABEL_BLOCKED},
+        ],
+    }
+    comments = [_prior_executor_invocation_blocked_comment(body)]
+
+    with mock.patch.object(
+        runner, "_queue_replenisher_issue_list_for_label", return_value=[issue]
+    ) as issue_list, mock.patch.object(
+        runner, "get_issue_comments", return_value=comments
+    ) as get_comments, mock.patch.object(
+        runner, "set_issue_label"
+    ) as set_label, mock.patch.object(
+        runner, "post_issue_comment"
+    ) as post:
+        count = runner.reconcile_recoverable_blocked_codegen_issues()
+
+    assert count == 1
+    issue_list.assert_called_once_with(runner.LABEL_BLOCKED)
+    get_comments.assert_called_once_with(dict(issue))
+    set_label.assert_called_once_with(4021, runner.LABEL_BLOCKED, runner.LABEL_READY)
+    post.assert_not_called()
 
 
 def test_retained_dirty_out_of_scope_tracked_file_blocks_before_provider(
@@ -23592,44 +23762,6 @@ def test_run_codex_task_sanitizes_home_edge_environment(
     assert os.environ[HOME_EDGE_EXEC_HMAC_ENV] == SYNTHETIC_HOME_EDGE_EXEC_HMAC
 
 
-def test_run_codex_task_bounds_primary_codex_invocation(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    worktree = tmp_path / "worktree"
-    worktree.mkdir()
-    monkeypatch.setattr(runner, "private_memory_bootstrap_request", lambda *_args: None)
-    monkeypatch.setattr(runner, "codex_exec_command", lambda *_args: ["codex", "exec"])
-    monkeypatch.setattr(
-        runner,
-        "sanitize_codegen_child_environment",
-        lambda _env: {"PATH": "/usr/bin"},
-    )
-    monkeypatch.setattr(runner.shutil, "which", lambda *_args, **_kwargs: None)
-    completed = runner.subprocess.CompletedProcess(
-        args=["codex"],
-        returncode=0,
-        stdout="RESULT: DONE\n",
-        stderr="",
-    )
-
-    with mock.patch.object(
-        runner.subprocess,
-        "run",
-        return_value=completed,
-    ) as subprocess_run:
-        code, output = runner.run_codex_task("Task body", str(worktree), None)
-
-    assert code == 0
-    assert output.startswith("RESULT: DONE\n")
-    assert subprocess_run.call_args.args[0] == ["codex", "exec"]
-    assert subprocess_run.call_args.kwargs["cwd"] == str(worktree)
-    assert (
-        subprocess_run.call_args.kwargs["timeout"]
-        == runner.RUNNER_CODEX_PRIMARY_CODEGEN_TIMEOUT_SECONDS
-    )
-
-
 def test_run_codex_task_uses_runner_owned_manifest_state_after_patch(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -25145,45 +25277,6 @@ privacy_boundary: PUBLIC_SAFE_REPOSITORY_ONLY
     assert code == 1
     assert "PRIMARY_LEFT_WORKTREE_DIRTY" in output
     assert [call[0] for call in calls] == ["codex", "git"]
-
-
-def test_run_codex_task_primary_timeout_fails_closed_with_retained_worktree(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    task_content = """requested_capabilities: [repository_read, repository_write, test_execution]
-privacy_boundary: PUBLIC_SAFE_REPOSITORY_ONLY
-"""
-    monkeypatch.setattr(runner, "private_memory_bootstrap_request", lambda *_args: None)
-    monkeypatch.setattr(
-        runner, "sanitize_codegen_child_environment", lambda _env: {"PATH": "/usr/bin"}
-    )
-    monkeypatch.setattr(runner, "codex_exec_command", lambda *_args: ["codex"])
-    monkeypatch.setattr(
-        runner,
-        "select_openhands_secondary_route",
-        mock.Mock(side_effect=AssertionError("secondary must not run after timeout")),
-    )
-    calls: list[list[str]] = []
-
-    def fake_run(args, cwd=None, *, timeout=None, **_kwargs):
-        calls.append(list(args))
-        raise runner.subprocess.TimeoutExpired(
-            cmd=args, timeout=runner.RUNNER_CODEX_PRIMARY_CODEGEN_TIMEOUT_SECONDS
-        )
-
-    monkeypatch.setattr(runner, "run_command", fake_run)
-
-    code, output = runner.run_codex_task(task_content, str(tmp_path))
-
-    assert code == 1
-    assert "RESULT: BLOCKED" in output
-    assert "SKELETON_CODEGEN_PRIMARY_FAILURE=PRIMARY_CODEGEN_TIMEOUT" in output
-    assert (
-        f"primary_codegen_timeout_seconds={runner.RUNNER_CODEX_PRIMARY_CODEGEN_TIMEOUT_SECONDS}"
-        in output
-    )
-    assert "retained_worktree_status=preserved_for_operator_review" in output
-    assert calls == [["codex"]]
 
 
 
@@ -27427,3 +27520,80 @@ def test_runner_vnext_readonly_preflight_rejects_colliding_or_memory_stores(
     assert report.startswith("BLOCKED:")
     assert "ledger_file_backed=false" in report
     assert "lease_file_backed=false" in report
+
+def test_run_codex_task_bounds_primary_codex_invocation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    monkeypatch.setattr(runner, "private_memory_bootstrap_request", lambda *_args: None)
+    monkeypatch.setattr(runner, "codex_exec_command", lambda *_args: ["codex", "exec"])
+    monkeypatch.setattr(
+        runner,
+        "sanitize_codegen_child_environment",
+        lambda _env: {"PATH": "/usr/bin"},
+    )
+    monkeypatch.setattr(runner.shutil, "which", lambda *_args, **_kwargs: None)
+    completed = runner.subprocess.CompletedProcess(
+        args=["codex"],
+        returncode=0,
+        stdout="RESULT: DONE\n",
+        stderr="",
+    )
+
+    with mock.patch.object(
+        runner.subprocess,
+        "run",
+        return_value=completed,
+    ) as subprocess_run:
+        code, output = runner.run_codex_task("Task body", str(worktree), None)
+
+    assert code == 0
+    assert output.startswith("RESULT: DONE\n")
+    assert subprocess_run.call_args.args[0] == ["codex", "exec"]
+    assert subprocess_run.call_args.kwargs["cwd"] == str(worktree)
+    assert (
+        subprocess_run.call_args.kwargs["timeout"]
+        == runner.RUNNER_CODEX_PRIMARY_CODEGEN_TIMEOUT_SECONDS
+    )
+
+
+def test_run_codex_task_primary_timeout_fails_closed_with_retained_worktree(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    task_content = """requested_capabilities: [repository_read, repository_write, test_execution]
+privacy_boundary: PUBLIC_SAFE_REPOSITORY_ONLY
+"""
+    monkeypatch.setattr(runner, "private_memory_bootstrap_request", lambda *_args: None)
+    monkeypatch.setattr(
+        runner, "sanitize_codegen_child_environment", lambda _env: {"PATH": "/usr/bin"}
+    )
+    monkeypatch.setattr(runner, "codex_exec_command", lambda *_args: ["codex"])
+    monkeypatch.setattr(
+        runner,
+        "select_openhands_secondary_route",
+        mock.Mock(side_effect=AssertionError("secondary must not run after timeout")),
+    )
+    calls: list[list[str]] = []
+
+    def fake_run(args, cwd=None, *, timeout=None, **_kwargs):
+        calls.append(list(args))
+        raise runner.subprocess.TimeoutExpired(
+            cmd=args, timeout=runner.RUNNER_CODEX_PRIMARY_CODEGEN_TIMEOUT_SECONDS
+        )
+
+    monkeypatch.setattr(runner, "run_command", fake_run)
+
+    code, output = runner.run_codex_task(task_content, str(tmp_path))
+
+    assert code == 1
+    assert "RESULT: BLOCKED" in output
+    assert "SKELETON_CODEGEN_PRIMARY_FAILURE=PRIMARY_CODEGEN_TIMEOUT" in output
+    assert (
+        f"primary_codegen_timeout_seconds={runner.RUNNER_CODEX_PRIMARY_CODEGEN_TIMEOUT_SECONDS}"
+        in output
+    )
+    assert "retained_worktree_status=preserved_for_operator_review" in output
+    assert calls == [["codex"]]
+
