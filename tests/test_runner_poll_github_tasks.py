@@ -2363,6 +2363,35 @@ def test_runner_dependency_pr_status_requires_supported_merged_proof_and_exact_r
     assert "merged" not in json_fields
 
 
+def test_runner_dependency_pr_status_falls_back_when_gh_lacks_merged_fields() -> None:
+    dependency = runner.RunnerPrDependency(
+        number=4100,
+        base="main",
+        base_sha="b" * 40,
+        head="runner/issue-4100",
+        head_sha="c" * 40,
+    )
+    rest_state = {
+        "number": 4100,
+        "state": "MERGED",
+        "baseRefName": "main",
+        "baseRefOid": "b" * 40,
+        "headRefName": "runner/issue-4100",
+        "headRefOid": "c" * 40,
+    }
+
+    with mock.patch.object(
+        runner, "run_command", return_value=(1, "unknown json field mergedAt")
+    ), mock.patch.object(
+        runner, "_get_pr_branch_validation_state", return_value=(rest_state, "rest")
+    ):
+        state = runner._live_pr_dependency_state(runner.REPO, 4100)
+
+    assert state["mergedAt"] == "verified_via_rest"
+    with mock.patch.object(runner, "_live_pr_dependency_state", return_value=state):
+        assert runner._pr_dependency_hold_reason(runner.REPO, dependency) is None
+
+
 def test_runner_dependency_pr_status_open_and_ref_mismatch_remain_unsatisfied() -> None:
     dependency = runner.RunnerPrDependency(
         number=4100,
