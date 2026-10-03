@@ -5540,12 +5540,21 @@ def _live_pr_dependency_state(repository: str, pr_number: int) -> dict[str, Any]
             ),
         ]
     )
-    if code != 0:
-        raise RuntimeError("pr_dependency_unresolved")
-    parsed = json.loads(output or "{}")
-    if not isinstance(parsed, dict):
-        raise RuntimeError("pr_dependency_malformed")
-    return parsed
+    if code == 0:
+        try:
+            parsed = json.loads(output or "{}")
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, dict):
+            return parsed
+
+    try:
+        state, _source = _get_pr_branch_validation_state(repository, pr_number)
+    except RuntimeError as exc:
+        raise RuntimeError("pr_dependency_unresolved") from exc
+    if state.get("state") == "MERGED":
+        state = {**state, "mergedAt": "verified_via_rest"}
+    return state
 
 
 def _issue_dependency_hold_reason(
