@@ -10766,17 +10766,82 @@ def test_retained_dirty_first_run_blocks_before_provider(
     assert "Existing issue worktree is dirty" in post.call_args.args[1]
 
 
-def test_retained_dirty_same_issue_without_override_blocks_before_provider(
+def test_retained_dirty_same_issue_recoverable_blocked_self_heals_without_body_override(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    coordinator, worktree_root, issue_path = _retained_dirty_worktree_fixture(tmp_path)
+    body = _retained_dirty_issue_body(retry_override=False)
+    issue = {
+        "number": 4019,
+        "title": "Retained dirty recoverable blocked",
+        "body": body,
+        "comments": [_prior_executor_invocation_blocked_comment(body)],
+    }
+    monkeypatch.setattr(runner, "worktree_root", lambda: worktree_root)
+
+    def run_codex(
+        task_content: str,
+        workdir: str,
+        task: runner.RunnerTask | None,
+    ) -> tuple[int, str]:
+        assert task_content == "Continue the retained dirty worktree."
+        assert Path(workdir) == issue_path
+        return 0, "RESULT: DONE\n"
+
+    with mock.patch.object(
+        runner, "run_codex_task", side_effect=run_codex
+    ) as codex, mock.patch.object(
+        runner, "finalize_success", return_value="DONE report"
+    ), mock.patch.object(
+        runner, "cleanup_issue_worktree", return_value=(0, "")
+    ), mock.patch.object(
+        runner, "post_issue_comment"
+    ), mock.patch.object(
+        runner, "set_issue_label"
+    ), mock.patch.object(
+        runner, "notify_task_finished"
+    ):
+        runner.process_issue(issue, workdir=str(coordinator))
+
+    codex.assert_called_once()
+
+
+def test_retained_dirty_recoverable_blocked_self_heal_is_one_time(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     coordinator, worktree_root, _issue_path = _retained_dirty_worktree_fixture(tmp_path)
     body = _retained_dirty_issue_body(retry_override=False)
+    condition = runner.retry_condition_for_issue(
+        body,
+        runner.ROUTE_CODE_GENERATION,
+        None,
+        "executor_invocation",
+    )
+    first = _prior_executor_invocation_blocked_comment(body)
+    prior_reports = runner.parse_prior_blocked_reports(
+        [first],
+        runner.trusted_runner_comment_authors(),
+    )
+    recovered_decision = runner._recoverable_blocked_self_heal_decision(
+        condition,
+        prior_reports,
+        runner.evaluate_retry_policy(condition, prior_reports),
+        body,
+    )
+    recovered_report = runner.append_retry_fields(
+        "BLOCKED: Codex output reported a blocked deliverable.",
+        recovered_decision,
+    )
     issue = {
         "number": 4019,
-        "title": "Retained dirty no override",
+        "title": "Retained dirty self heal spent",
         "body": body,
-        "comments": [_prior_executor_invocation_blocked_comment(body)],
+        "comments": [
+            first,
+            {"author": {"login": "alanua"}, "body": recovered_report},
+        ],
     }
     monkeypatch.setattr(runner, "worktree_root", lambda: worktree_root)
 
@@ -10788,7 +10853,43 @@ def test_retained_dirty_same_issue_without_override_blocks_before_provider(
         runner.process_issue(issue, workdir=str(coordinator))
 
     codex.assert_not_called()
-    assert "Existing issue worktree is dirty" in post.call_args.args[1]
+    assert (
+        "NEEDS_OPERATOR: Runner retry policy blocked repeated execution."
+        in post.call_args.args[1]
+    )
+
+
+def test_reconcile_recoverable_blocked_codegen_issue_requeues_only_label() -> None:
+    body = _retained_dirty_issue_body(retry_override=False)
+    issue = {
+        "number": 4021,
+        "title": "Recoverable blocked",
+        "body": body,
+        "state": "OPEN",
+        "closed": False,
+        "labels": [
+            {"name": runner.LABEL_AGENT_TASK},
+            {"name": runner.LABEL_BLOCKED},
+        ],
+    }
+    comments = [_prior_executor_invocation_blocked_comment(body)]
+
+    with mock.patch.object(
+        runner, "_queue_replenisher_issue_list_for_label", return_value=[issue]
+    ) as issue_list, mock.patch.object(
+        runner, "get_issue_comments", return_value=comments
+    ) as get_comments, mock.patch.object(
+        runner, "set_issue_label"
+    ) as set_label, mock.patch.object(
+        runner, "post_issue_comment"
+    ) as post:
+        count = runner.reconcile_recoverable_blocked_codegen_issues()
+
+    assert count == 1
+    issue_list.assert_called_once_with(runner.LABEL_BLOCKED)
+    get_comments.assert_called_once_with(dict(issue))
+    set_label.assert_called_once_with(4021, runner.LABEL_BLOCKED, runner.LABEL_READY)
+    post.assert_not_called()
 
 
 def test_retained_dirty_out_of_scope_tracked_file_blocks_before_provider(

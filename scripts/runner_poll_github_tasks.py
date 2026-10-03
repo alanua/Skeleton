@@ -208,8 +208,11 @@ from core.runner_codegen_router import (
     task_contract_allows_cloud_secondary,
 )
 from core.runner_retry_policy import (
+    ALLOW_FIRST_ATTEMPT,
+    ALLOW_ONE_TIME_OVERRIDE,
     BLOCK_REPEATED_REASON,
     NEEDS_OPERATOR,
+    PriorBlockedReport,
     ROUTE_CODE_GENERATION,
     ROUTE_PUBLISH_ONLY,
     ROUTE_RUNTIME_ONLY,
@@ -334,6 +337,9 @@ LABEL_BLOCKED = "runner:blocked"
 LABEL_NEEDS_OPERATOR = "runner:needs-operator"
 LABEL_AGENT_TASK = "agent:task"
 LABEL_WAITING_DEPENDENCY = "runner:waiting-dependency"
+RECOVERABLE_BLOCKED_SELF_HEAL_OVERRIDE_HASH = one_time_override_hash(
+    {"kind": "recoverable_blocked_dirty_continuation", "version": 2}
+)
 RUNNER_LANE_LABELS = {
     "default": "runner:lane:default",
     "lane-1": "runner:lane:lane-1",
@@ -21715,6 +21721,122 @@ def _codegen_dirty_continuation_gate_for_issue(
     )
 
 
+def _recoverable_blocked_allowed_files(body: str) -> frozenset[str]:
+    allowed_files, allowed_reason = _issue_publish_allowed_files(
+        _metadata_before_task(body)
+    )
+    if allowed_reason is not None:
+        return frozenset()
+    return allowed_files
+
+
+def _recoverable_blocked_self_heal_decision(
+    condition: RetryCondition,
+    prior_reports: list[PriorBlockedReport],
+    evaluated: RetryDecision,
+    issue_body: str,
+) -> RetryDecision:
+    if not (
+        evaluated.retry_decision == ALLOW_FIRST_ATTEMPT
+        and evaluated.retry_attempt == 2
+    ):
+        return evaluated
+    if condition.route != ROUTE_CODE_GENERATION:
+        return evaluated
+    if condition.blocker_reason != "executor_invocation":
+        return evaluated
+    if not _recoverable_blocked_allowed_files(issue_body):
+        return evaluated
+    same_condition = [
+        report
+        for report in prior_reports
+        if report.route in (None, ROUTE_CODE_GENERATION)
+        and report.condition_signature == evaluated.condition_signature
+    ]
+    if len(same_condition) != 1:
+        return evaluated
+    prior = same_condition[0]
+    if prior.retry_attempt != 1 or prior.override_token_hash is not None:
+        return evaluated
+    return RetryDecision(
+        retry_decision=ALLOW_ONE_TIME_OVERRIDE,
+        retry_attempt=evaluated.retry_attempt,
+        blocker_signature=evaluated.blocker_signature,
+        route=evaluated.route,
+        condition_signature=evaluated.condition_signature,
+        override_used=True,
+        override_token_hash=RECOVERABLE_BLOCKED_SELF_HEAL_OVERRIDE_HASH,
+    )
+
+
+def _recoverable_blocked_issue_can_be_requeued(
+    issue: Mapping[str, Any],
+    prior_comments: list[dict[str, Any]] | None,
+) -> bool:
+    if not is_open_task_issue(dict(issue)):
+        return False
+    labels = _issue_label_names(issue)
+    if LABEL_BLOCKED not in labels:
+        return False
+    if labels & (
+        {LABEL_READY, LABEL_RUNNING, LABEL_DONE, LABEL_WAITING_DEPENDENCY}
+        | QUEUE_REPLENISHER_NEEDS_OPERATOR_LABELS
+    ):
+        return False
+    body = str(issue.get("body") or "")
+    maintenance_mode, maintenance_task_id = extract_runtime_maintenance_task_id(body)
+    merge_mode, _merge_request, _merge_reason = extract_telegram_approved_pr_merge_request(
+        body
+    )
+    if runner_task_route(
+        maintenance_mode=maintenance_mode,
+        maintenance_task_id=maintenance_task_id,
+        merge_mode=merge_mode,
+    ) != ROUTE_CODE_GENERATION:
+        return False
+    if code_task_expected_output_block_reason(body) is not None:
+        return False
+    if not _recoverable_blocked_allowed_files(body):
+        return False
+    if prior_comments is None:
+        return False
+
+    prior_reports = parse_prior_blocked_reports(
+        prior_comments,
+        trusted_runner_comment_authors(),
+    )
+    condition = retry_condition_for_issue(
+        body,
+        ROUTE_CODE_GENERATION,
+        None,
+        "executor_invocation",
+    )
+    evaluated = evaluate_retry_policy(condition, prior_reports)
+    healed = _recoverable_blocked_self_heal_decision(
+        condition,
+        prior_reports,
+        evaluated,
+        body,
+    )
+    return healed.retry_decision == ALLOW_ONE_TIME_OVERRIDE
+
+
+def reconcile_recoverable_blocked_codegen_issues(limit: int = 20) -> int:
+    reconciled = 0
+    for issue in _queue_replenisher_issue_list_for_label(LABEL_BLOCKED):
+        number = _queue_replenisher_issue_number(issue)
+        if number is None:
+            continue
+        prior_comments = get_issue_comments(dict(issue))
+        if not _recoverable_blocked_issue_can_be_requeued(issue, prior_comments):
+            continue
+        set_issue_label(number, LABEL_BLOCKED, LABEL_READY)
+        reconciled += 1
+        if reconciled >= limit:
+            return reconciled
+    return reconciled
+
+
 def process_issue(
     issue: dict[str, Any],
     workdir: str | None = None,
@@ -21945,12 +22067,19 @@ def _process_issue_in_current_queue_context(
             set_issue_label(issue_number, LABEL_READY, LABEL_BLOCKED)
             notify_task_finished(issue_number, "NEEDS_OPERATOR", report)
             return
+        prior_blocked_reports = parse_prior_blocked_reports(
+            prior_comments, trusted_runner_comment_authors()
+        )
         retry_decision = evaluate_retry_policy(
             retry_condition,
-            parse_prior_blocked_reports(
-                        prior_comments, trusted_runner_comment_authors()
-                    ),
+            prior_blocked_reports,
             extract_retry_override(issue_body),
+        )
+        retry_decision = _recoverable_blocked_self_heal_decision(
+            retry_condition,
+            prior_blocked_reports,
+            retry_decision,
+            issue_body,
         )
         if retry_decision.retry_decision in {BLOCK_REPEATED_REASON, NEEDS_OPERATOR}:
             report = repeated_blocker_report(retry_decision)
@@ -22573,6 +22702,10 @@ def poll_once(workdir: str | None = None) -> int:
         pass
     try:
         reconcile_waiting_dependency_issues()
+    except Exception:
+        pass
+    try:
+        reconcile_recoverable_blocked_codegen_issues()
     except Exception:
         pass
     source_token = _QUEUE_RECOVERY_SOURCE.set("poll")
