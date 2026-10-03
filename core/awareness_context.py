@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Mapping, Sequence
@@ -15,10 +16,23 @@ DERIVATION_MODE = "ephemeral_read_only_derived_packet"
 MAX_MEMORY_RECORDS = 10
 MAX_PENDING_ITEMS = 10
 MAX_CAPABILITY_RECORDS = 20
+MAX_AUXILIARY_RECORDS = 10
 MAX_LABELS = 16
 STALE_PENDING_AFTER_SECONDS = 7 * 24 * 60 * 60
 
 FRESHNESS_LABELS = frozenset({"FRESH", "STALE", "UNKNOWN", "MIXED"})
+SECTION_NAMES = (
+    "memory",
+    "pending_work",
+    "capability_truth",
+    "task_contract",
+    "repository_scope",
+    "validation_contract",
+    "output_contract",
+    "privacy_controls",
+    "runtime_controls",
+)
+AUXILIARY_SECTION_NAMES = SECTION_NAMES[3:]
 
 
 class AwarenessContextError(ValueError):
@@ -41,10 +55,12 @@ def assemble_awareness_context(
     memory_context: TaskMemoryContextResult | Mapping[str, Any],
     pending_work: Mapping[str, Any],
     capability_truth: Mapping[str, Any],
+    auxiliary_sections: Mapping[str, Mapping[str, Any]] | None = None,
     now: datetime | str | None = None,
     memory_limit: int = MAX_MEMORY_RECORDS,
     pending_limit: int = MAX_PENDING_ITEMS,
     capability_limit: int = MAX_CAPABILITY_RECORDS,
+    auxiliary_limit: int = MAX_AUXILIARY_RECORDS,
 ) -> AwarenessContextResult:
     """Assemble an ephemeral awareness packet from existing read-model outputs."""
 
@@ -61,12 +77,21 @@ def assemble_awareness_context(
         capability_truth,
         _bounded_limit(capability_limit, MAX_CAPABILITY_RECORDS),
     )
-    labels = _packet_labels(memory_section, pending_section, capability_section)
+    aux_limit = _bounded_limit(auxiliary_limit, MAX_AUXILIARY_RECORDS)
+    auxiliary = auxiliary_sections or {}
+    if not isinstance(auxiliary, Mapping):
+        raise AwarenessContextError("auxiliary_sections must be a mapping")
     sections = {
         "memory": memory_section,
         "pending_work": pending_section,
         "capability_truth": capability_section,
     }
+    for name in AUXILIARY_SECTION_NAMES:
+        source = auxiliary.get(name, {})
+        if not isinstance(source, Mapping):
+            raise AwarenessContextError(f"{name} section must be a mapping")
+        sections[name] = _auxiliary_section(name, source, aux_limit)
+    labels = _packet_labels(*(sections[name] for name in SECTION_NAMES))
     packet = {
         "schema": AWARENESS_CONTEXT_SCHEMA,
         "project_id": project,
@@ -249,8 +274,84 @@ def _capability_section(capability_truth: Mapping[str, Any], limit: int) -> dict
     )
 
 
+def _auxiliary_section(name: str, source: Mapping[str, Any], limit: int) -> dict[str, Any]:
+    if name not in AUXILIARY_SECTION_NAMES:
+        raise AwarenessContextError("unknown auxiliary section")
+    copied = copy.deepcopy(dict(source))
+    records = _auxiliary_records(copied)
+    selected = [_public_auxiliary_record(item) for item in records[:limit]]
+    freshnesses = [
+        _freshness_label(item.get("freshness_label", item.get("freshness", "UNKNOWN")))
+        for item in selected
+    ]
+    conflict = any(item.get("conflict_label") == "CONFLICTS_PRESENT" for item in selected)
+    return _with_section_hash(
+        {
+            "section_name": name,
+            "source_receipt_hash": content_hash(copied),
+            "records": selected,
+            "counts": {"source_records": len(records), "included": len(selected)},
+            "limits": {"records": limit},
+            "truncated": len(records) > limit,
+            "freshness_label": _aggregate_freshness(freshnesses),
+            "conflict_label": "CONFLICTS_PRESENT" if conflict else "NONE",
+            "epistemic_label": _aggregate_epistemic(
+                [str(item.get("epistemic_label", "DECLARED")) for item in selected]
+            ),
+        }
+    )
+
+
+def _auxiliary_records(source: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    for key in ("records", "items", "entries"):
+        value = source.get(key)
+        if value is None:
+            continue
+        return _sequence_of_mappings(value, key)
+    if not source:
+        return []
+    return [source]
+
+
+def _public_auxiliary_record(record: Mapping[str, Any]) -> dict[str, Any]:
+    safe: dict[str, Any] = {}
+    for key in sorted(record):
+        if key.startswith("_") or key in {"private_value", "payload", "secret", "raw_value"}:
+            continue
+        value = record[key]
+        if isinstance(value, str):
+            safe[_label_token(str(key), "record_key")] = value[:512]
+        elif isinstance(value, bool) or isinstance(value, int):
+            safe[_label_token(str(key), "record_key")] = value
+        elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+            safe[_label_token(str(key), "record_key")] = [
+                str(item)[:160]
+                for item in value[:MAX_LABELS]
+                if isinstance(item, (str, int, bool))
+            ]
+    safe.setdefault("freshness_label", _freshness_label(safe.get("freshness", "UNKNOWN")))
+    safe.setdefault("conflict_label", "NONE")
+    safe.setdefault("epistemic_label", "DECLARED")
+    return safe
+
+
 def _public_receipt(packet: Mapping[str, Any]) -> dict[str, Any]:
     sections = packet["sections"]
+    section_hashes = {name: sections[name]["section_hash"] for name in SECTION_NAMES}
+    counts = {
+        "memory_records": sections["memory"]["counts"]["included"],
+        "pending_items": sections["pending_work"]["counts"]["included"],
+        "capability_records": sections["capability_truth"]["counts"]["included"],
+    }
+    limits = {
+        "memory_records": sections["memory"]["limits"]["records"],
+        "pending_items": sections["pending_work"]["limits"]["items"],
+        "capability_records": sections["capability_truth"]["limits"]["records"],
+    }
+    truncated = {name: sections[name]["truncated"] for name in SECTION_NAMES}
+    for name in AUXILIARY_SECTION_NAMES:
+        counts[f"{name}_records"] = sections[name]["counts"]["included"]
+        limits[f"{name}_records"] = sections[name]["limits"]["records"]
     receipt = {
         "schema": AWARENESS_CONTEXT_RECEIPT_SCHEMA,
         "status": "DONE",
@@ -260,26 +361,10 @@ def _public_receipt(packet: Mapping[str, Any]) -> dict[str, Any]:
         "derivation_mode": packet["derivation_mode"],
         "checked_at": packet["checked_at"],
         "awareness_hash": packet["awareness_hash"],
-        "section_hashes": {
-            "memory": sections["memory"]["section_hash"],
-            "pending_work": sections["pending_work"]["section_hash"],
-            "capability_truth": sections["capability_truth"]["section_hash"],
-        },
-        "counts": {
-            "memory_records": sections["memory"]["counts"]["included"],
-            "pending_items": sections["pending_work"]["counts"]["included"],
-            "capability_records": sections["capability_truth"]["counts"]["included"],
-        },
-        "limits": {
-            "memory_records": sections["memory"]["limits"]["records"],
-            "pending_items": sections["pending_work"]["limits"]["items"],
-            "capability_records": sections["capability_truth"]["limits"]["records"],
-        },
-        "truncated": {
-            "memory": sections["memory"]["truncated"],
-            "pending_work": sections["pending_work"]["truncated"],
-            "capability_truth": sections["capability_truth"]["truncated"],
-        },
+        "section_hashes": section_hashes,
+        "counts": counts,
+        "limits": limits,
+        "truncated": truncated,
         "labels": packet["labels"],
         "public_safe": True,
         "private_payloads_included": False,

@@ -16,6 +16,7 @@ from core.memory_bootstrap import (
     reset_bootstrap_adapter_cache,
 )
 from core.memory_scope_resolver import task_transition_hash
+from core.private_memory_history import content_hash
 from core.private_memory_stack import PrivateMemoryStack
 
 
@@ -40,6 +41,28 @@ def _request(root: Path, canonical_ref: str, task: str = "exact task body") -> d
         "repository_root": str(Path.cwd()),
         "worktree_root": str(Path.cwd()),
     }
+
+
+def _awareness_packet(private_value: str = "AwarenessSecret private note") -> dict[str, object]:
+    packet: dict[str, object] = {
+        "schema": "skeleton.awareness_context.v1",
+        "project_id": "skeleton",
+        "task_route": "runner",
+        "privacy_boundary": "PRIVATE_RUNTIME_CONTEXT_PUBLIC_SAFE_RECEIPTS_ONLY",
+        "derivation_mode": "ephemeral_read_only_derived_packet",
+        "checked_at": "2026-10-03T00:00:00Z",
+        "sections": {
+            "memory": {
+                "records": [{"canonical_ref": "skeleton.awareness:runtime", "private_value": private_value}],
+                "freshness_label": "FRESH",
+            }
+        },
+        "labels": {"freshness": "FRESH", "conflict": "NONE", "epistemic": "OBSERVED"},
+        "runtime_mutation_performed": False,
+        "canonical_store_mutation_performed": False,
+    }
+    packet["awareness_hash"] = content_hash(packet)
+    return packet
 
 
 def _canonical_source_attribution(exact: dict[str, object]) -> dict[str, object]:
@@ -135,6 +158,53 @@ def test_bootstrap_real_private_stack_gateway_e2e_and_privacy_handoff(tmp_path: 
     assert seen["mode"] == 0o600
     assert not Path(seen["private_path"]).exists()
     assert not str(seen["private_path"]).startswith(str(Path.cwd()))
+
+
+def test_bootstrap_hands_awareness_packet_through_private_context_only(tmp_path: Path) -> None:
+    stack = PrivateMemoryStack(tmp_path)
+    stack.init(import_manifest=False)
+    stack.put(namespace="skeleton.notes", fact_id="awareness", value={"summary": "handoff"})
+    exact = stack.get(namespace="skeleton.notes", fact_id="awareness")
+    awareness = _awareness_packet()
+    request = _request(tmp_path, str(exact["canonical_ref"]))
+    request["awareness_context"] = awareness
+    captured: dict[str, object] = {}
+
+    def executor(argv: list[str], _stdin_text: str, env: object) -> tuple[int, str]:
+        private_path = Path(dict(env)[PRIVATE_CONTEXT_ENV])  # type: ignore[arg-type]
+        captured.update(json.loads(private_path.read_text(encoding="utf-8")))
+        assert str(private_path) not in argv
+        return 0, "summary allowed"
+
+    receipt = MemoryBootstrap.from_request(request).execute(
+        task_body="exact task body",
+        executor=executor,
+    )
+
+    assert receipt["status"] == "DONE"
+    assert captured["awareness"] == awareness
+    assert "AwarenessSecret private note" not in json.dumps(receipt, sort_keys=True)
+
+
+def test_bootstrap_blocks_awareness_private_value_echo(tmp_path: Path) -> None:
+    stack = PrivateMemoryStack(tmp_path)
+    stack.init(import_manifest=False)
+    stack.put(namespace="skeleton.notes", fact_id="awareness_echo", value={"summary": "handoff"})
+    exact = stack.get(namespace="skeleton.notes", fact_id="awareness_echo")
+    request = _request(tmp_path, str(exact["canonical_ref"]))
+    request["awareness_context"] = _awareness_packet("AwarenessEchoPrivate")
+
+    def executor(_argv: list[str], _stdin_text: str, _env: object) -> tuple[int, str]:
+        return 0, "worker said AwarenessEchoPrivate"
+
+    receipt = MemoryBootstrap.from_request(request).execute(
+        task_body="exact task body",
+        executor=executor,
+    )
+
+    assert receipt["status"] == "BLOCKED"
+    assert receipt["reason_codes"] == ["PRIVATE_CONTEXT_ECHO_BLOCKED"]
+    assert "AwarenessEchoPrivate" not in json.dumps(receipt, sort_keys=True)
 
 
 def test_bootstrap_rejects_stale_cognee_and_uses_fresh_mempalace(tmp_path: Path) -> None:

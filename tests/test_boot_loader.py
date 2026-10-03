@@ -7,7 +7,7 @@ from pathlib import Path
 
 import yaml
 
-from core.boot_loader import BootLoader
+from core.boot_loader import AwarenessBootMetadata, BootLoader
 
 
 ROOT = Path(__file__).parents[1]
@@ -36,6 +36,7 @@ def test_boot_report_has_all_v1_required_fields() -> None:
         "active_project_status",
         "source_trust_map",
         "capability_runtime_truth",
+        "awareness_context",
         "writes",
     }
 
@@ -47,6 +48,28 @@ def test_capability_runtime_truth_uses_normal_mapping_visibility() -> None:
     assert "capability_runtime_truth" in list(report)
     assert "capability_runtime_truth" in dict(report.items())
     assert "capability_runtime_truth" in json.loads(json.dumps(report))
+
+
+def test_boot_loader_accepts_public_safe_awareness_metadata_only() -> None:
+    report = BootLoader(ROOT).load(
+        awareness_metadata=AwarenessBootMetadata(
+            receipt_hash="r" * 64,
+            awareness_hash="a" * 64,
+            freshness="FRESH",
+            checked_at="2026-10-03T00:00:00Z",
+        )
+    )
+
+    assert report["awareness_context"] == {
+        "schema": "skeleton.awareness_context.public_receipt.v1",
+        "receipt_hash": "r" * 64,
+        "awareness_hash": "a" * 64,
+        "freshness": "FRESH",
+        "checked_at": "2026-10-03T00:00:00Z",
+        "public_safe": True,
+    }
+    assert "section_hashes" not in report["awareness_context"]
+    assert "private_value" not in json.dumps(report["awareness_context"])
 
 
 def test_boot_report_mode_is_boot() -> None:
