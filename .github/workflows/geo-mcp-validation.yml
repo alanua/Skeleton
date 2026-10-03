@@ -1,0 +1,137 @@
+name: Geo MCP contract validation
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - core/geo.py
+      - core/geo_mcp.py
+      - core/geo_providers.py
+      - fixtures/geo/**
+      - schemas/geo_*.json
+      - tests/test_geo.py
+      - .github/workflows/geo-mcp-validation.yml
+  workflow_dispatch:
+    inputs:
+      commit_sha:
+        description: Exact 40-character repository commit SHA to validate
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: geo-mcp-validation-${{ github.event.pull_request.number || inputs.commit_sha || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Validate Geo MCP contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+    steps:
+      - name: Validate manual commit SHA
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          COMMIT_SHA: ${{ inputs.commit_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$COMMIT_SHA" =~ ^[0-9a-fA-F]{40}$ ]]
+
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.commit_sha || github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install Geo validation dependencies
+        run: |
+          python -m pip install --disable-pip-version-check \
+            'pytest>=8.0.0,<9.0.0' \
+            'PyYAML>=6.0.0,<7.0.0' \
+            'jsonschema>=4.22.0,<5.0.0'
+
+      - name: Run focused Geo tests
+        run: python -m pytest -q tests/test_geo.py
+
+      - name: Validate JSON Schemas and synthetic fixtures
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          from jsonschema import Draft202012Validator, RefResolver
+
+          root = Path.cwd()
+          schema_paths = sorted((root / "schemas").glob("geo_*.schema.json"))
+          schemas = {}
+          loaded = {}
+          for path in schema_paths:
+              schema = json.loads(path.read_text(encoding="utf-8"))
+              Draft202012Validator.check_schema(schema)
+              schemas[schema["$id"]] = schema
+              loaded[path.name] = schema
+
+          def validator(name: str) -> Draft202012Validator:
+              schema = loaded[name]
+              return Draft202012Validator(schema, resolver=RefResolver.from_schema(schema, store=schemas))
+
+          fixture = json.loads((root / "fixtures/geo/synthetic_places.json").read_text(encoding="utf-8"))
+          for place in fixture["places"]:
+              validator("geo_place.schema.json").validate(place)
+
+          validator("geo_route.schema.json").validate({
+              "route_id": "route_synthetic",
+              "route_kind": "planned",
+              "stops": [{"place_id": "place_synthetic_bakery", "sequence": 0, "dwell_seconds": 0}],
+              "travel_mode": "walking",
+              "distance_m": None,
+              "duration_s": None,
+              "provider": None,
+              "provenance": {"source_kind": "synthetic", "retrieved_at": "2026-01-01T00:00:00Z", "confidence": 1.0},
+              "status": "draft",
+              "associated_ref": None,
+              "saved_at": "2026-01-01T00:00:00Z",
+              "updated_at": "2026-01-01T00:00:00Z",
+          })
+          validator("geo_track.schema.json").validate({
+              "track_id": "track_synthetic",
+              "points": [{"timestamp": "2026-01-01T00:00:00Z", "coordinate": {"lat": 52.52, "lon": 13.405}}],
+              "source_device_ref": "synthetic-device",
+              "retention": "raw_short",
+              "created_at": "2026-01-01T00:00:00Z",
+              "derived_geometry": [],
+              "privacy_class": "PRIVATE_USER_GEO",
+          })
+          validator("geo_mcp_request.schema.json").validate({
+              "schema": "skeleton.geo_mcp_request.v1",
+              "operation": "geo.place.save",
+              "arguments": {},
+              "privacy_class": "PRIVATE_USER_GEO",
+          })
+          print(f"validated schemas={len(schema_paths)} synthetic_places={len(fixture['places'])}")
+          PY
+
+      - name: Check changed-file whitespace
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            git diff --check "$BASE_SHA" "$HEAD_SHA"
+          else
+            git diff --check HEAD^ HEAD
+          fi
