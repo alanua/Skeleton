@@ -325,5 +325,9 @@ def test_installed_form_launcher_resolves_registered_checkout_outside_repo_cwd(t
     responses = [json.loads(line) for line in completed.stdout.splitlines()]
     assert responses[0]["result"]["serverInfo"]["name"] == "skeleton-control-hetzner"
     tools = responses[1]["result"]["tools"]
-    assert [tool["name"] for tool in tools] == [ACTION_GATE_TOOL, RUNNER_PRIVILEGED_TOOL]
+    assert [tool["name"] for tool in tools] == [
+        ACTION_GATE_TOOL,
+        RUNNER_PRIVILEGED_TOOL,
+        AWARENESS_CONTEXT_TOOL,
+    ]
     assert len(tools) == 3
