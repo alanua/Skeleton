@@ -4371,6 +4371,28 @@ def test_update_existing_pr_post_push_exact_head_retries_stale_then_succeeds(
     sleep.assert_called_once_with(runner.POST_PUSH_PR_HEAD_PROPAGATION_BACKOFF_SECONDS)
 
 
+def test_update_existing_pr_post_push_exact_state_without_url_reports_canonical_pr_url(
+    tmp_path: Path,
+) -> None:
+    pushed_head = "d" * 40
+    post_state = _pr_validation_state(
+        number=2749,
+        headRefName="runner/issue-2749",
+        headRefOid=pushed_head,
+        baseRefOid="c" * 40,
+    )
+
+    report = _finalize_existing_pr_success_with_post_push_states(
+        tmp_path=tmp_path,
+        post_states=[post_state],
+        pushed_head_sha=pushed_head,
+    )
+
+    assert "DONE: Codex completed successfully and updated the existing PR." in report
+    assert "Existing PR: https://github.com/alanua/Skeleton/pull/2749" in report
+    assert "existing_pr_url=https://github.com/alanua/Skeleton/pull/2749" in report
+
+
 def test_update_existing_pr_post_push_exact_head_blocks_after_retry_exhaustion(
     tmp_path: Path,
 ) -> None:

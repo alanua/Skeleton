@@ -6364,6 +6364,13 @@ def extract_pr_repository(pr_url: str) -> str | None:
     return f"{match.group('owner')}/{match.group('repo')}"
 
 
+def _canonical_skeleton_pr_url(pr_number: int) -> str:
+    pr_url = f"https://github.com/{QUEUE_REPOSITORY}/pull/{pr_number}"
+    if _PUBLIC_GITHUB_PR_URL_RE.fullmatch(pr_url) is None:
+        raise RuntimeError("canonical Skeleton PR URL failed validation")
+    return pr_url
+
+
 def extract_runner_report_pr_binding(
     report: str,
 ) -> tuple[str | None, tuple[str, ...]]:
@@ -7062,9 +7069,10 @@ def finalize_existing_pr_success(
             "Existing PR update post-push verification failed: "
             f"{post_reason or 'pr_head_branch_mismatch'}"
         )
-    pr_url = _existing_pr_publish_pr_url(post_state or {})
-    if pr_url is None:
-        raise RuntimeError("Existing PR update post-push PR URL unavailable.")
+    pr_url = _canonical_skeleton_pr_url(request.pr_number)
+    reported_pr_url = _existing_pr_publish_pr_url(post_state or {})
+    if reported_pr_url is not None and reported_pr_url.rstrip("/") != pr_url:
+        raise RuntimeError("Existing PR update post-push PR URL mismatch.")
 
     pytest_output = next(
         output for command, output in checks if command == "python3 -m pytest -q"
