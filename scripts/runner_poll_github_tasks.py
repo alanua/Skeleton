@@ -5385,10 +5385,19 @@ def get_issue_comments(
     comments = issue.get("comments")
     if isinstance(comments, list):
         return [comment for comment in comments if isinstance(comment, dict)]
+    if isinstance(comments, int) and comments > 0:
+        return None
+    return []
+
+
+def get_issue_comments_via_gh(
+    issue: Mapping[str, Any], repository: str | None = None
+) -> list[dict[str, Any]] | None:
+    comments = get_issue_comments(dict(issue), repository=repository)
+    if comments is not None:
+        return comments
     if not (os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")):
-        if isinstance(comments, int) and comments > 0:
-            return None
-        return []
+        return None
     issue_number = int(issue["number"])
     queue_repository = repository or _current_queue_repository()
     code, output = run_command(
@@ -21873,7 +21882,7 @@ def reconcile_recoverable_blocked_codegen_issues(limit: int = 20) -> int:
         number = _queue_replenisher_issue_number(issue)
         if number is None:
             continue
-        prior_comments = get_issue_comments(dict(issue))
+        prior_comments = get_issue_comments_via_gh(dict(issue))
         if not _recoverable_blocked_issue_can_be_requeued(issue, prior_comments):
             continue
         set_issue_label(number, LABEL_BLOCKED, LABEL_READY)

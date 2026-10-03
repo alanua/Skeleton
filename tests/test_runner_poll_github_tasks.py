@@ -2205,6 +2205,7 @@ def test_typed_dependency_issue_done_allows_pickup_transition(
 def test_dependency_free_ready_task_does_not_live_read_before_pickup(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    monkeypatch.setenv("GH_TOKEN", "synthetic-token")
     body = _typed_dependency_task_body()
     issue = {
         "number": 4002,
@@ -10946,7 +10947,7 @@ def test_reconcile_recoverable_blocked_codegen_issue_requeues_only_label() -> No
     with mock.patch.object(
         runner, "_queue_replenisher_issue_list_for_label", return_value=[issue]
     ) as issue_list, mock.patch.object(
-        runner, "get_issue_comments", return_value=comments
+        runner, "get_issue_comments_via_gh", return_value=comments
     ) as get_comments, mock.patch.object(
         runner, "set_issue_label"
     ) as set_label, mock.patch.object(
@@ -10959,6 +10960,47 @@ def test_reconcile_recoverable_blocked_codegen_issue_requeues_only_label() -> No
     get_comments.assert_called_once_with(dict(issue))
     set_label.assert_called_once_with(4021, runner.LABEL_BLOCKED, runner.LABEL_READY)
     post.assert_not_called()
+
+
+def test_recoverable_blocked_comment_history_helper_uses_gh_cli(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    issue = {"number": 4022, "comments": 1}
+    comments = [{"body": "BLOCKED: history", "author": {"login": "alanua"}}]
+    commands: list[list[str]] = []
+    monkeypatch.setenv("GH_TOKEN", "synthetic-token")
+
+    def run(command: list[str], **_kwargs: object) -> tuple[int, str]:
+        commands.append(command)
+        return 0, json.dumps({"comments": comments})
+
+    monkeypatch.setattr(runner, "run_command", run)
+
+    assert runner.get_issue_comments_via_gh(issue) == comments
+    assert commands == [
+        [
+            "gh",
+            "issue",
+            "view",
+            "4022",
+            "--repo",
+            runner.REPO,
+            "--json",
+            "comments",
+        ]
+    ]
+
+
+def test_get_issue_comments_does_not_live_read_with_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "synthetic-token")
+    issue = {"number": 4023, "comments": 1}
+
+    with mock.patch.object(runner, "run_command") as run:
+        assert runner.get_issue_comments(issue) is None
+
+    run.assert_not_called()
 
 
 def test_retained_dirty_out_of_scope_tracked_file_blocks_before_provider(
@@ -27596,4 +27638,3 @@ privacy_boundary: PUBLIC_SAFE_REPOSITORY_ONLY
     )
     assert "retained_worktree_status=preserved_for_operator_review" in output
     assert calls == [["codex"]]
-
