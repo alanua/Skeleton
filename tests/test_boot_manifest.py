@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import yaml
@@ -69,3 +70,69 @@ def test_boot_output_required_fields() -> None:
         "source_trust_map",
         "writes",
     }
+
+
+def test_boot_report_includes_bounded_capability_runtime_truth() -> None:
+    from core.boot_loader import BootLoader
+
+    report = BootLoader(ROOT).load()
+    truth = report["capability_runtime_truth"]
+
+    assert truth["schema"] == "skeleton.capability_runtime_truth.v1"
+    assert truth["registry_authority"] == "CAPABILITY_REGISTRY.yaml"
+    assert truth["read_model"] == "bounded_typed_evidence_only"
+    assert truth["runtime_probe_performed"] is False
+    assert truth["runtime_mutation_performed"] is False
+
+
+def test_boot_report_mapping_methods_include_capability_runtime_truth() -> None:
+    from core.boot_loader import BootLoader
+
+    report = BootLoader(ROOT).load()
+
+    assert type(report) is dict
+    assert "capability_runtime_truth" in report.keys()
+    assert "capability_runtime_truth" in list(report)
+    assert "capability_runtime_truth" in dict(report.items())
+    assert report["capability_runtime_truth"] in report.values()
+    assert "capability_runtime_truth" in json.loads(json.dumps(report))
+
+
+def test_boot_loader_accepts_optional_typed_runtime_evidence_boundary() -> None:
+    from core.boot_loader import BootLoader
+    from core.capability_runtime_truth import RuntimeCapabilityEvidence
+
+    report = BootLoader(ROOT).load(
+        runtime_evidence=[
+            RuntimeCapabilityEvidence(
+                capability_id="boot_loader",
+                runtime_state="available",
+                source="unit_test",
+                evidence_ref="test_boot_manifest",
+                observed_at="2026-10-01T00:00:00Z",
+                runtime_bound=True,
+                source_runtime_parity=True,
+                usable_interfaces=("BootLoader.load",),
+            )
+        ],
+        runtime_truth_checked_at="2026-10-02T00:00:00Z",
+    )
+    truth = report["capability_runtime_truth"]
+    boot_loader = next(
+        item for item in truth["capabilities"] if item["capability_id"] == "boot_loader"
+    )
+
+    assert boot_loader["effective_status"] == "LIVE"
+    assert boot_loader["freshness"] == "FRESH"
+    assert boot_loader["runtime_bound"] is True
+    assert boot_loader["source_runtime_parity"] is True
+
+
+def test_boot_loader_accepts_deterministic_runtime_truth_clock() -> None:
+    from core.boot_loader import BootLoader
+
+    report = BootLoader(ROOT).load(
+        runtime_truth_checked_at="2026-10-02T00:00:00Z",
+    )
+
+    assert report["capability_runtime_truth"]["checked_at"] == "2026-10-02T00:00:00Z"

@@ -18,7 +18,7 @@ def load_report() -> dict:
 
 
 def test_boot_loader_returns_dict() -> None:
-    assert isinstance(load_report(), dict)
+    assert type(load_report()) is dict
 
 
 def test_boot_report_schema_is_v1() -> None:
@@ -35,8 +35,18 @@ def test_boot_report_has_all_v1_required_fields() -> None:
         "mode",
         "active_project_status",
         "source_trust_map",
+        "capability_runtime_truth",
         "writes",
     }
+
+
+def test_capability_runtime_truth_uses_normal_mapping_visibility() -> None:
+    report = load_report()
+
+    assert "capability_runtime_truth" in report.keys()
+    assert "capability_runtime_truth" in list(report)
+    assert "capability_runtime_truth" in dict(report.items())
+    assert "capability_runtime_truth" in json.loads(json.dumps(report))
 
 
 def test_boot_report_mode_is_boot() -> None:

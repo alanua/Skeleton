@@ -1,0 +1,149 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.capability_runtime_truth.schema.json",
+  "type": "object",
+  "required": [
+    "schema",
+    "registry_authority",
+    "read_model",
+    "checked_at",
+    "runtime_probe_performed",
+    "runtime_mutation_performed",
+    "summary",
+    "capabilities"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "skeleton.capability_runtime_truth.v1"},
+    "registry_authority": {"const": "CAPABILITY_REGISTRY.yaml"},
+    "read_model": {"const": "bounded_typed_evidence_only"},
+    "checked_at": {"type": "string", "minLength": 1},
+    "runtime_probe_performed": {"const": false},
+    "runtime_mutation_performed": {"const": false},
+    "summary": {
+      "type": "object",
+      "required": [
+        "registry_capability_count",
+        "registry_available_count",
+        "typed_runtime_evidence_count",
+        "fresh_runtime_evidence_count",
+        "live_count",
+        "partial_count",
+        "contract_only_count",
+        "blocked_count",
+        "legacy_count",
+        "superseded_count",
+        "drift_count"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "registry_capability_count": {"type": "integer", "minimum": 0},
+        "registry_available_count": {"type": "integer", "minimum": 0},
+        "typed_runtime_evidence_count": {"type": "integer", "minimum": 0},
+        "fresh_runtime_evidence_count": {"type": "integer", "minimum": 0},
+        "live_count": {"type": "integer", "minimum": 0},
+        "partial_count": {"type": "integer", "minimum": 0},
+        "contract_only_count": {"type": "integer", "minimum": 0},
+        "blocked_count": {"type": "integer", "minimum": 0},
+        "legacy_count": {"type": "integer", "minimum": 0},
+        "superseded_count": {"type": "integer", "minimum": 0},
+        "drift_count": {"type": "integer", "minimum": 0}
+      }
+    },
+    "capabilities": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "capability_id",
+          "declared_status",
+          "effective_status",
+          "freshness",
+          "runtime_bound",
+          "source_present",
+          "source_runtime_parity",
+          "usable_interfaces",
+          "drift",
+          "reason_codes",
+          "evidence_observed_at",
+          "evidence_kinds",
+          "authoritative",
+          "public_safe",
+          "runtime_evidence"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "capability_id": {"type": "string", "minLength": 1},
+          "declared_status": {"type": ["string", "null"]},
+          "effective_status": {
+            "enum": [
+              "LIVE",
+              "PARTIAL",
+              "CONTRACT_ONLY",
+              "BLOCKED",
+              "LEGACY",
+              "SUPERSEDED"
+            ]
+          },
+          "freshness": {"enum": ["FRESH", "STALE", "UNKNOWN"]},
+          "runtime_bound": {"type": "boolean"},
+          "source_present": {"type": "boolean"},
+          "source_runtime_parity": {"type": "boolean"},
+          "usable_interfaces": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1}
+          },
+          "drift": {"type": "boolean"},
+          "reason_codes": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {"type": "string", "pattern": "^[A-Z0-9_]+$"}
+          },
+          "evidence_observed_at": {"type": ["string", "null"]},
+          "evidence_kinds": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {"type": "string", "minLength": 1}
+          },
+          "authoritative": {"const": false},
+          "public_safe": {"const": true},
+          "runtime_evidence": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "schema",
+                "capability_id",
+                "runtime_state",
+                "source",
+                "evidence_ref",
+                "observed_at",
+                "freshness"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "schema": {"const": "skeleton.capability_runtime_evidence.v1"},
+                "capability_id": {"type": "string", "minLength": 1},
+                "runtime_state": {"enum": ["available", "degraded", "unavailable"]},
+                "source": {"type": "string", "minLength": 1},
+                "evidence_ref": {"type": "string", "minLength": 1},
+                "observed_at": {"type": "string", "minLength": 1},
+                "expires_at": {"type": "string", "minLength": 1},
+                "freshness": {"enum": ["FRESH", "STALE", "UNKNOWN"]},
+                "runtime_bound": {"type": "boolean"},
+                "source_present": {"type": "boolean"},
+                "source_runtime_parity": {"type": "boolean"},
+                "usable_interfaces": {
+                  "type": "array",
+                  "items": {"type": "string", "minLength": 1}
+                },
+                "lifecycle_hint": {"enum": ["legacy", "superseded"]},
+                "evidence_kind": {"type": "string", "minLength": 1}
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
