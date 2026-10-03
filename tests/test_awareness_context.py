@@ -6,7 +6,7 @@ from pathlib import Path
 
 import jsonschema
 
-from core.awareness_context import assemble_awareness_context
+from core.awareness_context import SECTION_NAMES, assemble_awareness_context
 from core.capability_runtime_truth import RuntimeCapabilityEvidence, reconcile_capability_runtime_truth
 from core.intake_lifecycle import IntakeLifecycleStore, shared_pending_lifecycle_work
 from core.private_memory_stack import PrivateMemoryStack
@@ -51,6 +51,8 @@ def test_awareness_context_is_ephemeral_deterministic_and_public_receipt_safe(tm
     assert first.packet["derivation_mode"] == "ephemeral_read_only_derived_packet"
     assert first.packet["runtime_mutation_performed"] is False
     assert first.packet["canonical_store_mutation_performed"] is False
+    assert tuple(first.packet["sections"]) == SECTION_NAMES
+    assert tuple(first.public_receipt()["section_hashes"]) == SECTION_NAMES
     assert first.packet["awareness_hash"] == second.packet["awareness_hash"]
     assert first.public_receipt()["receipt_hash"] == second.public_receipt()["receipt_hash"]
     assert first.packet["sections"]["memory"]["counts"]["private_values_included"] == 2
@@ -77,21 +79,18 @@ def test_awareness_context_bounds_sections_and_labels_conflicts(tmp_path: Path) 
     )
     receipt = result.public_receipt()
 
-    assert receipt["counts"] == {
-        "memory_records": 1,
-        "pending_items": 1,
-        "capability_records": 1,
-    }
-    assert receipt["limits"] == {
-        "memory_records": 1,
-        "pending_items": 1,
-        "capability_records": 1,
-    }
-    assert receipt["truncated"] == {
-        "memory": True,
-        "pending_work": True,
-        "capability_truth": True,
-    }
+    assert receipt["counts"]["memory_records"] == 1
+    assert receipt["counts"]["pending_items"] == 1
+    assert receipt["counts"]["capability_records"] == 1
+    assert receipt["counts"]["task_contract_records"] == 0
+    assert receipt["limits"]["memory_records"] == 1
+    assert receipt["limits"]["pending_items"] == 1
+    assert receipt["limits"]["capability_records"] == 1
+    assert receipt["limits"]["runtime_controls_records"] == 10
+    assert receipt["truncated"]["memory"] is True
+    assert receipt["truncated"]["pending_work"] is True
+    assert receipt["truncated"]["capability_truth"] is True
+    assert receipt["truncated"]["runtime_controls"] is False
     assert receipt["labels"]["conflict"] == "CONFLICTS_PRESENT"
     assert receipt["labels"]["freshness"] == "MIXED"
     assert receipt["labels"]["epistemic"] == "OBSERVED"
@@ -134,26 +133,42 @@ def test_awareness_context_does_not_mutate_inputs(tmp_path: Path) -> None:
     }
     pending = _pending_work(tmp_path)
     capability_truth = _capability_truth()
+    auxiliary = {
+        "task_contract": {
+            "records": [
+                {
+                    "task_kind": "code_edit",
+                    "private_value": "private auxiliary payload",
+                    "freshness_label": "FRESH",
+                }
+            ]
+        }
+    }
     before = copy.deepcopy(
         {
             "memory": memory_mapping,
             "pending": pending,
             "capability_truth": capability_truth,
+            "auxiliary": auxiliary,
         }
     )
 
-    assemble_awareness_context(
+    result = assemble_awareness_context(
         project_id="skeleton",
         task_route="runner",
         memory_context=memory_mapping,
         pending_work=pending,
         capability_truth=capability_truth,
+        auxiliary_sections=auxiliary,
         now=NOW,
     )
 
     assert memory_mapping == before["memory"]
     assert pending == before["pending"]
     assert capability_truth == before["capability_truth"]
+    assert auxiliary == before["auxiliary"]
+    assert "private auxiliary payload" not in json.dumps(result.public_receipt(), sort_keys=True)
+    assert result.public_receipt()["counts"]["task_contract_records"] == 1
 
 
 def _memory_stack(tmp_path: Path) -> PrivateMemoryStack:

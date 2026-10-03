@@ -36,41 +36,105 @@
     "section_hashes": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["memory", "pending_work", "capability_truth"],
+      "required": [
+        "memory",
+        "pending_work",
+        "capability_truth",
+        "task_contract",
+        "repository_scope",
+        "validation_contract",
+        "output_contract",
+        "privacy_controls",
+        "runtime_controls"
+      ],
       "properties": {
         "memory": {"$ref": "#/$defs/hash"},
         "pending_work": {"$ref": "#/$defs/hash"},
-        "capability_truth": {"$ref": "#/$defs/hash"}
+        "capability_truth": {"$ref": "#/$defs/hash"},
+        "task_contract": {"$ref": "#/$defs/hash"},
+        "repository_scope": {"$ref": "#/$defs/hash"},
+        "validation_contract": {"$ref": "#/$defs/hash"},
+        "output_contract": {"$ref": "#/$defs/hash"},
+        "privacy_controls": {"$ref": "#/$defs/hash"},
+        "runtime_controls": {"$ref": "#/$defs/hash"}
       }
     },
     "counts": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["memory_records", "pending_items", "capability_records"],
+      "required": [
+        "memory_records",
+        "pending_items",
+        "capability_records",
+        "task_contract_records",
+        "repository_scope_records",
+        "validation_contract_records",
+        "output_contract_records",
+        "privacy_controls_records",
+        "runtime_controls_records"
+      ],
       "properties": {
         "memory_records": {"type": "integer", "minimum": 0, "maximum": 10},
         "pending_items": {"type": "integer", "minimum": 0, "maximum": 10},
-        "capability_records": {"type": "integer", "minimum": 0, "maximum": 20}
+        "capability_records": {"type": "integer", "minimum": 0, "maximum": 20},
+        "task_contract_records": {"type": "integer", "minimum": 0, "maximum": 10},
+        "repository_scope_records": {"type": "integer", "minimum": 0, "maximum": 10},
+        "validation_contract_records": {"type": "integer", "minimum": 0, "maximum": 10},
+        "output_contract_records": {"type": "integer", "minimum": 0, "maximum": 10},
+        "privacy_controls_records": {"type": "integer", "minimum": 0, "maximum": 10},
+        "runtime_controls_records": {"type": "integer", "minimum": 0, "maximum": 10}
       }
     },
     "limits": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["memory_records", "pending_items", "capability_records"],
+      "required": [
+        "memory_records",
+        "pending_items",
+        "capability_records",
+        "task_contract_records",
+        "repository_scope_records",
+        "validation_contract_records",
+        "output_contract_records",
+        "privacy_controls_records",
+        "runtime_controls_records"
+      ],
       "properties": {
         "memory_records": {"type": "integer", "minimum": 0, "maximum": 10},
         "pending_items": {"type": "integer", "minimum": 0, "maximum": 10},
-        "capability_records": {"type": "integer", "minimum": 0, "maximum": 20}
+        "capability_records": {"type": "integer", "minimum": 0, "maximum": 20},
+        "task_contract_records": {"type": "integer", "minimum": 0, "maximum": 10},
+        "repository_scope_records": {"type": "integer", "minimum": 0, "maximum": 10},
+        "validation_contract_records": {"type": "integer", "minimum": 0, "maximum": 10},
+        "output_contract_records": {"type": "integer", "minimum": 0, "maximum": 10},
+        "privacy_controls_records": {"type": "integer", "minimum": 0, "maximum": 10},
+        "runtime_controls_records": {"type": "integer", "minimum": 0, "maximum": 10}
       }
     },
     "truncated": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["memory", "pending_work", "capability_truth"],
+      "required": [
+        "memory",
+        "pending_work",
+        "capability_truth",
+        "task_contract",
+        "repository_scope",
+        "validation_contract",
+        "output_contract",
+        "privacy_controls",
+        "runtime_controls"
+      ],
       "properties": {
         "memory": {"type": "boolean"},
         "pending_work": {"type": "boolean"},
-        "capability_truth": {"type": "boolean"}
+        "capability_truth": {"type": "boolean"},
+        "task_contract": {"type": "boolean"},
+        "repository_scope": {"type": "boolean"},
+        "validation_contract": {"type": "boolean"},
+        "output_contract": {"type": "boolean"},
+        "privacy_controls": {"type": "boolean"},
+        "runtime_controls": {"type": "boolean"}
       }
     },
     "labels": {
