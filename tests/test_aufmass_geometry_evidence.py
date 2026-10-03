@@ -1,9 +1,23 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import importlib.util
 
-from core import aufmass_geometry_evidence as evidence_module
-from core.aufmass_geometry_evidence import build_room_geometry_evidence
+import pytest
+
+_MISSING_AUFMASS_GEOMETRY_DEPS = [
+    name
+    for name in ("numpy", "ezdxf", "shapely", "networkx")
+    if importlib.util.find_spec(name) is None
+]
+pytestmark = pytest.mark.skipif(
+    _MISSING_AUFMASS_GEOMETRY_DEPS,
+    reason="aufmass-geometry optional dependencies are not installed",
+)
+
+if not _MISSING_AUFMASS_GEOMETRY_DEPS:
+    from core import aufmass_geometry_evidence as evidence_module
+    from core.aufmass_geometry_evidence import build_room_geometry_evidence
 
 
 def test_selected_room_geometry_uses_shared_workbench_and_preserves_repair_evidence(monkeypatch) -> None:

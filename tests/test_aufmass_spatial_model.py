@@ -1,13 +1,26 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import importlib.util
 import json
 from pathlib import Path
 
+import pytest
 from jsonschema import validate
 
-from core import aufmass_spatial_model as spatial_module
-from core.aufmass_spatial_model import build_aufmass_foundation
+_MISSING_AUFMASS_GEOMETRY_DEPS = [
+    name
+    for name in ("numpy", "ezdxf", "shapely", "networkx")
+    if importlib.util.find_spec(name) is None
+]
+pytestmark = pytest.mark.skipif(
+    _MISSING_AUFMASS_GEOMETRY_DEPS,
+    reason="aufmass-geometry optional dependencies are not installed",
+)
+
+if not _MISSING_AUFMASS_GEOMETRY_DEPS:
+    from core import aufmass_spatial_model as spatial_module
+    from core.aufmass_spatial_model import build_aufmass_foundation
 
 
 ROOT = Path(__file__).resolve().parents[1]
