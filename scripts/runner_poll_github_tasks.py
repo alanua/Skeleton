@@ -367,6 +367,7 @@ TELEGRAM_CALLBACK_DATA_LIMIT = 64
 TELEGRAM_CALLBACK_HMAC_ENV = "SKELETON_TG_CALLBACK_HMAC_SECRET"
 CODEX_MODEL_ENV = "SKELETON_CODEX_MODEL"
 CODEGEN_BOOKKEEPING_ROOT_ENV = "SKELETON_CODEGEN_BOOKKEEPING_ROOT"
+RUNNER_CODEX_PRIMARY_CODEGEN_TIMEOUT_SECONDS = 1800
 RUNNER_PRIVATE_MEMORY_ROOT_ENV = "SKELETON_RUNNER_PRIVATE_MEMORY_ROOT"
 RUNNER_PRIVATE_MEMORY_DATASET_ENV = "SKELETON_RUNNER_PRIVATE_MEMORY_DATASET"
 RUNNER_PRIVATE_MEMORY_REFS_ENV = "SKELETON_RUNNER_PRIVATE_MEMORY_REFS"
@@ -1550,6 +1551,8 @@ def run_command(
         "text": True,
         "timeout": timeout,
     }
+    if timeout is None and observe_process_spawn and args[:2] == ["codex", "exec"]:
+        run_kwargs["timeout"] = RUNNER_CODEX_PRIMARY_CODEGEN_TIMEOUT_SECONDS
     if input is not None:
         run_kwargs["input"] = input
     environment = _RUN_COMMAND_ENV_OVERRIDE.get()
@@ -5203,9 +5206,26 @@ def _codex_executor(argv: list[str], stdin_text: str, env: Mapping[str, str]) ->
         if model is not None and "--model" not in command:
             command[3:3] = ["--model", model]
         command.append("-")
-        return run_command(command, cwd=command[command.index("--cd") + 1], input=stdin_text)
+        try:
+            return run_command(
+                command,
+                cwd=command[command.index("--cd") + 1],
+                input=stdin_text,
+                timeout=RUNNER_CODEX_PRIMARY_CODEGEN_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired:
+            return 1, _primary_codex_codegen_timeout_output()
     finally:
         _RUN_COMMAND_ENV_OVERRIDE.reset(token)
+
+
+def _primary_codex_codegen_timeout_output() -> str:
+    return (
+        "RESULT: BLOCKED\n"
+        "SKELETON_CODEGEN_PRIMARY_FAILURE=PRIMARY_CODEGEN_TIMEOUT\n"
+        f"primary_codegen_timeout_seconds={RUNNER_CODEX_PRIMARY_CODEGEN_TIMEOUT_SECONDS}\n"
+        "retained_worktree_status=preserved_for_operator_review\n"
+    )
 
 
 def run_codex_task(
@@ -5249,6 +5269,8 @@ def run_codex_task(
                 cwd=workdir,
                 observe_process_spawn=True,
             )
+        except subprocess.TimeoutExpired:
+            codex_code, codex_output = 1, _primary_codex_codegen_timeout_output()
         finally:
             _RUN_COMMAND_ENV_OVERRIDE.reset(token)
         try:
