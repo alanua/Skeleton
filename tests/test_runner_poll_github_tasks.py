@@ -4752,6 +4752,36 @@ def test_post_issue_comment_replaces_placeholder_pr_url() -> None:
     assert "PR: none" in body
 
 
+def test_recoverable_blocked_comment_helper_uses_gh_without_token_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    issue = {"number": 4450, "comments": 1}
+    gh_comments = [{"body": "BLOCKED: prior runner report"}]
+
+    with mock.patch.object(
+        runner,
+        "run_command",
+        return_value=(0, json.dumps({"comments": gh_comments})),
+    ) as run:
+        comments = runner.get_issue_comments_via_gh(issue, repository=runner.REPO)
+
+    assert comments == gh_comments
+    run.assert_called_once_with(
+        [
+            "gh",
+            "issue",
+            "view",
+            "4450",
+            "--repo",
+            runner.REPO,
+            "--json",
+            "comments",
+        ]
+    )
+
+
 def test_target_repository_worktree_paths_are_deterministic(tmp_path: Path) -> None:
     skeleton_root = tmp_path / "skeleton"
     with mock.patch.dict(

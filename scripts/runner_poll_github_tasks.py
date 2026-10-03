@@ -5396,8 +5396,6 @@ def get_issue_comments_via_gh(
     comments = get_issue_comments(dict(issue), repository=repository)
     if comments is not None:
         return comments
-    if not (os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")):
-        return None
     issue_number = int(issue["number"])
     queue_repository = repository or _current_queue_repository()
     code, output = run_command(
