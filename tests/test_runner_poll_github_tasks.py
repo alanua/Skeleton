@@ -3971,6 +3971,46 @@ def test_codegen_existing_pr_allowed_files_accepts_3523_schema_contract_scope() 
     )
 
 
+def test_missing_metadata_allowed_files_infers_exactly_one_safe_task_path() -> None:
+    body = """Expected Output: focused/full pytest PASS
+
+```task
+schema: skeleton.runner_task.v1
+repo: alanua/Skeleton
+task_kind: code_edit
+allowed_files:
+  - scripts/runner_poll_github_tasks.py
+payload:
+  operation: bounded_repair
+```
+"""
+    allowed_files, reason = runner._codegen_publish_allowed_files(body)
+
+    assert reason is None
+    assert allowed_files == frozenset({"scripts/runner_poll_github_tasks.py"})
+    assert runner._recoverable_blocked_allowed_files(body) == allowed_files
+
+
+def test_missing_metadata_allowed_files_does_not_infer_multiple_task_paths() -> None:
+    body = """Expected Output: focused/full pytest PASS
+
+```task
+schema: skeleton.runner_task.v1
+repo: alanua/Skeleton
+task_kind: code_edit
+allowed_files:
+  - scripts/runner_poll_github_tasks.py
+  - tests/test_runner_poll_github_tasks.py
+payload:
+  operation: bounded_repair
+```
+"""
+    allowed_files, reason = runner._codegen_publish_allowed_files(body)
+
+    assert allowed_files == frozenset()
+    assert reason == "missing_allowed_files"
+
+
 @pytest.mark.parametrize(
     "unsafe_path",
     (
