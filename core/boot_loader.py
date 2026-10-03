@@ -1,14 +1,26 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Iterable, Union
+from typing import Iterable, Mapping, Union
 
 import yaml
 
+from core.awareness_context import AWARENESS_CONTEXT_RECEIPT_SCHEMA
 from core.capability_checker import CapabilityChecker
 from core.capability_runtime_truth import RuntimeCapabilityEvidence
+
+
+@dataclass(frozen=True)
+class AwarenessBootMetadata:
+    receipt_hash: str
+    awareness_hash: str
+    freshness: str
+    checked_at: str | None = None
+    schema: str = AWARENESS_CONTEXT_RECEIPT_SCHEMA
+    public_safe: bool = True
 
 
 class BootLoader:
@@ -25,6 +37,7 @@ class BootLoader:
         manifest_path: str = "BOOT_MANIFEST.yaml",
         runtime_evidence: Iterable[RuntimeCapabilityEvidence] | None = None,
         runtime_truth_checked_at: datetime | str | None = None,
+        awareness_metadata: AwarenessBootMetadata | Mapping[str, object] | None = None,
     ) -> dict:
         manifest_file = self.root / manifest_path
         manifest = yaml.safe_load(manifest_file.read_text(encoding="utf-8"))
@@ -56,6 +69,7 @@ class BootLoader:
                 self.runtime_evidence if runtime_evidence is None else runtime_evidence,
                 now=runtime_truth_checked_at,
             ),
+            "awareness_context": self._build_awareness_context_receipt(awareness_metadata),
             "writes": "none",
         }
 
@@ -92,6 +106,45 @@ class BootLoader:
         if not registry_path.is_file():
             return {}
         return CapabilityChecker(registry_path).runtime_truth(runtime_evidence, now=now)
+
+    def _build_awareness_context_receipt(
+        self,
+        awareness_metadata: AwarenessBootMetadata | Mapping[str, object] | None,
+    ) -> dict[str, object] | None:
+        if awareness_metadata is None:
+            return None
+        if isinstance(awareness_metadata, AwarenessBootMetadata):
+            metadata = {
+                "schema": awareness_metadata.schema,
+                "receipt_hash": awareness_metadata.receipt_hash,
+                "awareness_hash": awareness_metadata.awareness_hash,
+                "freshness": awareness_metadata.freshness,
+                "checked_at": awareness_metadata.checked_at,
+                "public_safe": awareness_metadata.public_safe,
+            }
+        else:
+            metadata = dict(awareness_metadata)
+            labels = metadata.get("labels")
+            if "freshness" not in metadata and isinstance(labels, Mapping):
+                metadata["freshness"] = labels.get("freshness")
+
+        public_receipt = {
+            "schema": str(metadata.get("schema") or AWARENESS_CONTEXT_RECEIPT_SCHEMA),
+            "receipt_hash": metadata.get("receipt_hash"),
+            "awareness_hash": metadata.get("awareness_hash"),
+            "freshness": metadata.get("freshness"),
+            "checked_at": metadata.get("checked_at"),
+            "public_safe": metadata.get("public_safe") is True,
+        }
+        if (
+            public_receipt["schema"] != AWARENESS_CONTEXT_RECEIPT_SCHEMA
+            or not isinstance(public_receipt["receipt_hash"], str)
+            or not isinstance(public_receipt["awareness_hash"], str)
+            or public_receipt["freshness"] not in {"FRESH", "STALE", "UNKNOWN", "MIXED"}
+            or public_receipt["public_safe"] is not True
+        ):
+            raise ValueError("awareness metadata must be a public-safe receipt")
+        return public_receipt
 
 
 def main() -> int:

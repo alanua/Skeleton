@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from core.awareness_context import AWARENESS_CONTEXT_SCHEMA, PRIVACY_BOUNDARY
 from core.cognee_projection_adapter import CogneeProjectionAdapter
 from core.memory_gateway import MEMORY_GATEWAY_REQUEST_SCHEMA, MemoryGateway, capability_token
 from core.memory_gateway_policy import MemoryGatewayPolicyError
@@ -57,6 +58,7 @@ class MemoryBootstrapConfig:
     query: str
     repository_root: Path
     worktree_root: Path
+    awareness_packet: Mapping[str, Any] | None = None
 
 
 Executor = Callable[[list[str], str, Mapping[str, str]], tuple[int, str]]
@@ -98,6 +100,7 @@ class MemoryBootstrap:
         if not isinstance(refs, list) or not refs or not all(isinstance(ref, str) for ref in refs):
             raise MemoryBootstrapError("PRIVATE_CONTEXT_EMPTY", "at least one exact canonical ref is required")
         query = request.get("query")
+        awareness_packet = _awareness_packet_from_request(request.get("awareness_context"))
         repository_root = Path(str(request.get("repository_root") or os.getcwd())).resolve()
         worktree_root = Path(str(request.get("worktree_root") or repository_root)).resolve()
         return cls(
@@ -108,6 +111,7 @@ class MemoryBootstrap:
                 query=query if isinstance(query, str) and query.strip() else "summary",
                 repository_root=repository_root,
                 worktree_root=worktree_root,
+                awareness_packet=awareness_packet,
             ),
             cognee_adapter_factory=cognee_adapter_factory,
         )
@@ -145,6 +149,8 @@ class MemoryBootstrap:
             "semantic": semantic,
             "graph": graph,
         }
+        if self.config.awareness_packet is not None:
+            context["awareness"] = dict(self.config.awareness_packet)
         self._write_context_cache(context, current_revision)
         return context
 
@@ -245,6 +251,7 @@ class MemoryBootstrap:
             "canonical_refs": self.config.canonical_refs,
             "query": self.config.query,
             "canonical_revision": current_revision,
+            "awareness_hash": _awareness_hash(self.config.awareness_packet),
         }
         return content_hash(material)
 
@@ -414,6 +421,32 @@ def reset_bootstrap_adapter_cache() -> None:
     _ADAPTER_CACHE.clear()
 
 
+def _awareness_packet_from_request(value: object) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise MemoryBootstrapError("MEMORY_CONFIGURATION_REQUIRED", "awareness context must be a mapping")
+    packet = dict(value)
+    if packet.get("schema") != AWARENESS_CONTEXT_SCHEMA:
+        raise MemoryBootstrapError("MEMORY_CONFIGURATION_REQUIRED", "awareness context schema is invalid")
+    if packet.get("privacy_boundary") != PRIVACY_BOUNDARY:
+        raise MemoryBootstrapError("MEMORY_CONFIGURATION_REQUIRED", "awareness context privacy boundary is invalid")
+    if packet.get("runtime_mutation_performed") is not False or packet.get("canonical_store_mutation_performed") is not False:
+        raise MemoryBootstrapError("MEMORY_CONFIGURATION_REQUIRED", "awareness context must be read-only")
+    awareness_hash = packet.get("awareness_hash")
+    if not isinstance(awareness_hash, str) or awareness_hash != _awareness_hash(packet):
+        raise MemoryBootstrapError("MEMORY_CONFIGURATION_REQUIRED", "awareness context hash is invalid")
+    return packet
+
+
+def _awareness_hash(packet: Mapping[str, Any] | None) -> str | None:
+    if packet is None:
+        return None
+    material = dict(packet)
+    material.pop("awareness_hash", None)
+    return content_hash(material)
+
+
 def _source_value_hash(result: Mapping[str, object]) -> object:
     attribution = result.get("source_attribution")
     if isinstance(attribution, list) and attribution and isinstance(attribution[0], Mapping):
@@ -422,7 +455,8 @@ def _source_value_hash(result: Mapping[str, object]) -> object:
 
 
 def _write_private_context_file(context: Mapping[str, object], config: MemoryBootstrapConfig) -> Path:
-    fd, name = tempfile.mkstemp(prefix="skeleton-private-context-", suffix=".json")
+    temp_dir = _private_context_temp_dir(config)
+    fd, name = tempfile.mkstemp(prefix="skeleton-private-context-", suffix=".json", dir=str(temp_dir))
     path = Path(name).resolve()
     try:
         _assert_outside(path, config.repository_root)
@@ -437,6 +471,29 @@ def _write_private_context_file(context: Mapping[str, object], config: MemoryBoo
     if stat.S_IMODE(path.stat().st_mode) != 0o600:
         path.chmod(0o600)
     return path
+
+
+def _private_context_temp_dir(config: MemoryBootstrapConfig) -> Path:
+    candidates = [
+        Path(tempfile.gettempdir()),
+        Path.home() / ".codex" / "tmp",
+        Path("/home/agent/.codex/tmp"),
+        Path("/tmp"),
+    ]
+    for candidate in candidates:
+        try:
+            if not candidate.is_dir():
+                continue
+            resolved = candidate.resolve()
+            _assert_outside(resolved, config.repository_root)
+            _assert_outside(resolved, config.worktree_root)
+            fd, probe = tempfile.mkstemp(prefix=".skeleton-private-context-probe-", dir=str(resolved))
+            os.close(fd)
+            Path(probe).unlink(missing_ok=True)
+            return resolved
+        except Exception:
+            continue
+    raise MemoryBootstrapError("PRIVATE_MEMORY_STORAGE_REQUIRED", "private context temp directory must be outside repository")
 
 
 def _assert_outside(path: Path, root: Path) -> None:
@@ -466,6 +523,9 @@ def _output_echoes_private(output: str, context: Mapping[str, object]) -> bool:
         for result in results:
             if isinstance(result, Mapping):
                 _collect_result_private_strings(result, needles)
+    awareness = context.get("awareness")
+    if isinstance(awareness, Mapping):
+        _collect_awareness_private_strings(awareness, needles)
     return any(needle and needle in output for needle in needles if needle != "summary")
 
 
@@ -473,6 +533,19 @@ def _collect_result_private_strings(result: Mapping[str, object], needles: set[s
     for key in ("bounded_text", "text", "value", "content", "summary", "result_text"):
         if key in result:
             _collect_distinctive_strings(result[key], needles)
+
+
+def _collect_awareness_private_strings(value: object, needles: set[str]) -> None:
+    if isinstance(value, Mapping):
+        for child_key, child_value in value.items():
+            child_key_name = str(child_key)
+            if child_key_name in {"private_value", "private_values", "private_payload"}:
+                _collect_distinctive_strings(child_value, needles)
+            else:
+                _collect_awareness_private_strings(child_value, needles)
+    elif isinstance(value, list):
+        for child in value:
+            _collect_awareness_private_strings(child, needles)
 
 
 def _collect_distinctive_strings(value: object, needles: set[str]) -> None:
