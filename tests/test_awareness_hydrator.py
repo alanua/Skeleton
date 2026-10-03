@@ -4,6 +4,7 @@ import copy
 import json
 from pathlib import Path
 
+from core.awareness_context import SECTION_NAMES
 from core.awareness_hydrator import (
     AwarenessHydrationProviders,
     AwarenessHydrationRequest,
@@ -42,11 +43,15 @@ def test_hydrator_selects_relevant_provider_inputs_without_mutation(tmp_path: Pa
     receipt = result.public_receipt()
     serialized_receipt = json.dumps(receipt, sort_keys=True)
 
-    assert receipt["counts"] == {
-        "memory_records": 1,
-        "pending_items": 1,
-        "capability_records": 1,
-    }
+    assert tuple(packet["sections"]) == SECTION_NAMES
+    assert tuple(receipt["section_hashes"]) == SECTION_NAMES
+    assert receipt["counts"]["memory_records"] == 1
+    assert receipt["counts"]["pending_items"] == 1
+    assert receipt["counts"]["capability_records"] == 1
+    assert receipt["counts"]["task_contract_records"] == 1
+    assert receipt["counts"]["repository_scope_records"] == 1
+    assert receipt["counts"]["privacy_controls_records"] == 1
+    assert receipt["counts"]["runtime_controls_records"] == 1
     assert packet["sections"]["memory"]["records"][0]["canonical_ref"] == "skeleton.context:alpha"
     assert packet["sections"]["pending_work"]["items"][0]["item_kind"] == "document"
     assert packet["sections"]["capability_truth"]["records"][0]["capability_id"] == "repository_write_allowlisted"
@@ -97,11 +102,13 @@ def test_hydrator_empty_relevance_matches_all_injected_read_models() -> None:
         now=NOW,
     )
 
-    assert result.public_receipt()["counts"] == {
-        "memory_records": 1,
-        "pending_items": 2,
-        "capability_records": 2,
-    }
+    counts = result.public_receipt()["counts"]
+
+    assert counts["memory_records"] == 1
+    assert counts["pending_items"] == 2
+    assert counts["capability_records"] == 2
+    assert counts["task_contract_records"] == 1
+    assert counts["repository_scope_records"] == 1
 
 
 def _memory_stack(tmp_path: Path) -> PrivateMemoryStack:

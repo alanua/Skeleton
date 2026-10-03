@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import copy
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
 
 from core.awareness_context import AwarenessContextResult, assemble_awareness_context
+from core.private_memory_history import content_hash
 from core.private_memory_stack import PrivateMemoryStack
 from core.task_memory_context import (
     MAX_CONTEXT_CHARS,
@@ -33,6 +34,7 @@ class AwarenessHydrationProviders:
     memory_stack: PrivateMemoryStack
     pending_work: Mapping[str, Any]
     capability_truth: Mapping[str, Any]
+    auxiliary_sections: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -47,6 +49,7 @@ class AwarenessHydrationRequest:
     memory_max_chars: int = MAX_CONTEXT_CHARS
     pending_limit: int = 10
     capability_limit: int = 20
+    auxiliary_limit: int = 10
     now: str | None = None
 
 
@@ -84,10 +87,12 @@ def hydrate_awareness_context(
             terms,
             requested_capabilities=request.requested_capabilities,
         ),
+        auxiliary_sections=_request_auxiliary_sections(request, providers.auxiliary_sections),
         now=request.now,
         memory_limit=request.memory_limit,
         pending_limit=request.pending_limit,
         capability_limit=request.capability_limit,
+        auxiliary_limit=request.auxiliary_limit,
     )
 
 
@@ -99,11 +104,13 @@ def hydrate_from_read_models(
     memory_context: TaskMemoryContextResult | Mapping[str, Any],
     pending_work: Mapping[str, Any],
     capability_truth: Mapping[str, Any],
+    auxiliary_sections: Mapping[str, Mapping[str, Any]] | None = None,
     requested_capabilities: Sequence[str] = (),
     now: str | None = None,
     memory_limit: int = 10,
     pending_limit: int = 10,
     capability_limit: int = 20,
+    auxiliary_limit: int = 10,
 ) -> AwarenessContextResult:
     """Assemble from already-built read models after relevance trimming."""
 
@@ -118,10 +125,16 @@ def hydrate_from_read_models(
             terms,
             requested_capabilities=requested_capabilities,
         ),
+        auxiliary_sections=_read_model_auxiliary_sections(
+            auxiliary_sections or {},
+            task_body=task_body,
+            requested_capabilities=requested_capabilities,
+        ),
         now=now,
         memory_limit=memory_limit,
         pending_limit=pending_limit,
         capability_limit=capability_limit,
+        auxiliary_limit=auxiliary_limit,
     )
 
 
@@ -205,6 +218,108 @@ def _relevant_capability_truth(
     copied["runtime_mutation_performed"] = False
     copied["summary"] = _capability_summary(selected)
     return copied
+
+
+def _request_auxiliary_sections(
+    request: AwarenessHydrationRequest,
+    injected: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Mapping[str, Any]]:
+    sections = _base_auxiliary_sections(
+        project_id=request.project_id,
+        task_route=request.task_route,
+        task_body=request.task_body,
+        requested_capabilities=request.requested_capabilities,
+        memory_profile=request.memory_profile,
+        memory_namespaces=request.memory_namespaces,
+    )
+    return _merge_auxiliary_sections(sections, injected)
+
+
+def _read_model_auxiliary_sections(
+    injected: Mapping[str, Mapping[str, Any]],
+    *,
+    task_body: str,
+    requested_capabilities: Sequence[str],
+) -> dict[str, Mapping[str, Any]]:
+    sections = _base_auxiliary_sections(
+        project_id="injected",
+        task_route="read_model",
+        task_body=task_body,
+        requested_capabilities=requested_capabilities,
+        memory_profile=DEFAULT_MEMORY_PROFILE,
+        memory_namespaces=tuple(sorted(TASK_MEMORY_CONTEXT_NAMESPACES)),
+    )
+    return _merge_auxiliary_sections(sections, injected)
+
+
+def _base_auxiliary_sections(
+    *,
+    project_id: str,
+    task_route: str,
+    task_body: str,
+    requested_capabilities: Sequence[str],
+    memory_profile: str,
+    memory_namespaces: Sequence[str],
+) -> dict[str, Mapping[str, Any]]:
+    task_body_hash = content_hash({"task_body": task_body})
+    requested = tuple(str(item) for item in requested_capabilities if isinstance(item, str))
+    return {
+        "task_contract": {
+            "records": [
+                {
+                    "project_id": project_id,
+                    "task_route": task_route,
+                    "task_body_hash": task_body_hash,
+                    "requested_capabilities": requested,
+                    "freshness_label": "FRESH",
+                    "epistemic_label": "OBSERVED",
+                }
+            ]
+        },
+        "repository_scope": {
+            "records": [
+                {
+                    "memory_profile": memory_profile,
+                    "memory_namespaces": tuple(memory_namespaces),
+                    "freshness_label": "FRESH",
+                    "epistemic_label": "DERIVED",
+                }
+            ]
+        },
+        "validation_contract": {"records": []},
+        "output_contract": {"records": []},
+        "privacy_controls": {
+            "records": [
+                {
+                    "privacy_boundary": "PRIVATE_RUNTIME_CONTEXT_PUBLIC_SAFE_RECEIPTS_ONLY",
+                    "private_payloads_included": False,
+                    "freshness_label": "FRESH",
+                    "epistemic_label": "DECLARED",
+                }
+            ]
+        },
+        "runtime_controls": {
+            "records": [
+                {
+                    "runtime_mutation_performed": False,
+                    "canonical_store_mutation_performed": False,
+                    "freshness_label": "FRESH",
+                    "epistemic_label": "OBSERVED",
+                }
+            ]
+        },
+    }
+
+
+def _merge_auxiliary_sections(
+    base: Mapping[str, Mapping[str, Any]],
+    injected: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Mapping[str, Any]]:
+    merged = copy.deepcopy(dict(base))
+    for name, value in injected.items():
+        if isinstance(name, str) and isinstance(value, Mapping):
+            merged[name] = copy.deepcopy(dict(value))
+    return merged
 
 
 def _matches_terms(value: object, terms: frozenset[str]) -> bool:
