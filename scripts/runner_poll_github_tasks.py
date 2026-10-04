@@ -5385,17 +5385,10 @@ def get_issue_comments(
     comments = issue.get("comments")
     if isinstance(comments, list):
         return [comment for comment in comments if isinstance(comment, dict)]
-    if isinstance(comments, int) and comments > 0:
-        return None
-    return []
-
-
-def get_recoverable_blocked_issue_comments(
-    issue: Mapping[str, Any], repository: str | None = None
-) -> list[dict[str, Any]] | None:
-    comments = get_issue_comments(dict(issue), repository=repository)
-    if comments is not None:
-        return comments
+    if not (os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")):
+        if isinstance(comments, int) and comments > 0:
+            return None
+        return []
     issue_number = int(issue["number"])
     queue_repository = repository or _current_queue_repository()
     code, output = run_command(
@@ -5421,6 +5414,39 @@ def get_recoverable_blocked_issue_comments(
         return None
     return [comment for comment in parsed_comments if isinstance(comment, dict)]
 
+
+def get_recoverable_blocked_issue_comments(
+    issue: Mapping[str, Any], repository: str | None = None
+) -> list[dict[str, Any]] | None:
+    comments = issue.get("comments")
+    if isinstance(comments, list):
+        return [comment for comment in comments if isinstance(comment, dict)]
+    if isinstance(comments, int) and comments <= 0:
+        return []
+    issue_number = int(issue["number"])
+    queue_repository = repository or _current_queue_repository()
+    code, output = run_command(
+        [
+            "gh",
+            "issue",
+            "view",
+            str(issue_number),
+            "--repo",
+            queue_repository,
+            "--json",
+            "comments",
+        ]
+    )
+    if code != 0:
+        return None
+    try:
+        parsed = json.loads(output or "{}")
+    except json.JSONDecodeError:
+        return None
+    parsed_comments = parsed.get("comments") if isinstance(parsed, dict) else None
+    if not isinstance(parsed_comments, list):
+        return None
+    return [comment for comment in parsed_comments if isinstance(comment, dict)]
 
 def repeated_blocker_report(decision: RetryDecision) -> str:
     next_action = decision.next_required_action or "DIAGNOSE"

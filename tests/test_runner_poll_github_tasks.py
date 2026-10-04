@@ -2210,7 +2210,6 @@ def test_typed_dependency_issue_done_allows_pickup_transition(
 def test_dependency_free_ready_task_does_not_live_read_before_pickup(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setenv("GH_TOKEN", "synthetic-token")
     body = _typed_dependency_task_body()
     issue = {
         "number": 4002,
@@ -4762,7 +4761,7 @@ def test_recoverable_blocked_comment_helper_uses_gh_without_token_env(
 ) -> None:
     monkeypatch.delenv("GH_TOKEN", raising=False)
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
-    issue = {"number": 4450, "comments": 1}
+    issue = {"number": 4450}
     gh_comments = [{"body": "BLOCKED: prior runner report"}]
 
     with mock.patch.object(
@@ -11028,16 +11027,64 @@ def test_recoverable_blocked_comment_history_helper_uses_gh_cli(
     ]
 
 
-def test_get_issue_comments_does_not_live_read_with_token(
+def test_get_issue_comments_uses_gh_cli_with_token(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("GH_TOKEN", "synthetic-token")
     issue = {"number": 4023, "comments": 1}
+    comments = [{"body": "ordinary history"}]
 
+    with mock.patch.object(
+        runner,
+        "run_command",
+        return_value=(0, json.dumps({"comments": comments})),
+    ) as run:
+        assert runner.get_issue_comments(issue) == comments
+
+    run.assert_called_once_with(
+        [
+            "gh",
+            "issue",
+            "view",
+            "4023",
+            "--repo",
+            runner.REPO,
+            "--json",
+            "comments",
+        ]
+    )
+
+
+def test_recoverable_blocked_comment_helper_fast_paths_do_not_use_gh() -> None:
+    embedded = [{"body": "history"}, "ignore-me"]
     with mock.patch.object(runner, "run_command") as run:
-        assert runner.get_issue_comments(issue) is None
-
+        assert runner.get_recoverable_blocked_issue_comments(
+            {"number": 4024, "comments": embedded}
+        ) == [{"body": "history"}]
+        assert runner.get_recoverable_blocked_issue_comments(
+            {"number": 4025, "comments": 0}
+        ) == []
     run.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "command_result",
+    (
+        (1, "gh failed"),
+        (0, "not-json"),
+        (0, json.dumps({"comments": {"unexpected": "mapping"}})),
+    ),
+)
+def test_recoverable_blocked_comment_helper_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    command_result: tuple[int, str],
+) -> None:
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    with mock.patch.object(runner, "run_command", return_value=command_result):
+        assert runner.get_recoverable_blocked_issue_comments(
+            {"number": 4026, "comments": 1}
+        ) is None
 
 
 def test_retained_dirty_out_of_scope_tracked_file_blocks_before_provider(
