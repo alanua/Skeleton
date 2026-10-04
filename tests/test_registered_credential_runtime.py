@@ -348,3 +348,82 @@ def test_registration_metadata_is_public_safe() -> None:
     assert "gmail-primary-oauth-secret-ref" not in serialized
     assert "gmail-secondary-oauth-secret-ref" not in serialized
     assert "SKELETON_OPENROUTER_FALLBACK_API_KEY" not in serialized
+
+def test_home_assistant_credentials_are_registered_and_separated() -> None:
+    capabilities = credential_runtime.registered_credential_capabilities()
+    rows = [
+        row for row in capabilities
+        if row["service_id"] == "home-assistant-brandenburg"
+    ]
+
+    assert {(row["alias"], row["credential_kind"]) for row in rows} == {
+        ("human-login", "human"),
+        ("machine-api", "machine"),
+    }
+    serialized = json.dumps(rows, sort_keys=True)
+    assert "home-assistant-brandenburg-owner-password-ref" not in serialized
+    assert "home-assistant-brandenburg-api-refresh-token-ref" not in serialized
+
+
+def test_registered_probe_checks_home_assistant_without_returning_secret(monkeypatch) -> None:
+    secret = "synthetic-home-assistant-refresh-token"
+    store, reference_calls = _install_fake_provider(monkeypatch, value=secret)
+
+    receipt = credential_runtime.probe_registered_credential(
+        service_id="home-assistant-brandenburg",
+        alias="machine-api",
+        authority_environment={},
+    )
+
+    assert receipt["result"]["status"] == "AVAILABLE"
+    assert reference_calls == ["direct:home-assistant-brandenburg-api-refresh-token-ref"]
+    assert store.calls[0][1].machine_identity == "home-edge-01"
+    assert store.calls[0][1].audience == "home-assistant-api"
+    assert store.calls[0][1].task_kind == "home_automation_control"
+    assert secret not in json.dumps(receipt, sort_keys=True)
+
+
+def test_registered_service_status_is_generic_and_public_safe(monkeypatch) -> None:
+    secret = "synthetic-home-assistant-secret"
+    _store, reference_calls = _install_fake_provider(monkeypatch, value=secret)
+
+    status = credential_runtime.registered_service_credential_status(
+        service_id="home-assistant-brandenburg",
+        authority_environment={},
+    )
+
+    assert status["schema"] == "skeleton.registered_service_credentials.status.v1"
+    assert status["service_id"] == "home-assistant-brandenburg"
+    assert {
+        (row["alias"], row["credential_kind"], row["status"])
+        for row in status["credentials"]
+    } == {
+        ("human-login", "human", "AVAILABLE"),
+        ("machine-api", "machine", "AVAILABLE"),
+    }
+    assert reference_calls == [
+        "direct:home-assistant-brandenburg-owner-password-ref",
+        "direct:home-assistant-brandenburg-api-refresh-token-ref",
+    ]
+    assert secret not in json.dumps(status, sort_keys=True)
+
+
+def test_registered_service_status_rejects_unregistered_service_before_provider(monkeypatch) -> None:
+    provider_calls: list[bool] = []
+    monkeypatch.setattr(
+        credential_runtime,
+        "registered_bitwarden_reference_from_systemd_index",
+        lambda *_args, **_kwargs: provider_calls.append(True),
+    )
+
+    with pytest.raises(
+        credential_runtime.RegisteredCredentialRuntimeError,
+        match="registered_service_unavailable",
+    ):
+        credential_runtime.registered_service_credential_status(
+            service_id="not-registered",
+            authority_environment={},
+        )
+
+    assert provider_calls == []
+
