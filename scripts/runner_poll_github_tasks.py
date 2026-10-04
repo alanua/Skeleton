@@ -1409,6 +1409,7 @@ class IssueWorktreePublishInspectionRequest:
     worktree_root: Path | None = None
     target_project_route: bool = False
     source_repository: str = QUEUE_REPOSITORY
+    recovery_worktree: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1919,6 +1920,23 @@ def _path_is_relative_to(path: Path, parent: Path) -> bool:
     return True
 
 
+def _path_is_runner_managed_scratch(path: Path) -> bool:
+    try:
+        relative = path.resolve(strict=False).relative_to(ROOT.resolve(strict=False))
+    except ValueError:
+        return False
+    return any(part.startswith(".runner-codex-state-") for part in relative.parts)
+
+
+def _path_is_inside_public_repo_boundary(path: Path) -> bool:
+    resolved = path.resolve(strict=False)
+    if resolved == ROOT:
+        return True
+    if not _path_is_relative_to(resolved, ROOT):
+        return False
+    return not _path_is_runner_managed_scratch(resolved)
+
+
 def _validated_registered_target_path(
     target_repository: str, field: str, raw_path: object
 ) -> Path:
@@ -2228,6 +2246,186 @@ def _retained_dirty_continuation_gate_failure(
     return None
 
 
+def _bounded_wrong_base_recovery_path(path: Path, verified_base_sha: str) -> Path:
+    return path.parent / f"{path.name}-recovery-{verified_base_sha[:12]}"
+
+
+def _git_diff_name_set(
+    cwd: Path, *revisions: str, allowed_files: frozenset[str]
+) -> tuple[int, set[str], str | None]:
+    command = ["git", "diff", "--name-only", *revisions, "--"]
+    code, output = run_command(command, cwd=cwd)
+    if code != 0:
+        return code, set(), "diff_name_discovery_failed"
+    files = {line.strip() for line in output.splitlines() if line.strip()}
+    if not all(_safe_changed_file(file_name) for file_name in files):
+        return 1, files, "diff_changed_file_path_unsafe"
+    if not files <= set(allowed_files):
+        return 1, files, "diff_changed_files_outside_allowlist"
+    return 0, files, None
+
+
+def _git_diff_patch(
+    cwd: Path, *revisions: str, allowed_files: frozenset[str]
+) -> tuple[int, str, str | None]:
+    command = ["git", "diff", "--binary", *revisions, "--", *sorted(allowed_files)]
+    code, output = run_command(command, cwd=cwd)
+    if code != 0:
+        return code, "", "diff_patch_failed"
+    return 0, output, None
+
+
+def _apply_private_patch(
+    *,
+    cwd: Path,
+    patch: str,
+    reason_prefix: str,
+) -> tuple[int, str | None]:
+    if not patch.strip():
+        return 0, None
+    for command, reason in (
+        (["git", "apply", "--check", "--binary"], f"{reason_prefix}_check_failed"),
+        (["git", "apply", "--binary"], f"{reason_prefix}_apply_failed"),
+    ):
+        code, _output = run_command(command, cwd=cwd, input=patch)
+        if code != 0:
+            return code, reason
+    return 0, None
+
+
+def _prepare_wrong_base_recovery_worktree(
+    *,
+    issue_number: int,
+    coordinator_workdir: str | Path,
+    retained_path: Path,
+    target_repository: str,
+    source_repository: str,
+    base_ref: str,
+    verified_base_sha: str,
+    branch: str,
+    origin_url: str,
+    allowed_files: frozenset[str],
+    outputs: list[str],
+) -> tuple[int, str | None, Path]:
+    recovery_path = _bounded_wrong_base_recovery_path(retained_path, verified_base_sha)
+    try:
+        ensure_safe_target_repository_worktree_path(target_repository, recovery_path)
+    except ValueError:
+        return 1, "wrong_base_recovery_path_unsafe", recovery_path
+    if recovery_path.exists():
+        return 1, "wrong_base_recovery_path_exists", recovery_path
+
+    merge_base_command = ["git", "merge-base", "--all", "HEAD", verified_base_sha]
+    code, output = run_command(merge_base_command, cwd=retained_path)
+    outputs.append(format_command_output(merge_base_command, output))
+    merge_bases = [line.strip().lower() for line in output.splitlines() if line.strip()]
+    if code != 0 or len(merge_bases) != 1 or _HEAD_SHA_RE.fullmatch(merge_bases[0]) is None:
+        return code or 1, "wrong_base_recovery_ambiguous_merge_base", recovery_path
+    merge_base = merge_bases[0]
+
+    code, committed_files, reason = _git_diff_name_set(
+        retained_path, merge_base, "HEAD", allowed_files=allowed_files
+    )
+    if code != 0 or reason is not None:
+        return code or 1, f"wrong_base_recovery_committed_{reason}", recovery_path
+    code, dirty_files, reason = _git_diff_name_set(
+        retained_path, "HEAD", allowed_files=allowed_files
+    )
+    if code != 0 or reason is not None:
+        return code or 1, f"wrong_base_recovery_dirty_{reason}", recovery_path
+    if not dirty_files:
+        return 1, "wrong_base_recovery_dirty_delta_missing", recovery_path
+
+    all_transplanted_files = committed_files | dirty_files
+    if not all_transplanted_files <= set(allowed_files):
+        return 1, "wrong_base_recovery_changed_files_outside_allowlist", recovery_path
+
+    code, committed_patch, reason = _git_diff_patch(
+        retained_path, merge_base, "HEAD", allowed_files=allowed_files
+    )
+    if code != 0 or reason is not None:
+        return code or 1, f"wrong_base_recovery_committed_{reason}", recovery_path
+    code, dirty_patch, reason = _git_diff_patch(
+        retained_path, "HEAD", allowed_files=allowed_files
+    )
+    if code != 0 or reason is not None:
+        return code or 1, f"wrong_base_recovery_dirty_{reason}", recovery_path
+
+    clone_command = [
+        "git",
+        "clone",
+        "--local",
+        "--no-hardlinks",
+        "--no-checkout",
+        str(Path(coordinator_workdir).resolve()),
+        str(recovery_path),
+    ]
+    code, output = run_command(clone_command, cwd=coordinator_workdir)
+    outputs.append(format_command_output(clone_command, output))
+    if code != 0:
+        return code, "wrong_base_recovery_clone_failed", recovery_path
+
+    setup_commands = (
+        (["git", "remote", "set-url", "origin", origin_url], recovery_path),
+        (
+            [
+                "git",
+                "fetch",
+                "origin",
+                f"refs/heads/{base_ref}:refs/remotes/origin/{base_ref}",
+            ],
+            recovery_path,
+        ),
+        (["git", "rev-parse", f"refs/remotes/origin/{base_ref}"], recovery_path),
+        (["git", "checkout", "-B", branch, verified_base_sha], recovery_path),
+    )
+    for command, cwd in setup_commands:
+        code, output = run_command(command, cwd=cwd)
+        if command[:3] == ["git", "remote", "set-url"]:
+            outputs.append("$ git remote set-url origin <coordinator-origin>\n" + output)
+        else:
+            outputs.append(format_command_output(command, output))
+        if code != 0:
+            return code, "wrong_base_recovery_setup_failed", recovery_path
+        if command[:3] == ["git", "rev-parse", f"refs/remotes/origin/{base_ref}"]:
+            fetched_sha = output.strip().lower()
+            if fetched_sha != verified_base_sha:
+                return 1, "wrong_base_recovery_base_drift", recovery_path
+
+    code, reason = _apply_private_patch(
+        cwd=recovery_path,
+        patch=committed_patch,
+        reason_prefix="wrong_base_recovery_committed_patch",
+    )
+    if code != 0 or reason is not None:
+        return code or 1, reason or "wrong_base_recovery_committed_patch_failed", recovery_path
+    code, reason = _apply_private_patch(
+        cwd=recovery_path,
+        patch=dirty_patch,
+        reason_prefix="wrong_base_recovery_dirty_patch",
+    )
+    if code != 0 or reason is not None:
+        return code or 1, reason or "wrong_base_recovery_dirty_patch_failed", recovery_path
+
+    code, recovery_files, reason = _git_diff_name_set(
+        recovery_path, "HEAD", allowed_files=allowed_files
+    )
+    if code != 0 or reason is not None:
+        return code or 1, f"wrong_base_recovery_final_{reason}", recovery_path
+    if recovery_files != all_transplanted_files:
+        return 1, "wrong_base_recovery_final_changed_files_mismatch", recovery_path
+
+    outputs.append(
+        "wrong_base_recovery=prepared "
+        f"source_issue={issue_number} "
+        f"source_repository={source_repository} "
+        f"retained_worktree={retained_path} "
+        f"recovery_worktree={recovery_path} "
+        f"transplanted_files_count={len(recovery_files)}"
+    )
+    return 0, None, recovery_path
+
+
 def prepare_git_issue_worktree(
     issue_number: int,
     coordinator_workdir: str | Path,
@@ -2296,6 +2494,9 @@ def prepare_git_issue_worktree(
                     + "\n".join(outputs),
                     path,
                 )
+            retained_origin_url = output.strip()
+        else:
+            retained_origin_url = ""
         if status_output.strip():
             gate_failure = _retained_dirty_continuation_gate_failure(
                 issue_number=issue_number,
@@ -2342,6 +2543,39 @@ def prepare_git_issue_worktree(
             code, output = run_command(ancestor_command, cwd=path)
             outputs.append(format_command_output(ancestor_command, output))
             if code != 0:
+                if (
+                    target_repository is not None
+                    and status_output.strip()
+                    and continuation_gate is not None
+                ):
+                    (
+                        recovery_code,
+                        recovery_reason,
+                        recovery_path,
+                    ) = _prepare_wrong_base_recovery_worktree(
+                        issue_number=issue_number,
+                        coordinator_workdir=coordinator_workdir,
+                        retained_path=path,
+                        target_repository=target_repository,
+                        source_repository=source_repository,
+                        base_ref=base_ref,
+                        verified_base_sha=str(verified_sha_or_reason),
+                        branch=branch,
+                        origin_url=retained_origin_url,
+                        allowed_files=continuation_gate.allowed_files,
+                        outputs=outputs,
+                    )
+                    if recovery_code == 0:
+                        return 0, "\n".join(outputs), recovery_path
+                    return (
+                        recovery_code,
+                        _format_base_preparation_failure(
+                            recovery_reason or "wrong_base_recovery_failed", base
+                        )
+                        + "\n\n"
+                        + "\n".join(outputs),
+                        path,
+                    )
                 return (
                     1,
                     _format_base_preparation_failure(
@@ -2775,6 +3009,18 @@ def cleanup_target_repository_issue_worktree(
     except ValueError as exc:
         return 1, str(exc)
     return cleanup_git_issue_worktree(path, target_repository_checkout_path(target_repository))
+
+
+def cleanup_target_repository_issue_worktree_path(
+    target_repository: str,
+    path: str | Path,
+) -> tuple[int, str]:
+    try:
+        safe_path = ensure_safe_target_repository_worktree_path(target_repository, path)
+        checkout_path = target_repository_checkout_path(target_repository)
+    except ValueError as exc:
+        return 1, str(exc)
+    return cleanup_git_issue_worktree(safe_path, checkout_path)
 
 
 def issue_workspace_review_note(path: str | Path) -> str:
@@ -6206,6 +6452,13 @@ def extract_pr_repository(pr_url: str) -> str | None:
     return f"{match.group('owner')}/{match.group('repo')}"
 
 
+def _canonical_skeleton_pr_url(pr_number: int) -> str:
+    pr_url = f"https://github.com/{QUEUE_REPOSITORY}/pull/{pr_number}"
+    if _PUBLIC_GITHUB_PR_URL_RE.fullmatch(pr_url) is None:
+        raise RuntimeError("canonical Skeleton PR URL failed validation")
+    return pr_url
+
+
 def extract_runner_report_pr_binding(
     report: str,
 ) -> tuple[str | None, tuple[str, ...]]:
@@ -6923,7 +7176,10 @@ def finalize_existing_pr_success(
             "Existing PR update post-push verification failed: "
             f"{post_reason or 'pr_head_branch_mismatch'}"
         )
-    pr_url = f"https://github.com/{REPO}/pull/{request.pr_number}"
+    pr_url = _canonical_skeleton_pr_url(request.pr_number)
+    reported_pr_url = _existing_pr_publish_pr_url(post_state or {})
+    if reported_pr_url is not None and reported_pr_url.rstrip("/") != pr_url:
+        raise RuntimeError("Existing PR update post-push PR URL mismatch.")
 
     pytest_output = next(
         output for command, output in checks if command == "python3 -m pytest -q"
@@ -6996,11 +7252,34 @@ def _target_project_publication_body(
     issue_body: str,
     runner_task: RunnerTask,
     source_repository: str,
+    issue_workdir: str | Path | None = None,
 ) -> str:
     allowed_files, allowed_reason = _codegen_publish_allowed_files(issue_body)
     if allowed_reason is not None:
         raise RuntimeError(f"publication_contract_{allowed_reason}")
     base_branch = runner_task.base or "main"
+    recovery_metadata: list[str] = []
+    if issue_workdir is not None:
+        canonical_path = target_repository_issue_worktree_path(
+            runner_task.target_repository,
+            issue_number,
+            source_repository,
+        )
+        actual_path = Path(issue_workdir).expanduser()
+        if runner_task.base_sha is None:
+            if actual_path.name != canonical_path.name:
+                raise RuntimeError("publication_contract_recovery_base_sha_missing")
+        else:
+            expected_recovery_path = _bounded_wrong_base_recovery_path(
+                canonical_path,
+                runner_task.base_sha,
+            )
+            if actual_path.name != canonical_path.name:
+                if actual_path.name != expected_recovery_path.name:
+                    raise RuntimeError("publication_contract_recovery_worktree_mismatch")
+                recovery_metadata.append(
+                    f"Recovery Worktree: {expected_recovery_path.name}"
+                )
     metadata = [
         f"Target Project: {runner_task.target_project}",
         f"Target Repository: {runner_task.target_repository}",
@@ -7008,8 +7287,10 @@ def _target_project_publication_body(
         f"Source Issue: {issue_number}",
         f"Base Branch: {base_branch}",
         *([f"Base SHA: {runner_task.base_sha}"] if runner_task.base_sha is not None else []),
+        *recovery_metadata,
         f"Output Branch: {issue_branch(issue_number, source_repository)}",
         "Draft PR: true",
+        *_target_project_publication_existing_pr_metadata(issue_body),
         "Allowed Files:",
         *(f"- {path}" for path in sorted(allowed_files)),
     ]
@@ -7022,6 +7303,23 @@ def _target_project_publication_body(
             "```",
         )
     )
+
+
+def _target_project_publication_existing_pr_metadata(issue_body: str) -> list[str]:
+    declared_pr = _declared_existing_pr_number(issue_body)
+    if declared_pr is None:
+        return []
+    expected_head_sha = _declared_existing_pr_expected_head_sha(issue_body)
+    if expected_head_sha is None:
+        raise RuntimeError("publication_contract_existing_pr_head_sha_missing")
+    expected_head_branch = _declared_existing_pr_expected_head_branch(issue_body)
+    if expected_head_branch is None:
+        raise RuntimeError("publication_contract_existing_pr_head_branch_missing")
+    return [
+        f"Existing PR: {declared_pr}",
+        f"Expected PR Head SHA: {expected_head_sha}",
+        f"Expected PR Head Branch: {expected_head_branch}",
+    ]
 
 
 def _codegen_requires_target_publication(issue_body: str) -> bool:
@@ -7077,6 +7375,7 @@ def publish_local_target_worktree_result(
             issue_body=issue_body,
             runner_task=runner_task,
             source_repository=source_repository,
+            issue_workdir=issue_workdir,
         )
     except RuntimeError as exc:
         return (
@@ -7189,7 +7488,11 @@ def _loop_state_db_path() -> tuple[Path | None, str | None]:
         env_var_name=LOOP_STATE_DB_ENV,
         root=ROOT,
         path_has_symlink_component=_path_has_symlink_component,
-        path_is_relative_to=_path_is_relative_to,
+        path_is_relative_to=lambda path, parent: (
+            _path_is_inside_public_repo_boundary(path)
+            if parent.resolve(strict=False) == ROOT.resolve(strict=False)
+            else _path_is_relative_to(path, parent)
+        ),
     )
 
 
@@ -8982,9 +9285,9 @@ def _aufmass_private_registered_paths() -> tuple[Path | None, Path | None, str |
         if not _path_is_under_allowed_target_base(path):
             return None, None, f"reason={name}_unsafe"
 
-    if workspace_root == ROOT or _path_is_relative_to(workspace_root, ROOT):
+    if _path_is_inside_public_repo_boundary(workspace_root):
         return None, None, "reason=private_workspace_inside_public_repo"
-    if checkout_path == ROOT or _path_is_relative_to(checkout_path, ROOT):
+    if _path_is_inside_public_repo_boundary(checkout_path):
         return None, None, "reason=private_checkout_inside_public_repo"
 
     return checkout_path, workspace_root, None
@@ -9203,7 +9506,7 @@ def _resolve_private_registry_path(
     resolved_registry = registry_path.resolve(strict=False)
     if not _path_is_relative_to(resolved_registry, workspace_root):
         return None, "registry_outside_private_workspace"
-    if resolved_registry == ROOT or _path_is_relative_to(resolved_registry, ROOT):
+    if _path_is_inside_public_repo_boundary(resolved_registry):
         return None, "registry_inside_public_repo"
     if not resolved_registry.is_file():
         return None, "registry_missing"
@@ -9223,7 +9526,7 @@ def _private_registry_relative_path(
     resolved = (workspace_root / candidate).resolve(strict=False)
     if not _path_is_relative_to(resolved, workspace_root):
         return None, f"{label}_outside_private_workspace"
-    if resolved == ROOT or _path_is_relative_to(resolved, ROOT):
+    if _path_is_inside_public_repo_boundary(resolved):
         return None, f"{label}_inside_public_repo"
     return resolved, None
 
@@ -9869,7 +10172,7 @@ def _write_private_shortlist_artifacts(
         resolved = path.resolve(strict=False)
         if not _path_is_relative_to(resolved, resolved_output_root):
             return "shortlist_artifact_path_unsafe"
-        if resolved == ROOT or _path_is_relative_to(resolved, ROOT):
+        if _path_is_inside_public_repo_boundary(resolved):
             return "shortlist_artifact_inside_public_repo"
     payload = {
         "schema": "skeleton.aufmass_private_shortlist.v1",
@@ -10015,7 +10318,7 @@ def _write_private_area_schedule_artifacts(
         resolved = path.resolve(strict=False)
         if not _path_is_relative_to(resolved, resolved_output_root):
             return "area_schedule_artifact_path_unsafe"
-        if resolved == ROOT or _path_is_relative_to(resolved, ROOT):
+        if _path_is_inside_public_repo_boundary(resolved):
             return "area_schedule_artifact_inside_public_repo"
     payload = {
         "schema": "skeleton.aufmass_private_area_schedule.v1",
@@ -13771,6 +14074,9 @@ def _issue_worktree_publish_inspection_metadata(
     base_sha = _normalize_optional_text(_body_field(metadata, "Base SHA"))
     if base_sha is not None:
         base_sha = base_sha.lower()
+    recovery_worktree = _normalize_optional_text(
+        _body_field(metadata, "Recovery Worktree")
+    )
     draft_pr, draft_pr_reason = _issue_publish_bool_field(
         metadata, "Draft PR", default=True
     )
@@ -13823,6 +14129,17 @@ def _issue_worktree_publish_inspection_metadata(
         return None, "unsupported_base_branch"
     if explicit_recovery_route and base_sha is not None:
         return None, "unsupported_metadata_field"
+    if recovery_worktree is not None:
+        if not target_project_route:
+            return None, "unsupported_metadata_field"
+        if base_sha is None:
+            return None, "recovery_worktree_base_sha_required"
+        expected_recovery_worktree = _bounded_wrong_base_recovery_path(
+            Path(_source_issue_slug(source_issue_number, source_repository)),
+            base_sha,
+        ).name
+        if recovery_worktree != expected_recovery_worktree:
+            return None, "recovery_worktree_mismatch"
     if draft_pr_reason is not None:
         return None, draft_pr_reason
     if (explicit_recovery_route or target_project_route) and draft_pr is not True:
@@ -13847,6 +14164,7 @@ def _issue_worktree_publish_inspection_metadata(
             worktree_root=target_worktree_root,
             target_project_route=target_project_route,
             source_repository=source_repository,
+            recovery_worktree=recovery_worktree,
         ),
         None,
     )
@@ -13999,6 +14317,8 @@ def _target_project_issue_worktree_path(
 ) -> Path:
     if request.worktree_root is None:
         raise ValueError("target project worktree root is missing")
+    if request.recovery_worktree is not None:
+        return request.worktree_root / request.recovery_worktree
     return request.worktree_root / _source_issue_slug(
         request.source_issue, request.source_repository
     )
@@ -14017,7 +14337,10 @@ def _ensure_safe_target_project_issue_publish_worktree_path(
         candidate.relative_to(root)
     except ValueError as exc:
         raise ValueError("issue worktree is outside target project worktree root") from exc
-    if candidate.name != _source_issue_slug(request.source_issue, request.source_repository):
+    expected_name = request.recovery_worktree or _source_issue_slug(
+        request.source_issue, request.source_repository
+    )
+    if candidate.name != expected_name:
         raise ValueError("issue worktree path does not end with the source issue")
     return candidate
 
@@ -15288,8 +15611,8 @@ def _issue_worktree_publish_existing_pr_url(
     verified_base_sha: str | None = None,
 ) -> IssueWorktreePublishExistingPrLookup:
     json_fields = (
-        "url,state,isDraft,baseRefName,baseRefOid,headRefName,headRefOid,"
-        "headRepository,headRepositoryOwner"
+        "number,url,state,isDraft,baseRefName,baseRefOid,headRefName,headRefOid,"
+        "headRepository,headRepositoryOwner,files"
     )
     code, output = run_command(
         [
@@ -15481,8 +15804,8 @@ def _issue_worktree_publish_pr_state(
             request.repository,
             "--json",
             (
-                "url,state,isDraft,baseRefName,baseRefOid,headRefName,headRefOid,"
-                "headRepository,headRepositoryOwner"
+                "number,url,state,isDraft,baseRefName,baseRefOid,headRefName,headRefOid,"
+                "headRepository,headRepositoryOwner,files"
             ),
         ],
         cwd=worktree_path,
@@ -15628,6 +15951,37 @@ def _issue_worktree_publish_pr_block_reason(
     if _existing_pr_publish_pr_url(pr_state) is None:
         return f"{prefix}pr_url_unavailable"
     return None
+
+
+def _issue_worktree_publish_target_existing_pr_binding_reason(
+    body: str,
+    request: IssueWorktreePublishInspectionRequest,
+    pr_state: dict[str, Any],
+    *,
+    verified_base_sha: str,
+) -> tuple[str | None, int | None, str | None, str | None]:
+    declared_pr = _declared_existing_pr_number(body)
+    declared_head_sha = _declared_existing_pr_expected_head_sha(body)
+    declared_head_branch = _declared_existing_pr_expected_head_branch(body)
+    if declared_pr is None:
+        return "existing_pr_binding_missing", None, None, None
+    if declared_head_sha is None:
+        return "existing_pr_head_sha_binding_missing", None, None, None
+    if declared_head_branch is None:
+        return "existing_pr_head_branch_binding_missing", None, None, None
+    if declared_head_branch != request.expected_branch:
+        return "existing_pr_declared_branch_mismatch", None, None, None
+    if pr_state.get("number") != declared_pr:
+        return "existing_pr_number_mismatch", None, None, None
+    pr_reason = _issue_worktree_publish_pr_block_reason(
+        request,
+        pr_state,
+        verified_base_sha=verified_base_sha,
+        expected_head_sha=declared_head_sha,
+    )
+    if pr_reason is not None:
+        return f"existing_{pr_reason}", None, None, None
+    return None, declared_pr, declared_head_sha, declared_head_branch
 
 
 def _issue_worktree_publish_pr_number_state(
@@ -18256,6 +18610,12 @@ def _issue_worktree_publish_validated_report(
     if not publish:
         return _maintenance_report("DONE", task_id, status_lines, "met")
 
+    target_existing_pr_number: int | None = None
+    target_existing_pr_head_sha: str | None = None
+    target_existing_pr_head_branch: str | None = None
+    target_existing_pr_url: str | None = None
+    target_existing_pr_pre_files: frozenset[str] = frozenset()
+
     existing_pr_lookup = _issue_worktree_publish_existing_pr_url(
         request,
         worktree_path,
@@ -18311,26 +18671,44 @@ def _issue_worktree_publish_validated_report(
         if target_project_route:
             assert verified_base_sha is not None
             pr_state = existing_pr_lookup.pr_state or {}
-            pr_reason = _issue_worktree_publish_pr_block_reason(
-                request, pr_state, verified_base_sha=verified_base_sha
+            (
+                binding_reason,
+                target_existing_pr_number,
+                target_existing_pr_head_sha,
+                target_existing_pr_head_branch,
+            ) = _issue_worktree_publish_target_existing_pr_binding_reason(
+                body, request, pr_state, verified_base_sha=verified_base_sha
             )
-            if pr_reason is not None:
+            if binding_reason is not None:
                 return _maintenance_report(
                     "BLOCKED",
                     task_id,
-                    [*status_lines, f"reason=existing_{pr_reason}"],
+                    [*status_lines, f"reason={binding_reason}"],
                     "not_met",
                 )
-        return _maintenance_report(
-            "DONE",
-            task_id,
-            [
-                *status_lines,
-                "step=read_existing_pr status=done",
-                f"existing_pr_url={existing_pr_lookup.pr_url}",
-            ],
-            "met",
-        )
+            target_existing_pr_url = existing_pr_lookup.pr_url
+            target_existing_pr_pre_files = _existing_pr_publish_file_paths(pr_state)
+            status_lines.extend(
+                (
+                    "step=read_existing_pr status=done",
+                    f"pull_request={target_existing_pr_number}",
+                    f"existing_pr_url={target_existing_pr_url}",
+                    f"existing_pr_head_branch={target_existing_pr_head_branch}",
+                    f"existing_pr_head_sha={target_existing_pr_head_sha}",
+                    f"pre_push_pr_changed_files_count={len(target_existing_pr_pre_files)}",
+                )
+            )
+        else:
+            return _maintenance_report(
+                "DONE",
+                task_id,
+                [
+                    *status_lines,
+                    "step=read_existing_pr status=done",
+                    f"existing_pr_url={existing_pr_lookup.pr_url}",
+                ],
+                "met",
+            )
     else:
         status_lines.append("step=read_existing_pr status=done")
         if (
@@ -18351,6 +18729,11 @@ def _issue_worktree_publish_validated_report(
                 ],
                 "not_met",
             )
+
+    if target_project_route and target_existing_pr_number is not None and not validated_publish_files:
+        return _maintenance_report(
+            "BLOCKED", task_id, [*status_lines, "reason=no_publishable_recovery_changes"], "not_met"
+        )
 
     if validated_publish_files:
         if target_project_route:
@@ -18521,6 +18904,84 @@ def _issue_worktree_publish_validated_report(
             [*status_lines, "reason=publish_head_invalid"],
             "not_met",
         )
+
+    if target_existing_pr_number is not None:
+        assert target_existing_pr_head_sha is not None
+        assert target_existing_pr_head_branch is not None
+        assert target_existing_pr_url is not None
+        code, _output = run_command(
+            [
+                "git",
+                "push",
+                "origin",
+                f"--force-with-lease={target_existing_pr_head_branch}:{target_existing_pr_head_sha}",
+                f"HEAD:refs/heads/{target_existing_pr_head_branch}",
+            ],
+            cwd=worktree_path,
+        )
+        if code != 0:
+            return _maintenance_report(
+                "BLOCKED",
+                task_id,
+                [*status_lines, "step=push_existing_pr_branch status=failed reason=push_failed"],
+                "not_met",
+            )
+        status_lines.append("step=push_existing_pr_branch status=done")
+
+        assert verified_base_sha is not None
+        try:
+            (
+                post_push_pr_state,
+                post_push_pr_metadata_source,
+            ) = _issue_worktree_publish_post_create_pr_state(
+                request, worktree_path, target_existing_pr_url
+            )
+        except (RuntimeError, json.JSONDecodeError):
+            return _maintenance_report(
+                "BLOCKED",
+                task_id,
+                [*status_lines, "step=post_push_read_pr_metadata status=failed"],
+                "not_met",
+            )
+        if post_push_pr_state.get("number") != target_existing_pr_number:
+            return _maintenance_report(
+                "BLOCKED", task_id, [*status_lines, "reason=post_push_pr_number_mismatch"], "not_met"
+            )
+        post_reason = _issue_worktree_publish_pr_block_reason(
+            request,
+            post_push_pr_state,
+            verified_base_sha=verified_base_sha,
+            expected_head_sha=pushed_head_sha,
+            post_push=True,
+        )
+        if post_reason is not None:
+            return _maintenance_report(
+                "BLOCKED", task_id, [*status_lines, f"reason={post_reason}"], "not_met"
+            )
+        post_push_pr_files = _existing_pr_publish_file_paths(post_push_pr_state)
+        if not post_push_pr_files:
+            return _maintenance_report(
+                "BLOCKED", task_id, [*status_lines, "reason=post_push_pr_files_missing"], "not_met"
+            )
+        if not set(validated_publish_files) <= post_push_pr_files:
+            return _maintenance_report(
+                "BLOCKED", task_id, [*status_lines, "reason=validated_publish_files_missing"], "not_met"
+            )
+        if not post_push_pr_files <= set(request.allowed_files):
+            return _maintenance_report(
+                "BLOCKED", task_id, [*status_lines, "reason=post_push_pr_files_outside_allowlist"], "not_met"
+            )
+        status_lines.extend(
+            (
+                "step=post_push_read_pr_metadata status=done",
+                f"post_push_pr_metadata_source={post_push_pr_metadata_source}",
+                f"draft_pr_url={target_existing_pr_url}",
+                f"pushed_head_sha={pushed_head_sha}",
+                f"post_push_pr_changed_files_count={len(post_push_pr_files)}",
+                f"new_pr_changed_files_count={len(post_push_pr_files - target_existing_pr_pre_files)}",
+            )
+        )
+        return _maintenance_report("DONE", task_id, status_lines, "met")
 
     push_ref = f"refs/heads/{request.expected_branch}:refs/heads/{request.expected_branch}"
     code, _output = run_command(["git", "push", "origin", push_ref], cwd=worktree_path)
@@ -22494,6 +22955,10 @@ def _process_issue_in_current_queue_context(
             )
             return
         issue_workdir = str(worktree_path)
+        target_project_recovery_worktree = (
+            local_target_worktree
+            and worktree_path.name != _source_issue_slug(issue_number, source_repository)
+        )
 
         cleanup_runtime_artifacts(issue_workdir)
         if (
@@ -22661,9 +23126,16 @@ def _process_issue_in_current_queue_context(
             finalized_report = finalize_success(issue, issue_workdir, codex_output)
         report = report_runner_lane(finalized_report, runner_task)
         cleanup_runtime_artifacts(issue_workdir)
+        if target_project_recovery_worktree and "target_publication=done" not in report:
+            cleanup_issue_workspace_after_finalize = False
         if cleanup_issue_workspace_after_finalize:
             if local_target_worktree:
-                if source_repository == QUEUE_REPOSITORY:
+                if target_project_recovery_worktree:
+                    cleanup_code, cleanup_output = cleanup_target_repository_issue_worktree_path(
+                        target_repository,
+                        issue_workdir,
+                    )
+                elif source_repository == QUEUE_REPOSITORY:
                     cleanup_code, cleanup_output = cleanup_target_repository_issue_worktree(
                         target_repository,
                         issue_number,
