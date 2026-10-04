@@ -2243,6 +2243,8 @@ def _retained_dirty_continuation_gate_failure(
         return "retained_dirty_unexpected_untracked_files"
     for file_name in retained_untracked:
         candidate = path / file_name
+        if not _path_is_relative_to(candidate, path):
+            return "retained_dirty_untracked_file_path_escape"
         try:
             file_stat = candidate.lstat()
         except OSError:
@@ -2356,6 +2358,8 @@ def _prepare_wrong_base_recovery_worktree(
         return 1, "wrong_base_recovery_untracked_files_outside_allowlist", recovery_path
     for file_name in sorted(retained_untracked):
         source = retained_path / file_name
+        if not _path_is_relative_to(source, retained_path):
+            return 1, "wrong_base_recovery_untracked_source_path_escape", recovery_path
         try:
             file_stat = source.lstat()
         except OSError:
@@ -2440,6 +2444,10 @@ def _prepare_wrong_base_recovery_worktree(
     for file_name in sorted(retained_untracked):
         source = retained_path / file_name
         destination = recovery_path / file_name
+        if not _path_is_relative_to(source, retained_path):
+            return 1, "wrong_base_recovery_untracked_source_path_escape", recovery_path
+        if not _path_is_relative_to(destination, recovery_path):
+            return 1, "wrong_base_recovery_untracked_destination_path_escape", recovery_path
         if destination.exists() or destination.is_symlink():
             return 1, "wrong_base_recovery_untracked_destination_conflict", recovery_path
         destination.parent.mkdir(parents=True, exist_ok=True)
