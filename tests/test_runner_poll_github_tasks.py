@@ -5912,6 +5912,125 @@ def test_prepare_target_worktree_retained_dirty_wrong_base_recovers_to_fresh_exa
     ) == retained_dirty_test
 
 
+def test_prepare_target_worktree_retained_dirty_wrong_base_recovers_allowlisted_untracked_only(
+    tmp_path: Path,
+) -> None:
+    untracked = (
+        "core/cad_bridge.py",
+        "docs/CAD_BRIDGE_CONTRACT.md",
+        "schemas/cad_bridge.schema.json",
+        "tests/test_cad_bridge.py",
+    )
+    coordinator, issue_path, retained_head, new_base = (
+        _prepare_target_wrong_base_recovery_fixture(
+            tmp_path,
+            committed_files=(),
+            dirty_files=(),
+            untracked_files=untracked,
+        )
+    )
+    with mock.patch.object(
+        runner, "_remote_url_matches_project_repo", return_value=True
+    ), mock.patch.object(
+        runner, "ensure_safe_target_repository_worktree_path",
+        side_effect=lambda _repository, path: Path(path).resolve(strict=False),
+    ):
+        code, output, recovery_path = runner.prepare_git_issue_worktree(
+            4364, coordinator, issue_path,
+            target_repository="alanua/Lavalamp",
+            source_repository=runner.REPO,
+            base="main", base_sha=new_base,
+            continuation_gate=_target_dirty_continuation_gate(
+                allowed_files=frozenset(untracked)
+            ),
+        )
+
+    assert code == 0, output
+    assert recovery_path != issue_path
+    assert runner.run_command(["git", "rev-parse", "HEAD"], cwd=issue_path)[1].strip() == retained_head
+    assert runner.run_command(["git", "rev-parse", "HEAD"], cwd=recovery_path)[1].strip() == new_base
+    for relative_path in untracked:
+        assert (issue_path / relative_path).read_text(encoding="utf-8") == "untracked\n"
+        assert (recovery_path / relative_path).read_text(encoding="utf-8") == "untracked\n"
+    assert set(runner.run_command(
+        ["git", "ls-files", "--others", "--exclude-standard"], cwd=issue_path
+    )[1].splitlines()) == set(untracked)
+    assert set(runner.run_command(
+        ["git", "ls-files", "--others", "--exclude-standard"], cwd=recovery_path
+    )[1].splitlines()) == set(untracked)
+
+
+def test_prepare_target_worktree_retained_dirty_wrong_base_blocks_allowlisted_untracked_symlink(
+    tmp_path: Path,
+) -> None:
+    file_name = "core/cad_bridge.py"
+    coordinator, issue_path, _retained_head, new_base = (
+        _prepare_target_wrong_base_recovery_fixture(
+            tmp_path, committed_files=(), dirty_files=()
+        )
+    )
+    target = issue_path / "outside.txt"
+    target.write_text("outside\n", encoding="utf-8")
+    link = issue_path / file_name
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(target)
+    with mock.patch.object(
+        runner, "_remote_url_matches_project_repo", return_value=True
+    ), mock.patch.object(
+        runner, "ensure_safe_target_repository_worktree_path",
+        side_effect=lambda _repository, path: Path(path).resolve(strict=False),
+    ):
+        code, output, returned_path = runner.prepare_git_issue_worktree(
+            4364, coordinator, issue_path,
+            target_repository="alanua/Lavalamp",
+            source_repository=runner.REPO,
+            base="main", base_sha=new_base,
+            continuation_gate=_target_dirty_continuation_gate(
+                allowed_files=frozenset({file_name, "outside.txt"})
+            ),
+        )
+    assert code == 1
+    assert returned_path == issue_path
+    assert "reason=retained_dirty_untracked_file_type_unsafe" in output
+
+
+def test_prepare_target_worktree_retained_dirty_wrong_base_blocks_untracked_destination_conflict(
+    tmp_path: Path,
+) -> None:
+    file_name = "core/cad_bridge.py"
+    coordinator, issue_path, retained_head, _old_new_base = (
+        _prepare_target_wrong_base_recovery_fixture(
+            tmp_path, committed_files=(), dirty_files=(),
+            untracked_files=(file_name,),
+        )
+    )
+    base_target = coordinator / file_name
+    base_target.parent.mkdir(parents=True, exist_ok=True)
+    base_target.write_text("new base owns this path\n", encoding="utf-8")
+    _run_git(coordinator, "add", file_name)
+    _run_git(coordinator, "commit", "-m", "new base path conflict")
+    new_base = runner.run_command(["git", "rev-parse", "HEAD"], cwd=coordinator)[1].strip()
+    with mock.patch.object(
+        runner, "_remote_url_matches_project_repo", return_value=True
+    ), mock.patch.object(
+        runner, "ensure_safe_target_repository_worktree_path",
+        side_effect=lambda _repository, path: Path(path).resolve(strict=False),
+    ):
+        code, output, returned_path = runner.prepare_git_issue_worktree(
+            4364, coordinator, issue_path,
+            target_repository="alanua/Lavalamp",
+            source_repository=runner.REPO,
+            base="main", base_sha=new_base,
+            continuation_gate=_target_dirty_continuation_gate(
+                allowed_files=frozenset({file_name})
+            ),
+        )
+    assert code == 1
+    assert returned_path == issue_path
+    assert "reason=wrong_base_recovery_untracked_target_conflict" in output
+    assert runner.run_command(["git", "rev-parse", "HEAD"], cwd=issue_path)[1].strip() == retained_head
+
+
 def test_prepare_target_worktree_retained_dirty_wrong_base_blocks_without_retry_gate(
     tmp_path: Path,
 ) -> None:
@@ -6068,6 +6187,7 @@ def test_prepare_target_worktree_retained_dirty_wrong_base_blocks_base_drift(
             (0, "a" * 40 + "\n"),
             (0, "scripts/runner_poll_github_tasks.py\n"),
             (0, "scripts/runner_poll_github_tasks.py\n"),
+            (0, ""),
             (0, "committed patch"),
             (0, "dirty patch"),
             (0, "cloned"),

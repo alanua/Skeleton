@@ -2181,6 +2181,38 @@ def _git_name_lines(command: list[str], cwd: Path) -> tuple[int, list[str], str]
     return code, [line.strip() for line in output.splitlines() if line.strip()], output
 
 
+def _retained_allowlisted_untracked_files(
+    path: Path,
+    *,
+    allowed_files: frozenset[str],
+) -> tuple[int, set[str], str | None]:
+    code, untracked_files, _output = _git_name_lines(
+        ["git", "ls-files", "--others", "--exclude-standard"],
+        path,
+    )
+    if code != 0:
+        return code, set(), "untracked_file_discovery_failed"
+    retained: set[str] = set()
+    root = path.resolve(strict=True)
+    for file_name in untracked_files:
+        if _is_approved_runner_codex_metadata_untracked_path(file_name):
+            continue
+        if not _safe_changed_file(file_name):
+            return 1, set(), "untracked_file_path_unsafe"
+        if file_name not in allowed_files:
+            return 1, set(), "unexpected_untracked_files"
+        source = path / file_name
+        try:
+            source_stat = source.lstat()
+            source.resolve(strict=True).relative_to(root)
+        except (OSError, ValueError):
+            return 1, set(), "untracked_file_path_unsafe"
+        if stat.S_ISLNK(source_stat.st_mode) or not stat.S_ISREG(source_stat.st_mode):
+            return 1, set(), "untracked_file_type_unsafe"
+        retained.add(file_name)
+    return 0, retained, None
+
+
 def _retained_dirty_continuation_gate_failure(
     *,
     issue_number: int,
@@ -2217,32 +2249,18 @@ def _retained_dirty_continuation_gate_failure(
         if code != 0:
             return "retained_dirty_changed_file_discovery_failed"
         changed_files.update(files)
-    if not changed_files:
-        return "retained_dirty_tracked_files_missing"
     if not all(_safe_changed_file(file_name) for file_name in changed_files):
         return "retained_dirty_changed_file_path_unsafe"
     if not changed_files <= set(gate.allowed_files):
         return "retained_dirty_changed_files_outside_allowlist"
 
-    code, untracked_files, _output = _git_name_lines(
-        ["git", "ls-files", "--others", "--exclude-standard"],
-        path,
+    code, retained_untracked, reason = _retained_allowlisted_untracked_files(
+        path, allowed_files=gate.allowed_files
     )
-    if code != 0:
-        return "retained_dirty_untracked_file_discovery_failed"
-    if not all(
-        _safe_changed_file(file_name)
-        or _is_approved_runner_codex_metadata_untracked_path(file_name)
-        for file_name in untracked_files
-    ):
-        return "retained_dirty_untracked_file_path_unsafe"
-    unexpected_untracked = [
-        file_name
-        for file_name in untracked_files
-        if not _is_approved_runner_codex_metadata_untracked_path(file_name)
-    ]
-    if unexpected_untracked:
-        return "retained_dirty_unexpected_untracked_files"
+    if code != 0 or reason is not None:
+        return f"retained_dirty_{reason or 'untracked_file_discovery_failed'}"
+    if not changed_files and not retained_untracked:
+        return "retained_dirty_tracked_files_missing"
     return None
 
 
@@ -2293,6 +2311,44 @@ def _apply_private_patch(
     return 0, None
 
 
+def _copy_retained_untracked_files(
+    *,
+    retained_path: Path,
+    recovery_path: Path,
+    files: frozenset[str],
+) -> tuple[int, str | None]:
+    retained_root = retained_path.resolve(strict=True)
+    recovery_root = recovery_path.resolve(strict=True)
+    for file_name in sorted(files):
+        source = retained_path / file_name
+        target = recovery_path / file_name
+        try:
+            source_stat = source.lstat()
+            source.resolve(strict=True).relative_to(retained_root)
+        except (OSError, ValueError):
+            return 1, "wrong_base_recovery_untracked_source_unsafe"
+        if stat.S_ISLNK(source_stat.st_mode) or not stat.S_ISREG(source_stat.st_mode):
+            return 1, "wrong_base_recovery_untracked_source_unsafe"
+        current = recovery_path
+        try:
+            for part in Path(file_name).parts[:-1]:
+                current = current / part
+                if current.is_symlink():
+                    return 1, "wrong_base_recovery_untracked_target_unsafe"
+                if current.exists() and not current.is_dir():
+                    return 1, "wrong_base_recovery_untracked_target_conflict"
+                current.mkdir(exist_ok=True)
+            if target.is_symlink():
+                return 1, "wrong_base_recovery_untracked_target_unsafe"
+            if target.exists():
+                return 1, "wrong_base_recovery_untracked_target_conflict"
+            target.parent.resolve(strict=True).relative_to(recovery_root)
+            shutil.copyfile(source, target, follow_symlinks=False)
+        except (OSError, ValueError):
+            return 1, "wrong_base_recovery_untracked_copy_failed"
+    return 0, None
+
+
 def _prepare_wrong_base_recovery_worktree(
     *,
     issue_number: int,
@@ -2333,10 +2389,15 @@ def _prepare_wrong_base_recovery_worktree(
     )
     if code != 0 or reason is not None:
         return code or 1, f"wrong_base_recovery_dirty_{reason}", recovery_path
-    if not dirty_files:
+    code, retained_untracked, reason = _retained_allowlisted_untracked_files(
+        retained_path, allowed_files=allowed_files
+    )
+    if code != 0 or reason is not None:
+        return code or 1, f"wrong_base_recovery_dirty_{reason}", recovery_path
+    if not dirty_files and not retained_untracked:
         return 1, "wrong_base_recovery_dirty_delta_missing", recovery_path
 
-    all_transplanted_files = committed_files | dirty_files
+    all_transplanted_files = committed_files | dirty_files | retained_untracked
     if not all_transplanted_files <= set(allowed_files):
         return 1, "wrong_base_recovery_changed_files_outside_allowlist", recovery_path
 
@@ -2352,13 +2413,8 @@ def _prepare_wrong_base_recovery_worktree(
         return code or 1, f"wrong_base_recovery_dirty_{reason}", recovery_path
 
     clone_command = [
-        "git",
-        "clone",
-        "--local",
-        "--no-hardlinks",
-        "--no-checkout",
-        str(Path(coordinator_workdir).resolve()),
-        str(recovery_path),
+        "git", "clone", "--local", "--no-hardlinks", "--no-checkout",
+        str(Path(coordinator_workdir).resolve()), str(recovery_path),
     ]
     code, output = run_command(clone_command, cwd=coordinator_workdir)
     outputs.append(format_command_output(clone_command, output))
@@ -2367,15 +2423,8 @@ def _prepare_wrong_base_recovery_worktree(
 
     setup_commands = (
         (["git", "remote", "set-url", "origin", origin_url], recovery_path),
-        (
-            [
-                "git",
-                "fetch",
-                "origin",
-                f"refs/heads/{base_ref}:refs/remotes/origin/{base_ref}",
-            ],
-            recovery_path,
-        ),
+        (["git", "fetch", "origin",
+          f"refs/heads/{base_ref}:refs/remotes/origin/{base_ref}"], recovery_path),
         (["git", "rev-parse", f"refs/remotes/origin/{base_ref}"], recovery_path),
         (["git", "checkout", "-B", branch, verified_base_sha], recovery_path),
     )
@@ -2388,30 +2437,40 @@ def _prepare_wrong_base_recovery_worktree(
         if code != 0:
             return code, "wrong_base_recovery_setup_failed", recovery_path
         if command[:3] == ["git", "rev-parse", f"refs/remotes/origin/{base_ref}"]:
-            fetched_sha = output.strip().lower()
-            if fetched_sha != verified_base_sha:
+            if output.strip().lower() != verified_base_sha:
                 return 1, "wrong_base_recovery_base_drift", recovery_path
 
     code, reason = _apply_private_patch(
-        cwd=recovery_path,
-        patch=committed_patch,
+        cwd=recovery_path, patch=committed_patch,
         reason_prefix="wrong_base_recovery_committed_patch",
     )
     if code != 0 or reason is not None:
         return code or 1, reason or "wrong_base_recovery_committed_patch_failed", recovery_path
     code, reason = _apply_private_patch(
-        cwd=recovery_path,
-        patch=dirty_patch,
+        cwd=recovery_path, patch=dirty_patch,
         reason_prefix="wrong_base_recovery_dirty_patch",
     )
     if code != 0 or reason is not None:
         return code or 1, reason or "wrong_base_recovery_dirty_patch_failed", recovery_path
+    code, reason = _copy_retained_untracked_files(
+        retained_path=retained_path,
+        recovery_path=recovery_path,
+        files=frozenset(retained_untracked),
+    )
+    if code != 0 or reason is not None:
+        return code or 1, reason or "wrong_base_recovery_untracked_copy_failed", recovery_path
 
-    code, recovery_files, reason = _git_diff_name_set(
+    code, recovery_tracked, reason = _git_diff_name_set(
         recovery_path, "HEAD", allowed_files=allowed_files
     )
     if code != 0 or reason is not None:
         return code or 1, f"wrong_base_recovery_final_{reason}", recovery_path
+    code, recovery_untracked, reason = _retained_allowlisted_untracked_files(
+        recovery_path, allowed_files=allowed_files
+    )
+    if code != 0 or reason is not None:
+        return code or 1, f"wrong_base_recovery_final_{reason}", recovery_path
+    recovery_files = recovery_tracked | recovery_untracked
     if recovery_files != all_transplanted_files:
         return 1, "wrong_base_recovery_final_changed_files_mismatch", recovery_path
 
