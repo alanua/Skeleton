@@ -2179,7 +2179,12 @@ def test_typed_dependency_issue_done_allows_pickup_transition(
         lambda *_args, **_kwargs: (1, "synthetic stop after claim", tmp_path),
     )
 
-    runner.process_issue(issue, workdir=str(tmp_path))
+    with mock.patch.object(
+        runner,
+        "get_recoverable_blocked_issue_comments",
+        side_effect=AssertionError("normal pickup must not use blocked recovery history"),
+    ):
+        runner.process_issue(issue, workdir=str(tmp_path))
 
     assert [
         command
@@ -4765,7 +4770,9 @@ def test_recoverable_blocked_comment_helper_uses_gh_without_token_env(
         "run_command",
         return_value=(0, json.dumps({"comments": gh_comments})),
     ) as run:
-        comments = runner.get_issue_comments_via_gh(issue, repository=runner.REPO)
+        comments = runner.get_recoverable_blocked_issue_comments(
+            issue, repository=runner.REPO
+        )
 
     assert comments == gh_comments
     run.assert_called_once_with(
@@ -10977,7 +10984,7 @@ def test_reconcile_recoverable_blocked_codegen_issue_requeues_only_label() -> No
     with mock.patch.object(
         runner, "_queue_replenisher_issue_list_for_label", return_value=[issue]
     ) as issue_list, mock.patch.object(
-        runner, "get_issue_comments_via_gh", return_value=comments
+        runner, "get_recoverable_blocked_issue_comments", return_value=comments
     ) as get_comments, mock.patch.object(
         runner, "set_issue_label"
     ) as set_label, mock.patch.object(
@@ -11006,7 +11013,7 @@ def test_recoverable_blocked_comment_history_helper_uses_gh_cli(
 
     monkeypatch.setattr(runner, "run_command", run)
 
-    assert runner.get_issue_comments_via_gh(issue) == comments
+    assert runner.get_recoverable_blocked_issue_comments(issue) == comments
     assert commands == [
         [
             "gh",

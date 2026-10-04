@@ -5390,7 +5390,7 @@ def get_issue_comments(
     return []
 
 
-def get_issue_comments_via_gh(
+def get_recoverable_blocked_issue_comments(
     issue: Mapping[str, Any], repository: str | None = None
 ) -> list[dict[str, Any]] | None:
     comments = get_issue_comments(dict(issue), repository=repository)
@@ -21880,7 +21880,7 @@ def reconcile_recoverable_blocked_codegen_issues(limit: int = 20) -> int:
         number = _queue_replenisher_issue_number(issue)
         if number is None:
             continue
-        prior_comments = get_issue_comments_via_gh(dict(issue))
+        prior_comments = get_recoverable_blocked_issue_comments(dict(issue))
         if not _recoverable_blocked_issue_can_be_requeued(issue, prior_comments):
             continue
         set_issue_label(number, LABEL_BLOCKED, LABEL_READY)
