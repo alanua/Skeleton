@@ -2217,8 +2217,6 @@ def _retained_dirty_continuation_gate_failure(
         if code != 0:
             return "retained_dirty_changed_file_discovery_failed"
         changed_files.update(files)
-    if not changed_files:
-        return "retained_dirty_tracked_files_missing"
     if not all(_safe_changed_file(file_name) for file_name in changed_files):
         return "retained_dirty_changed_file_path_unsafe"
     if not changed_files <= set(gate.allowed_files):
@@ -2236,13 +2234,23 @@ def _retained_dirty_continuation_gate_failure(
         for file_name in untracked_files
     ):
         return "retained_dirty_untracked_file_path_unsafe"
-    unexpected_untracked = [
+    retained_untracked = [
         file_name
         for file_name in untracked_files
         if not _is_approved_runner_codex_metadata_untracked_path(file_name)
     ]
-    if unexpected_untracked:
+    if not set(retained_untracked) <= set(gate.allowed_files):
         return "retained_dirty_unexpected_untracked_files"
+    for file_name in retained_untracked:
+        candidate = path / file_name
+        try:
+            file_stat = candidate.lstat()
+        except OSError:
+            return "retained_dirty_untracked_file_stat_failed"
+        if stat.S_ISLNK(file_stat.st_mode) or not stat.S_ISREG(file_stat.st_mode):
+            return "retained_dirty_untracked_file_not_regular"
+    if not changed_files and not retained_untracked:
+        return "retained_dirty_tracked_files_missing"
     return None
 
 
@@ -2333,10 +2341,32 @@ def _prepare_wrong_base_recovery_worktree(
     )
     if code != 0 or reason is not None:
         return code or 1, f"wrong_base_recovery_dirty_{reason}", recovery_path
-    if not dirty_files:
+
+    code, untracked_files, _output = _git_name_lines(
+        ["git", "ls-files", "--others", "--exclude-standard"], retained_path
+    )
+    if code != 0:
+        return code, "wrong_base_recovery_untracked_discovery_failed", recovery_path
+    retained_untracked = {
+        file_name
+        for file_name in untracked_files
+        if not _is_approved_runner_codex_metadata_untracked_path(file_name)
+    }
+    if not retained_untracked <= set(allowed_files):
+        return 1, "wrong_base_recovery_untracked_files_outside_allowlist", recovery_path
+    for file_name in sorted(retained_untracked):
+        source = retained_path / file_name
+        try:
+            file_stat = source.lstat()
+        except OSError:
+            return 1, "wrong_base_recovery_untracked_stat_failed", recovery_path
+        if stat.S_ISLNK(file_stat.st_mode) or not stat.S_ISREG(file_stat.st_mode):
+            return 1, "wrong_base_recovery_untracked_not_regular", recovery_path
+
+    if not dirty_files and not retained_untracked:
         return 1, "wrong_base_recovery_dirty_delta_missing", recovery_path
 
-    all_transplanted_files = committed_files | dirty_files
+    all_transplanted_files = committed_files | dirty_files | retained_untracked
     if not all_transplanted_files <= set(allowed_files):
         return 1, "wrong_base_recovery_changed_files_outside_allowlist", recovery_path
 
@@ -2407,12 +2437,31 @@ def _prepare_wrong_base_recovery_worktree(
     if code != 0 or reason is not None:
         return code or 1, reason or "wrong_base_recovery_dirty_patch_failed", recovery_path
 
+    for file_name in sorted(retained_untracked):
+        source = retained_path / file_name
+        destination = recovery_path / file_name
+        if destination.exists() or destination.is_symlink():
+            return 1, "wrong_base_recovery_untracked_destination_conflict", recovery_path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, destination)
+        shutil.copymode(source, destination, follow_symlinks=False)
+
     code, recovery_files, reason = _git_diff_name_set(
         recovery_path, "HEAD", allowed_files=allowed_files
     )
     if code != 0 or reason is not None:
         return code or 1, f"wrong_base_recovery_final_{reason}", recovery_path
-    if recovery_files != all_transplanted_files:
+    code, recovery_untracked, _output = _git_name_lines(
+        ["git", "ls-files", "--others", "--exclude-standard"], recovery_path
+    )
+    if code != 0:
+        return code, "wrong_base_recovery_final_untracked_discovery_failed", recovery_path
+    recovery_untracked_set = {
+        file_name
+        for file_name in recovery_untracked
+        if not _is_approved_runner_codex_metadata_untracked_path(file_name)
+    }
+    if (recovery_files | recovery_untracked_set) != all_transplanted_files:
         return 1, "wrong_base_recovery_final_changed_files_mismatch", recovery_path
 
     outputs.append(
