@@ -7864,7 +7864,89 @@ def test_poll_once_processes_issues_single_lane() -> None:
     ]
 
 
+def _rest_ready_issue(number: int, repository: str = "alanua/Skeleton") -> dict[str, object]:
+    return {
+        "number": number,
+        "title": f"issue {number}",
+        "body": "task",
+        "state": "open",
+        "html_url": f"https://github.com/{repository}/issues/{number}",
+        "labels": [{"name": runner.LABEL_READY}],
+    }
+
+
+def test_get_ready_issues_falls_back_to_rest_on_graphql_rate_limit() -> None:
+    issue = _rest_ready_issue(4475)
+    pull = dict(_rest_ready_issue(4476))
+    pull["pull_request"] = {"url": "https://api.github.com/pulls/4476"}
+    with mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=[
+            (1, "GraphQL: API rate limit already exceeded for user ID 11974267."),
+            (0, json.dumps([issue, pull])),
+        ],
+    ) as run:
+        result = runner.get_ready_issues()
+
+    assert [item["number"] for item in result] == [4475]
+    assert run.call_count == 2
+    rest_command = run.call_args_list[1].args[0]
+    assert rest_command[:4] == ["gh", "api", "--method", "GET"]
+    assert f"repos/{runner.REPO}/issues" in rest_command
+
+
+def test_registered_source_falls_back_to_rest_on_graphql_rate_limit() -> None:
+    source = runner.RunnerVNextQueueSource(
+        project_id="lavalamp",
+        repository="alanua/Lavalamp",
+    )
+    issue = _rest_ready_issue(51, repository=source.repository)
+    with mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=[
+            (1, "GraphQL: API rate limit already exceeded for user ID 11974267."),
+            (0, json.dumps([issue])),
+        ],
+    ) as run:
+        result = runner._ready_issues_for_registered_source(source)
+
+    assert [item["number"] for item in result] == [51]
+    rest_command = run.call_args_list[1].args[0]
+    assert f"repos/{source.repository}/issues" in rest_command
+
+
+def test_registered_source_non_rate_limit_error_still_fails_closed() -> None:
+    source = runner.RunnerVNextQueueSource(
+        project_id="lavalamp",
+        repository="alanua/Lavalamp",
+    )
+    with mock.patch.object(
+        runner,
+        "run_command",
+        return_value=(1, "HTTP 403: Resource not accessible by integration"),
+    ) as run:
+        with pytest.raises(RuntimeError, match="gh issue list failed for alanua/Lavalamp"):
+            runner._ready_issues_for_registered_source(source)
+    assert run.call_count == 1
+
+
+def test_ready_issue_rest_fallback_rejects_malformed_response() -> None:
+    with mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=[
+            (1, "GraphQL: API rate limit already exceeded."),
+            (0, "{}"),
+        ],
+    ):
+        with pytest.raises(RuntimeError, match="REST issue list returned non-list JSON"):
+            runner.get_ready_issues()
+
+
 @pytest.mark.parametrize("configured_vnext_mode", (None, "off", "invalid"))
+
 def test_poll_once_vnext_disabled_or_invalid_uses_legacy_skeleton_queue_only(
     monkeypatch: pytest.MonkeyPatch,
     configured_vnext_mode: str | None,
