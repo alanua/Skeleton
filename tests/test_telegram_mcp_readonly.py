@@ -182,11 +182,13 @@ def test_unsupported_or_write_shaped_calls_fail_closed_before_backend() -> None:
     backend = CapturingTelegramBackend()
     active = TelegramReadonlyMcpDispatcher(backend=backend)
 
+    old_alias = active.call_tool("search", {"query": "quantum"})
     unsupported = active.call_tool("write_bot", {"source_id": "midnight", "message": "hello"})
     invalid_mode = active.call_tool(GET_HISTORY_TOOL, {"source_ref": "@midnightquantum", "mode": "WRITE_BOT"})
     invalid_limit = active.call_tool(SEARCH_TOOL, {"query": "quantum", "limit": 0})
     unexpected_list_arg = active.call_tool(LIST_ALLOWED_SOURCES_TOOL, {"secret": "x"})
 
+    assert old_alias["result"] == {"status": "blocked", "reason": "UNSUPPORTED_TOOL"}
     assert unsupported["result"] == {"status": "blocked", "reason": "UNSUPPORTED_TOOL"}
     assert invalid_mode["result"] == {"status": "blocked", "reason": "READ_MODE_REQUIRED"}
     assert invalid_limit["result"] == {"status": "blocked", "reason": "LIMIT_OUT_OF_BOUNDS"}

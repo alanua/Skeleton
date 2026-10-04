@@ -19,11 +19,14 @@ session material, tokens, or secret values.
 
 `core.telegram_mcp_readonly` defines the global read-only MCP facade for this
 canonical gateway backend. The six read-only tools are composed into
-`skeleton-control-hetzner`: `resolve_source`, `get_history`, `get_message`,
-`search`, `sync_source`, and `list_allowed_sources`. Until the separate runtime
-binding exists, production uses an unavailable backend and every Telegram tool
-call fails closed with `BACKEND_UNAVAILABLE`. The MCP facade does not construct
-or open a Telegram reader, session, store, or source config on its own.
+`skeleton-control-hetzner`: `telegram_resolve_source`,
+`telegram_get_history`, `telegram_get_message`, `telegram_search`,
+`telegram_sync_source`, and `telegram_list_allowed_sources`. The old unprefixed
+aliases such as `search` are not exposed by the global MCP surface. Until the
+separate runtime binding exists, production uses an unavailable backend and
+every Telegram tool call fails closed with `BACKEND_UNAVAILABLE`. The MCP
+facade does not construct or open a Telegram reader, session, store, or source
+config on its own.
 
 The facade does not expose `write_bot`, `watch_source`, raw MTProto clients,
 secrets, environment injection, shell commands, media downloads, memory

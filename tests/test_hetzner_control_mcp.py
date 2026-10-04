@@ -123,9 +123,11 @@ def test_global_telegram_tools_fail_closed_until_runtime_binding_exists() -> Non
     )
 
     result = active.call_tool(SEARCH_TOOL, {"query": "quantum"})
+    old_alias = active.call_tool("search", {"query": "quantum"})
 
     assert result["tool"] == SEARCH_TOOL
     assert result["result"] == {"status": "BLOCKED", "reason_code": "BACKEND_UNAVAILABLE"}
+    assert old_alias["result"] == {"status": "blocked", "reason": "UNSUPPORTED_TOOL"}
     assert gateway.requests == []
 
 

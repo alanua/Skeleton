@@ -10,12 +10,12 @@ MCP_SCHEMA = "skeleton.telegram_mcp_readonly.v1"
 SERVER_NAME = "skeleton-telegram-readonly"
 SERVER_VERSION = "0.1.0"
 
-RESOLVE_SOURCE_TOOL = "resolve_source"
-GET_HISTORY_TOOL = "get_history"
-GET_MESSAGE_TOOL = "get_message"
-SEARCH_TOOL = "search"
-SYNC_SOURCE_TOOL = "sync_source"
-LIST_ALLOWED_SOURCES_TOOL = "list_allowed_sources"
+RESOLVE_SOURCE_TOOL = "telegram_resolve_source"
+GET_HISTORY_TOOL = "telegram_get_history"
+GET_MESSAGE_TOOL = "telegram_get_message"
+SEARCH_TOOL = "telegram_search"
+SYNC_SOURCE_TOOL = "telegram_sync_source"
+LIST_ALLOWED_SOURCES_TOOL = "telegram_list_allowed_sources"
 
 READ_MODES = ("READ_PUBLIC", "READ_ALLOWED_PRIVATE")
 TELEGRAM_TOOL_NAMES = (
