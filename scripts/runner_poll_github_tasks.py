@@ -3499,6 +3499,62 @@ def blocked_codex_output_report(
     )
 
 
+def _is_graphql_rate_limit_error(output: str) -> bool:
+    normalized = (output or "").lower()
+    return "graphql" in normalized and "rate limit" in normalized
+
+
+def _ready_issues_via_rest(repository: str) -> list[dict[str, Any]]:
+    code, output = run_command(
+        [
+            "gh",
+            "api",
+            "--method",
+            "GET",
+            f"repos/{repository}/issues",
+            "-f",
+            "state=open",
+            "-f",
+            f"labels={LABEL_READY}",
+            "-f",
+            "per_page=100",
+        ]
+    )
+    if code != 0:
+        raise RuntimeError(f"gh REST issue list failed for {repository}:\n{output}")
+    try:
+        parsed = json.loads(output or "[]")
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            f"gh REST issue list returned malformed JSON for {repository}"
+        ) from exc
+    if not isinstance(parsed, list):
+        raise RuntimeError(
+            f"gh REST issue list returned non-list JSON for {repository}"
+        )
+    issues: list[dict[str, Any]] = []
+    for item in parsed:
+        if not isinstance(item, dict):
+            raise RuntimeError(
+                f"gh REST issue list returned malformed item for {repository}"
+            )
+        if item.get("pull_request") is not None:
+            continue
+        labels = item.get("labels")
+        if not isinstance(labels, list):
+            raise RuntimeError(
+                f"gh REST issue list returned malformed labels for {repository}"
+            )
+        normalized = dict(item)
+        normalized["url"] = item.get("html_url") or item.get("url")
+        normalized["closed"] = str(item.get("state") or "").lower() == "closed"
+        if LABEL_READY not in _issue_label_names(normalized):
+            continue
+        if is_open_task_issue(normalized):
+            issues.append(normalized)
+    return issues
+
+
 def get_ready_issues() -> list[dict[str, Any]]:
     code, output = run_command(
         [
@@ -3518,6 +3574,8 @@ def get_ready_issues() -> list[dict[str, Any]]:
         ]
     )
     if code != 0:
+        if _is_graphql_rate_limit_error(output):
+            return sort_ready_issues_by_priority(_ready_issues_via_rest(REPO))
         raise RuntimeError(f"gh issue list failed:\n{output}")
     parsed = json.loads(output or "[]")
     if not isinstance(parsed, list):
@@ -3550,6 +3608,8 @@ def _ready_issues_for_registered_source(
         ]
     )
     if code != 0:
+        if _is_graphql_rate_limit_error(output):
+            return _ready_issues_via_rest(source.repository)
         raise RuntimeError(f"gh issue list failed for {source.repository}:\n{output}")
     parsed = json.loads(output or "[]")
     if not isinstance(parsed, list):
@@ -3557,7 +3617,6 @@ def _ready_issues_for_registered_source(
             f"gh issue list returned non-list JSON for {source.repository}"
         )
     return [issue for issue in parsed if isinstance(issue, dict) and is_open_task_issue(issue)]
-
 
 def get_ready_issue_items() -> list[RunnerVNextQueueItem]:
     items: list[RunnerVNextQueueItem] = []
