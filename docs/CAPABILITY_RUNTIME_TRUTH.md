@@ -2,8 +2,10 @@
 
 CAPABILITY_REGISTRY.yaml is a static source declaration. It records whether a
 capability contract has checked-in source, declared entrypoints, required support
-files, and tests. It does not declare LIVE runtime state and does not declare
-FRESH evidence state.
+files, tests, and source implementation maturity. Registry status stays limited
+to available/planned compatibility, while source_implemented is a static source
+maturity field. It does not declare LIVE runtime state and does not
+declare FRESH evidence state.
 
 Runtime truth is a derived public-safe read model produced by
 `core/capability_runtime_truth.py`. The reconciler compares static registry
@@ -12,16 +14,20 @@ bounded report with `runtime_probe_performed: false` and
 `runtime_mutation_performed: false`.
 
 Only typed runtime evidence can produce LIVE. Only typed runtime evidence can
-produce FRESH. A registry entry with `status: available` means the source
-contract is present and mature enough to be used as declared; without fresh
-runtime evidence, the effective runtime state remains `CONTRACT_ONLY` and
-freshness remains `UNKNOWN`.
+produce FRESH. A registry entry with `status: available` preserves compatibility
+with available-capability readers. A registry entry with
+`source_implemented: true` means the source contract is present and mature
+enough to be used as declared. Without fresh runtime evidence, the effective
+runtime state remains `CONTRACT_ONLY` and freshness remains `UNKNOWN`.
 
 ## Boundary Rules
 
-- Static registry fields may declare source maturity, module paths, entrypoints,
-  supporting files, tests, stage labels, and whether the capability itself is a
-  live-runtime executor.
+- Static registry fields may declare source maturity through
+  `source_implemented`, module paths, entrypoints, supporting files, tests,
+  stage labels, and whether the capability itself is a live-runtime executor.
+- Static registry `status` values are compatibility declarations limited to
+  `available` and `planned`; stage and source maturity details belong in
+  separate static fields.
 - Static registry fields must not declare effective runtime status, freshness,
   runtime binding, source/runtime parity, runtime evidence, observed evidence
   timestamps, or drift.
@@ -50,5 +56,5 @@ public source and tests exist for them:
 - `knowledge_intake_review_queue`: stores public-safe review/backlog/rejected
   knowledge intake entries that are not canon and do not activate runtime work.
 
-These declarations are source maturity claims only. LIVE and FRESH remain
-runtime-evidence conclusions.
+These declarations are source maturity claims only. `source_implemented` is not
+runtime evidence, and LIVE and FRESH remain runtime-evidence conclusions.
