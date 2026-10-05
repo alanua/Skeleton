@@ -321,15 +321,32 @@ class HomeEdgeExecEngine:
         if self.state_file is None:
             raise HomeEdgeExecError("persistent nonce/idempotency state is not configured")
         self.state_file.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+
+        # The state lock protects replay/idempotency bookkeeping only. Holding it
+        # while the physical command runs serializes every independent Home Edge
+        # action behind the slowest one (media remote, sensors, audits, etc.).
+        # Reserve atomically, release the lock for execution, then merge the
+        # receipt back under the lock.
+        wait_deadline = time.monotonic() + max(1.0, float(parsed.timeout_seconds) + 5.0)
+        while True:
+            pending_same_request = False
+            with _locked_json_state(self.state_file) as state:
+                pending_same_request = self._matching_inflight_idempotent_request(parsed, state)
+                if not pending_same_request:
+                    replay = self._cached_receipt(parsed, state)
+                    if replay is not None:
+                        return replay
+                    self._reserve_request(parsed, state)
+                    break
+            if time.monotonic() >= wait_deadline:
+                raise HomeEdgeExecError("idempotent request is still in flight")
+            time.sleep(0.01)
+
+        receipt = self._execute_once(parsed, idempotency="executed")
         with _locked_json_state(self.state_file) as state:
-            replay = self._cached_receipt(parsed, state)
-            if replay is not None:
-                return replay
-            self._reserve_request(parsed, state)
-            receipt = self._execute_once(parsed, idempotency="executed")
             self._store_receipt(parsed, receipt, state)
-            self._audit(parsed, receipt)
-            return receipt
+        self._audit(parsed, receipt)
+        return receipt
 
     def _execute_once(self, parsed: HomeEdgeExecRequest, *, idempotency: str) -> HomeEdgeExecReceipt:
         self._enforce_identity(parsed)
@@ -405,6 +422,21 @@ class HomeEdgeExecEngine:
         expected = sign_request(request, self.hmac_secret)
         if not hmac.compare_digest(expected, request.signature):
             raise HomeEdgeExecError("request signature mismatch")
+
+    def _matching_inflight_idempotent_request(
+        self,
+        request: HomeEdgeExecRequest,
+        state: Mapping[str, Any],
+    ) -> bool:
+        if not request.idempotency_key:
+            return False
+        cached = _state_section(state, "idempotency").get(request.idempotency_key)
+        if not isinstance(cached, dict):
+            return False
+        digest = _payload_digest(request)
+        if cached.get("payload_digest") != digest:
+            return False
+        return not isinstance(cached.get("receipt"), dict)
 
     def _cached_receipt(self, request: HomeEdgeExecRequest, state: Mapping[str, Any]) -> HomeEdgeExecReceipt | None:
         digest = _payload_digest(request)
