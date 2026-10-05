@@ -36,6 +36,7 @@ def test_required_projects_are_present() -> None:
         "bauclock",
         "lavalamp",
         "lumenflow",
+        "dios",
         "aufmass_private",
         "home_automation",
     } <= set(tree["projects"])
@@ -68,6 +69,12 @@ def test_registry_has_real_runner_paths() -> None:
     assert get_project(tree, "lumenflow")["worktree_root"] == (
         "/home/agent/agent-dev/worktrees/lumenflow"
     )
+    assert get_project(tree, "dios")["checkout_path"] == (
+        "/home/agent/agent-dev/repos/DIOS"
+    )
+    assert get_project(tree, "dios")["worktree_root"] == (
+        "/home/agent/agent-dev/worktrees/dios"
+    )
 
 
 def test_current_projects_resolve_through_registry() -> None:
@@ -77,6 +84,7 @@ def test_current_projects_resolve_through_registry() -> None:
     assert get_project_by_repo(tree, "alanua/bauclock")["worktree_name_prefix"] == "bauclock"
     assert get_project_by_repo(tree, "alanua/Lavalamp")["worktree_name_prefix"] == "lavalamp"
     assert get_project_by_repo(tree, "alanua/LumenFlow")["worktree_name_prefix"] == "lumenflow"
+    assert get_project_by_repo(tree, "alanua/DIOS")["worktree_name_prefix"] == "dios"
 
 
 def test_future_registry_entry_resolves_without_code_changes() -> None:
@@ -136,6 +144,7 @@ def test_public_enabled_projects_are_codex_issue_worktree_projects() -> None:
         "bauclock",
         "lavalamp",
         "lumenflow",
+        "dios",
     }
 
 
@@ -176,6 +185,23 @@ def test_lumenflow_is_bootstrap_public_safe_route() -> None:
         "live_cross_repo": False,
     }
     assert lumenflow["runtime_approval_required"] is True
+
+
+
+def test_dios_is_public_runner_target() -> None:
+    dios = get_project(loaded_tree(), "dios")
+
+    assert dios["repo"] == "alanua/DIOS"
+    assert dios["checkout_path"] == "/home/agent/agent-dev/repos/DIOS"
+    assert dios["worktree_root"] == "/home/agent/agent-dev/worktrees/dios"
+    assert dios["public"] is True
+    assert dios["runner_enabled"] is True
+    assert dios["execution_modes"] == {
+        "planning_only": False,
+        "codex_issue_worktree": True,
+        "live_cross_repo": False,
+    }
+    assert dios["runtime_approval_required"] is True
 
 
 def test_aufmass_private_is_enabled_only_for_gated_local_worktree_pilot() -> None:

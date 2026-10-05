@@ -6436,6 +6436,7 @@ def test_process_issue_runs_codex_in_prepared_issue_worktree(tmp_path: Path) -> 
 def _shadow_code_issue_body() -> str:
     return "\n".join(
         (
+            "Base: main",
             f"Base SHA: {'b' * 40}",
             "Allowed Files:",
             "- tests/test_runner_poll_github_tasks.py",
@@ -6471,6 +6472,7 @@ def _universal_code_issue_body(*, target_project: str = "bauclock") -> str:
     return "\n".join(
         (
             f"Target Project: {target_project}",
+            "Base: main",
             f"Base SHA: {'b' * 40}",
             "Allowed Files: tests/test_runner_poll_github_tasks.py",
             "Approval Reference: GENERIC_RUNNER_REPAIR_TEST_MERGE_RUNTIME_SYNC_20260715",
@@ -8567,8 +8569,80 @@ def test_runner_task_accepts_allowlisted_target_repository() -> None:
             "alanua/bauclock",
             "alanua/Lavalamp",
             "alanua/LumenFlow",
+            "alanua/DIOS",
         )
     )
+
+
+
+def test_runner_task_accepts_dios_repo_from_task_block() -> None:
+    base_sha = "a" * 40
+    task, reason = runner.extract_runner_task(
+        "\x60\x60\x60task\n"
+        "schema: skeleton.runner_task.v1\n"
+        "repo: alanua/DIOS\n"
+        "base: main\n"
+        f"base_sha: {base_sha}\n"
+        "task_kind: code_generation\n"
+        "payload:\n"
+        "  task: Build CAD bridge.\n"
+        "\x60\x60\x60"
+    )
+
+    assert reason is None
+    assert task is not None
+    assert task.target_project == "dios"
+    assert task.target_repository == "alanua/DIOS"
+    assert task.has_target_repository_metadata is True
+    assert task.base == "main"
+    assert task.base_sha == base_sha
+
+
+def test_runner_task_accepts_lowercase_target_repository_field() -> None:
+    task, reason = runner.extract_runner_task(
+        "Target repository: alanua/DIOS\n\n\x60\x60\x60task\nDo it\n\x60\x60\x60"
+    )
+
+    assert reason is None
+    assert task is not None
+    assert task.target_project == "dios"
+    assert task.target_repository == "alanua/DIOS"
+    assert task.has_target_repository_metadata is True
+
+
+def test_runner_task_blocks_header_task_repo_mismatch() -> None:
+    task, reason = runner.extract_runner_task(
+        "Target Repository: alanua/Lavalamp\n\n"
+        "\x60\x60\x60task\nrepo: alanua/DIOS\ntask_kind: code_generation\n\x60\x60\x60"
+    )
+
+    assert task is None
+    assert reason == (
+        "Target Repository metadata and task repo resolve to different repositories."
+    )
+
+
+def test_runner_task_blocks_unknown_repo_from_task_block() -> None:
+    task, reason = runner.extract_runner_task(
+        "\x60\x60\x60task\nrepo: alanua/unknown\ntask_kind: code_generation\n\x60\x60\x60"
+    )
+
+    assert task is None
+    assert reason is not None
+    assert "Target repository `alanua/unknown` is not allowlisted" in reason
+
+
+def test_runner_task_blocks_base_sha_without_base() -> None:
+    task, reason = runner.extract_runner_task(
+        "\x60\x60\x60task\n"
+        "repo: alanua/DIOS\n"
+        f"base_sha: {'a' * 40}\n"
+        "task_kind: code_generation\n"
+        "\x60\x60\x60"
+    )
+
+    assert task is None
+    assert reason == "Base SHA requires Base metadata."
 
 
 def test_runner_task_accepts_skeleton_media_repository_route() -> None:
