@@ -1254,6 +1254,7 @@ def allowed_target_projects() -> frozenset[str]:
 ALLOWED_TARGET_PROJECTS = allowed_target_projects()
 TARGET_REPOSITORY_METADATA_FIELDS = (
     "Target Repository",
+    "Target repository",
     "Selected Repository",
     "Repo",
 )
@@ -3760,10 +3761,23 @@ def resolve_target_project_metadata(
     default_repository: str = QUEUE_REPOSITORY,
 ) -> tuple[str | None, str | None, str | None]:
     metadata = (body or "").split("```task", 1)[0]
+    task_fields = _shadow_task_block_mapping(body)
     target_project = _body_field(metadata, "Target Project")
-    target_repository, _target_repository_field = _target_repository_metadata_field(
-        metadata
+    metadata_target_repository, _target_repository_field = (
+        _target_repository_metadata_field(metadata)
     )
+    task_target_repository = _normalize_optional_text(task_fields.get("repo"))
+    if (
+        metadata_target_repository is not None
+        and task_target_repository is not None
+        and metadata_target_repository != task_target_repository
+    ):
+        return (
+            None,
+            None,
+            "Target Repository metadata and task repo resolve to different repositories.",
+        )
+    target_repository = metadata_target_repository or task_target_repository
     project_tree = load_runner_project_tree()
 
     if target_project is None and target_repository is None:
@@ -3985,6 +3999,9 @@ def extract_runner_task(
     if target_project is None or target_repository is None:
         return None, target_reason
     base, base_sha = _task_base_metadata(body)
+    if base is None and base_sha is not None:
+        return None, "Base SHA requires Base metadata."
+    task_fields = _shadow_task_block_mapping(body)
     dependencies, dependency_reason = parse_runner_dependencies(body)
     if dependency_reason is not None:
         return None, dependency_reason
@@ -4002,6 +4019,7 @@ def extract_runner_task(
         target_repository=target_repository,
         has_target_repository_metadata=(
             _target_repository_metadata_field(metadata)[0] is not None
+            or _normalize_optional_text(task_fields.get("repo")) is not None
         ),
         base=base,
         base_sha=base_sha,
