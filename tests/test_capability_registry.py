@@ -7,6 +7,16 @@ from core.capability_checker import CapabilityChecker
 
 ROOT = Path(__file__).resolve().parents[1]
 REGISTRY_PATH = ROOT / "CAPABILITY_REGISTRY.yaml"
+RUNTIME_TRUTH_DOC_PATH = ROOT / "docs" / "CAPABILITY_RUNTIME_TRUTH.md"
+SOURCE_IMPLEMENTED_CAPABILITIES = {
+    "capability_runtime_truth",
+    "awareness_context",
+    "awareness_hydrator",
+    "intake_lifecycle",
+    "knowledge_intake_review_queue",
+    "action_gate",
+    "memory_gateway",
+}
 
 
 def load_registry() -> dict:
@@ -62,6 +72,113 @@ def test_registry_has_stage1_dry_run_capabilities() -> None:
     assert memory_manager["status"] == "stage1_dry_run"
     assert memory_manager["tested"] is True
     assert memory_manager["live_runtime_execution"] is False
+
+
+def test_registry_declares_exact_source_implemented_statuses() -> None:
+    capabilities = load_registry()["capabilities"]
+    actual = {
+        capability_id
+        for capability_id, capability in capabilities.items()
+        if capability["status"] == "source_implemented"
+    }
+    assert actual == SOURCE_IMPLEMENTED_CAPABILITIES
+    assert all("source_implemented" not in capability for capability in capabilities.values())
+
+
+def test_registry_preserves_representative_unrelated_base_statuses() -> None:
+    capabilities = load_registry()["capabilities"]
+    expected = {
+        "runner_worktree_execution": "stage1_lane_metadata",
+        "runner_bridge": "stage1_dry_run",
+        "telegram_approval_buttons": "stage1_dry_run",
+        "telegram_operator_event_bridge": "stage1_dry_run",
+        "telegram_callback_poller": "stage1_runner_merge_request",
+        "operator_event_record": "stage1_dry_run",
+        "memory_manager": "stage1_dry_run",
+        "mempalace_synthetic_pilot": "stage1_dry_run",
+        "hermes_memory_gateway": "stage1_dry_run",
+    }
+    assert {
+        capability_id: capabilities[capability_id]["status"]
+        for capability_id in expected
+    } == expected
+
+
+def test_registry_repairs_existing_source_maturity_status_only() -> None:
+    capabilities = load_registry()["capabilities"]
+
+    action_gate = capabilities["action_gate"]
+    assert action_gate["status"] == "source_implemented"
+    assert action_gate["module"] == "core/action_gate.py"
+    assert action_gate["entry"] == "validate_action_request"
+    assert action_gate["stage"] == "stage_1_dry_run"
+    assert action_gate["live_runtime_execution"] is False
+
+    memory_gateway = capabilities["memory_gateway"]
+    assert memory_gateway["status"] == "source_implemented"
+    assert memory_gateway["module"] == "core/memory_gateway.py"
+    assert memory_gateway["entry"] == "MemoryGateway.execute"
+    assert memory_gateway["stage"] == "stage_1_synthetic_contract"
+    assert memory_gateway["live_runtime_execution"] is False
+
+
+def test_registry_has_truth_awareness_and_intake_source_primitives() -> None:
+    capabilities = load_registry()["capabilities"]
+    expected = {
+        "capability_runtime_truth": (
+            "core/capability_runtime_truth.py",
+            "reconcile_capability_runtime_truth",
+        ),
+        "awareness_context": (
+            "core/awareness_context.py",
+            "assemble_awareness_context",
+        ),
+        "awareness_hydrator": (
+            "core/awareness_hydrator.py",
+            "hydrate_awareness_context",
+        ),
+        "intake_lifecycle": (
+            "core/intake_lifecycle.py",
+            "IntakeLifecycleStore",
+        ),
+        "knowledge_intake_review_queue": (
+            "projects/skeleton/REVIEW_QUEUE.yaml",
+            None,
+        ),
+    }
+
+    for capability_id, (module, entry) in expected.items():
+        capability = capabilities[capability_id]
+        assert capability["status"] == "source_implemented"
+        assert capability["module"] == module
+        assert capability["tested"] is True
+        assert capability["live_runtime_execution"] is False
+        assert (ROOT / module).exists()
+        if entry is not None:
+            assert capability["entry"] == entry
+
+
+def test_capability_checker_keeps_source_implemented_out_of_compatibility_lists() -> None:
+    checker = CapabilityChecker(REGISTRY_PATH)
+    assert SOURCE_IMPLEMENTED_CAPABILITIES.isdisjoint(checker.available())
+    assert SOURCE_IMPLEMENTED_CAPABILITIES.isdisjoint(checker.planned())
+    for capability_id in SOURCE_IMPLEMENTED_CAPABILITIES:
+        assert checker.is_available(capability_id) is False
+
+
+def test_capability_runtime_truth_doc_preserves_static_runtime_boundary() -> None:
+    doc = " ".join(RUNTIME_TRUTH_DOC_PATH.read_text(encoding="utf-8").split())
+    for phrase in (
+        "CAPABILITY_REGISTRY.yaml is a static source declaration",
+        "status: source_implemented",
+        "status only",
+        "does not declare LIVE",
+        "does not declare FRESH",
+        "Only typed runtime evidence can produce LIVE",
+        "Only typed runtime evidence can produce FRESH",
+        "RuntimeCapabilityEvidence",
+    ):
+        assert phrase in doc
 
 
 def test_registry_has_planned_future_capabilities() -> None:

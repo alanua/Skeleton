@@ -3532,6 +3532,100 @@ def _is_graphql_rate_limit_error(output: str) -> bool:
     return "graphql" in normalized and "rate limit" in normalized
 
 
+def _issue_comments_via_rest(
+    issue_number: int, repository: str
+) -> list[dict[str, Any]] | None:
+    code, output = run_command(
+        [
+            "gh",
+            "api",
+            "--method",
+            "GET",
+            f"repos/{repository}/issues/{issue_number}/comments",
+            "-f",
+            "per_page=100",
+        ]
+    )
+    if code != 0:
+        return None
+    try:
+        parsed = json.loads(output or "[]")
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, list):
+        return None
+    normalized: list[dict[str, Any]] = []
+    for comment in parsed:
+        if not isinstance(comment, dict):
+            continue
+        item = dict(comment)
+        user = item.get("user")
+        if "author" not in item and isinstance(user, Mapping):
+            item["author"] = dict(user)
+        normalized.append(item)
+    return normalized
+
+
+def _issue_labels_via_rest(issue_number: int, repository: str) -> frozenset[str]:
+    code, output = run_command(
+        [
+            "gh",
+            "api",
+            "--method",
+            "GET",
+            f"repos/{repository}/issues/{issue_number}",
+        ]
+    )
+    if code != 0:
+        raise RuntimeError(f"gh REST issue label view failed:\n{output}")
+    try:
+        parsed = json.loads(output or "{}")
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("gh REST issue label view returned malformed JSON") from exc
+    if not isinstance(parsed, dict):
+        raise RuntimeError("gh REST issue label view returned non-object JSON")
+    return _issue_label_names(parsed)
+
+
+def _set_issue_label_via_rest(
+    issue_number: int,
+    remove_labels: set[str],
+    add: str,
+    repository: str,
+) -> None:
+    labels = set(_issue_labels_via_rest(issue_number, repository))
+    labels.difference_update(remove_labels)
+    labels.add(add)
+    command = [
+        "gh",
+        "api",
+        "--method",
+        "PATCH",
+        f"repos/{repository}/issues/{issue_number}",
+    ]
+    for label in sorted(labels):
+        command.extend(["-f", f"labels[]={label}"])
+    code, output = run_command(command)
+    if code != 0:
+        raise RuntimeError(f"gh REST issue label edit failed:\n{output}")
+
+
+def _post_issue_comment_via_rest(issue_number: int, body: str, repository: str) -> None:
+    code, output = run_command(
+        [
+            "gh",
+            "api",
+            "--method",
+            "POST",
+            f"repos/{repository}/issues/{issue_number}/comments",
+            "-f",
+            f"body={truncate_comment(body)}",
+        ]
+    )
+    if code != 0:
+        raise RuntimeError(f"gh REST issue comment failed:\n{output}")
+
+
 def _ready_issues_via_rest(repository: str) -> list[dict[str, Any]]:
     code, output = run_command(
         [
@@ -5783,6 +5877,9 @@ def post_issue_comment(
         ]
     )
     if code != 0:
+        if _is_graphql_rate_limit_error(output):
+            _post_issue_comment_via_rest(issue_number, body, queue_repository)
+            return
         raise RuntimeError(f"gh issue comment failed:\n{output}")
 
 
@@ -5792,12 +5889,12 @@ def get_issue_comments(
     comments = issue.get("comments")
     if isinstance(comments, list):
         return [comment for comment in comments if isinstance(comment, dict)]
-    if not (os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")):
-        if isinstance(comments, int) and comments > 0:
-            return None
-        return []
     issue_number = int(issue["number"])
     queue_repository = repository or _current_queue_repository()
+    if not (os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")):
+        if isinstance(comments, int) and comments > 0:
+            return _issue_comments_via_rest(issue_number, queue_repository)
+        return []
     code, output = run_command(
         [
             "gh",
@@ -5811,6 +5908,8 @@ def get_issue_comments(
         ]
     )
     if code != 0:
+        if _is_graphql_rate_limit_error(output):
+            return _issue_comments_via_rest(issue_number, queue_repository)
         return None
     try:
         parsed = json.loads(output or "{}")
@@ -5845,6 +5944,8 @@ def get_recoverable_blocked_issue_comments(
         ]
     )
     if code != 0:
+        if _is_graphql_rate_limit_error(output):
+            return _issue_comments_via_rest(issue_number, queue_repository)
         return None
     try:
         parsed = json.loads(output or "{}")
@@ -5901,6 +6002,8 @@ def get_issue_labels(issue_number: int, repository: str | None = None) -> frozen
         ]
     )
     if code != 0:
+        if _is_graphql_rate_limit_error(output):
+            return _issue_labels_via_rest(issue_number, queue_repository)
         raise RuntimeError(f"gh issue label view failed:\n{output}")
     parsed = json.loads(output or "{}")
     if not isinstance(parsed, dict):
@@ -5936,6 +6039,11 @@ def set_issue_label(
 
     code, output = run_command(command)
     if code != 0:
+        if _is_graphql_rate_limit_error(output):
+            _set_issue_label_via_rest(
+                issue_number, remove_labels, add, queue_repository
+            )
+            return
         raise RuntimeError(f"gh issue edit failed:\n{output}")
 
 

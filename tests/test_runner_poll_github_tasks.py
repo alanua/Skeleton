@@ -7919,6 +7919,108 @@ def test_registered_source_falls_back_to_rest_on_graphql_rate_limit() -> None:
     assert f"repos/{source.repository}/issues" in rest_command
 
 
+def test_post_issue_comment_falls_back_to_rest_on_graphql_rate_limit() -> None:
+    with mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=[
+            (1, "GraphQL: API rate limit already exceeded."),
+            (0, "{}"),
+        ],
+    ) as run:
+        runner.post_issue_comment(4479, "DONE\nDraft PR: {PR_URL}")
+
+    assert run.call_args_list[1].args[0] == [
+        "gh",
+        "api",
+        "--method",
+        "POST",
+        f"repos/{runner.REPO}/issues/4479/comments",
+        "-f",
+        "body=DONE\nDraft PR: none",
+    ]
+
+
+def test_get_issue_labels_falls_back_to_rest_on_graphql_rate_limit() -> None:
+    with mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=[
+            (1, "GraphQL: API rate limit already exceeded."),
+            (
+                0,
+                json.dumps(
+                    {
+                        "labels": [
+                            {"name": runner.LABEL_READY},
+                            {"name": runner.LABEL_AGENT_TASK},
+                        ]
+                    }
+                ),
+            ),
+        ],
+    ) as run:
+        assert runner.get_issue_labels(4479) == frozenset(
+            {runner.LABEL_READY, runner.LABEL_AGENT_TASK}
+        )
+
+    assert run.call_args_list[1].args[0] == [
+        "gh",
+        "api",
+        "--method",
+        "GET",
+        f"repos/{runner.REPO}/issues/4479",
+    ]
+
+
+def test_set_issue_label_falls_back_to_rest_patch_on_graphql_rate_limit() -> None:
+    with mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=[
+            (
+                0,
+                json.dumps(
+                    {
+                        "labels": [
+                            {"name": runner.LABEL_AGENT_TASK},
+                            {"name": runner.LABEL_RUNNING},
+                            {"name": runner.LABEL_READY},
+                        ]
+                    }
+                ),
+            ),
+            (1, "GraphQL: API rate limit already exceeded."),
+            (
+                0,
+                json.dumps(
+                    {
+                        "labels": [
+                            {"name": runner.LABEL_AGENT_TASK},
+                            {"name": runner.LABEL_RUNNING},
+                            {"name": runner.LABEL_READY},
+                        ]
+                    }
+                ),
+            ),
+            (0, "{}"),
+        ],
+    ) as run:
+        runner.set_issue_label(4479, runner.LABEL_RUNNING, runner.LABEL_BLOCKED)
+
+    assert run.call_args_list[-1].args[0] == [
+        "gh",
+        "api",
+        "--method",
+        "PATCH",
+        f"repos/{runner.REPO}/issues/4479",
+        "-f",
+        f"labels[]={runner.LABEL_AGENT_TASK}",
+        "-f",
+        f"labels[]={runner.LABEL_BLOCKED}",
+    ]
+
+
 def test_registered_source_non_rate_limit_error_still_fails_closed() -> None:
     source = runner.RunnerVNextQueueSource(
         project_id="lavalamp",
@@ -11981,6 +12083,110 @@ def test_get_issue_comments_uses_gh_cli_with_token(
             "comments",
         ]
     )
+
+
+def test_get_issue_comments_uses_rest_for_known_history_without_env_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    issue = {"number": 4027, "comments": 1}
+    comments = [{"body": "ordinary history from cli auth"}]
+
+    with mock.patch.object(
+        runner,
+        "run_command",
+        return_value=(0, json.dumps(comments)),
+    ) as run:
+        assert runner.get_issue_comments(issue) == comments
+
+    run.assert_called_once_with(
+        [
+            "gh",
+            "api",
+            "--method",
+            "GET",
+            f"repos/{runner.REPO}/issues/4027/comments",
+            "-f",
+            "per_page=100",
+        ]
+    )
+
+
+def test_get_issue_comments_falls_back_to_rest_on_graphql_rate_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GH_TOKEN", "synthetic-token")
+    issue = {"number": 4028, "comments": 1}
+    comments = [{"body": "ordinary history from rest"}]
+    with mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=[
+            (1, "GraphQL: API rate limit already exceeded."),
+            (0, json.dumps(comments)),
+        ],
+    ) as run:
+        assert runner.get_issue_comments(issue) == comments
+
+    assert run.call_args_list[1].args[0] == [
+        "gh",
+        "api",
+        "--method",
+        "GET",
+        f"repos/{runner.REPO}/issues/4028/comments",
+        "-f",
+        "per_page=100",
+    ]
+
+
+def test_rest_comment_history_normalizes_user_for_trusted_retry_parser(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    body = (
+        "BLOCKED: synthetic history\n"
+        "route=code_generation\n"
+        "retry_decision=ALLOW_FIRST_ATTEMPT\n"
+        "retry_attempt=1\n"
+        "blocker_signature=1234abcd\n"
+    )
+    rest_comments = [
+        {
+            "body": body,
+            "user": {"login": "alanua"},
+        }
+    ]
+    with mock.patch.object(
+        runner,
+        "run_command",
+        return_value=(0, json.dumps(rest_comments)),
+    ):
+        comments = runner.get_issue_comments({"number": 4030, "comments": 1})
+
+    assert comments is not None
+    assert comments[0]["author"]["login"] == "alanua"
+    reports = runner.parse_prior_blocked_reports(
+        comments,
+        runner.trusted_runner_comment_authors(),
+    )
+    assert len(reports) == 1
+    assert reports[0].blocker_signature == "1234abcd"
+
+
+def test_recoverable_blocked_comment_history_falls_back_to_rest_on_graphql_rate_limit() -> None:
+    issue = {"number": 4029, "comments": 1}
+    comments = [{"body": "BLOCKED: history from rest"}]
+    with mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=[
+            (1, "GraphQL: API rate limit already exceeded."),
+            (0, json.dumps(comments)),
+        ],
+    ):
+        assert runner.get_recoverable_blocked_issue_comments(issue) == comments
 
 
 def test_recoverable_blocked_comment_helper_fast_paths_do_not_use_gh() -> None:
