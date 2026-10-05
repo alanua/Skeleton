@@ -2,7 +2,6 @@ version: "1.0.0"
 capabilities:
   boot_manifest:
     status: available
-    source_implemented: true
     module: BOOT_MANIFEST.yaml
     tested: true
     added: "2026-05-18"
@@ -10,7 +9,6 @@ capabilities:
 
   command_modes:
     status: available
-    source_implemented: true
     module: COMMANDS.yaml
     tested: true
     added: "2026-05-18"
@@ -18,7 +16,6 @@ capabilities:
 
   memory_routing:
     status: available
-    source_implemented: true
     module: MEMORY_ROUTING.yaml
     tested: true
     added: "2026-05-18"
@@ -26,7 +23,6 @@ capabilities:
 
   project_manifests:
     status: available
-    source_implemented: true
     module: PROJECT_INDEX.yaml
     tested: true
     added: "2026-05-18"
@@ -34,7 +30,6 @@ capabilities:
 
   adapter_contracts:
     status: available
-    source_implemented: true
     module: adapters/
     tested: true
     added: "2026-05-18"
@@ -42,7 +37,6 @@ capabilities:
 
   write_gate:
     status: available
-    source_implemented: true
     module: core/gate_engine.py
     entry: GateEngine.check_patch_plan
     requires:
@@ -54,14 +48,12 @@ capabilities:
 
   boot_loader:
     status: available
-    source_implemented: true
     module: core/boot_loader.py
     tested: true
     description: Reads BOOT_MANIFEST, validates sources, and produces BootReport.
 
   provider_routing:
     status: available
-    source_implemented: true
     module: PROVIDER_ROUTING.yaml
     tested: true
     added: "2026-05-19"
@@ -69,14 +61,12 @@ capabilities:
 
   project_loader:
     status: available
-    source_implemented: true
     module: core/project_loader.py
     tested: true
     description: Activates project context after operator command.
 
   project_tree:
     status: available
-    source_implemented: true
     module: core/project_tree.py
     entry: load_project_tree
     stage: stage_1_metadata
@@ -90,17 +80,14 @@ capabilities:
 
   github_task_queue:
     status: available
-    source_implemented: true
     module: scripts/runner_poll_github_tasks.py
     tested: true
     added: "2026-05-19"
     description: Polls GitHub issues labeled runner:ready, executes bounded Codex tasks in per-issue worktrees, explicit allowlisted host maintenance tasks, or bounded Telegram-approved PR squash merges on Hetzner Runner, creates draft PRs for code tasks, and reports results back to GitHub.
 
   runner_worktree_execution:
-    status: available
-    source_implemented: true
+    status: stage1_lane_metadata
     module: scripts/runner_poll_github_tasks.py
-    stage: stage_1_lane_metadata
     tested: true
     live_runtime_execution: true
     added: "2026-05-22"
@@ -108,7 +95,6 @@ capabilities:
 
   notebooklm_sourcepack:
     status: available
-    source_implemented: true
     module: scripts/build_notebooklm_sourcepack.py
     tested: true
     added: "2026-05-20"
@@ -116,7 +102,6 @@ capabilities:
 
   helper_registry:
     status: available
-    source_implemented: true
     module: HELPER_REGISTRY.yaml
     tested: true
     added: "2026-05-21"
@@ -124,7 +109,6 @@ capabilities:
 
   aufmass_engine:
     status: available
-    source_implemented: true
     module: core/aufmass_engine.py
     entry: calculate_aufmass
     stage: stage_1_calculation_engine
@@ -138,7 +122,6 @@ capabilities:
 
   aufmass_manual_adapter:
     status: available
-    source_implemented: true
     module: core/aufmass_manual_adapter.py
     entry: calculate_manual_plan_aufmass
     stage: stage_1_manual_calibration_adapter
@@ -153,7 +136,6 @@ capabilities:
 
   aufmass_dxf_adapter:
     status: available
-    source_implemented: true
     module: core/aufmass_dxf_adapter.py
     entry: extract_dxf
     stage: stage_1_dxf_extract_adapter
@@ -167,7 +149,6 @@ capabilities:
 
   aufmass_room_matcher:
     status: available
-    source_implemented: true
     module: core/aufmass_room_matcher.py
     entry: match_dxf_rooms
     stage: stage_1_dxf_room_match_candidates
@@ -182,7 +163,6 @@ capabilities:
 
   aufmass_room_review_table:
     status: available
-    source_implemented: true
     module: core/aufmass_room_review.py
     entry: room_matches_to_review_table
     stage: stage_1_dxf_room_review_table
@@ -197,7 +177,6 @@ capabilities:
 
   aufmass_exporter:
     status: available
-    source_implemented: true
     module: core/aufmass_exporter.py
     entry: aufmass_result_to_json_dict
     stage: stage_1_export_table
@@ -212,7 +191,6 @@ capabilities:
 
   aufmass_parser_dependencies_limited:
     status: available
-    source_implemented: true
     module: pyproject.toml
     stage: dependency_prep
     live_runtime_execution: false
@@ -223,8 +201,7 @@ capabilities:
     description: "Optional dependency groups for the limited Aufmass parser scope: DXF via ezdxf, PDF via pdfplumber and pypdf, and image/scan helpers via pillow, opencv-python-headless, and scikit-image."
 
   runner_bridge:
-    status: available
-    source_implemented: true
+    status: stage1_dry_run
     module: core/runner_bridge.py
     entry: dry_run_runner_bridge
     stage: stage_1_dry_run
@@ -237,7 +214,6 @@ capabilities:
 
   action_gate:
     status: source_implemented
-    source_implemented: true
     module: core/action_gate.py
     entry: validate_action_request
     stage: stage_1_dry_run
@@ -250,8 +226,7 @@ capabilities:
     description: Dry-run validation gate for a user-approved Skeleton pull-request action bound to action type, repo, PR number, expected head SHA, and expected files.
 
   telegram_approval_buttons:
-    status: available
-    source_implemented: true
+    status: stage1_dry_run
     module: core/telegram_approval_buttons.py
     entry: build_pr_ready_card_payload
     stage: stage_1_dry_run
@@ -265,8 +240,7 @@ capabilities:
     description: Builds deterministic completed-PR Telegram review cards and validates bounded dry-run operator callbacks before any approved action-gate handoff; live callback and Runner merge handling remain separate bounded runtime stages.
 
   telegram_operator_event_bridge:
-    status: available
-    source_implemented: true
+    status: stage1_dry_run
     module: core/telegram_operator_event_bridge.py
     entry: bridge_callback_to_operator_event
     stage: stage_1_dry_run
@@ -281,8 +255,7 @@ capabilities:
     description: Converts validated Telegram callbacks and current PR state into deterministic public-safe dry-run operator event records and GitHub issue comment text.
 
   telegram_callback_poller:
-    status: available
-    source_implemented: true
+    status: stage1_runner_merge_request
     module: scripts/telegram_callback_poller.py
     entry: poll_once
     stage: stage_1_runner_merge_request
@@ -294,8 +267,7 @@ capabilities:
     description: Reads one bounded Telegram callback update batch with a local offset file, requires an HMAC-signed PR inline button callback before live GitHub reads or audit-comment writes, suppresses replayed signed callback data locally, answers callback queries when Telegram credentials exist, posts a public-safe GitHub PR audit comment, and only for approve creates a bounded runner:ready PR squash-merge request issue.
 
   operator_event_record:
-    status: available
-    source_implemented: true
+    status: stage1_dry_run
     module: core/operator_event.py
     entry: render_public_issue_comment
     stage: stage_1_dry_run
@@ -308,8 +280,7 @@ capabilities:
     description: Defines a bounded public-safe dry-run operator event record and deterministic issue comment text without live audit-trail writes.
 
   memory_manager:
-    status: available
-    source_implemented: true
+    status: stage1_dry_run
     module: core/memory_manager.py
     entry: route_memory_record
     stage: stage_1_dry_run
@@ -323,7 +294,6 @@ capabilities:
 
   memory_store:
     status: available
-    source_implemented: true
     module: core/memory_store.py
     entry: append_memory_ledger_entry
     stage: stage_1_local_audit_ledger
@@ -338,7 +308,6 @@ capabilities:
 
   memory_gateway:
     status: source_implemented
-    source_implemented: true
     module: core/memory_gateway.py
     entry: MemoryGateway.execute
     stage: stage_1_synthetic_contract
@@ -364,8 +333,7 @@ capabilities:
     description: Versioned synthetic gateway contract for namespace-isolated exact memory, derived semantic/code-graph retrieval, freshness metadata, audit metadata, conflict/override separation, and PatchProposal-only writes.
 
   mempalace_synthetic_pilot:
-    status: available
-    source_implemented: true
+    status: stage1_dry_run
     module: core/mempalace_adapter.py
     entry: MemPalaceAdapter.search_semantic
     stage: stage_1_synthetic_contract
@@ -388,7 +356,6 @@ capabilities:
 
   capability_runtime_truth:
     status: source_implemented
-    source_implemented: true
     module: core/capability_runtime_truth.py
     entry: reconcile_capability_runtime_truth
     stage: static_registry_runtime_evidence_reconciler
@@ -402,7 +369,6 @@ capabilities:
 
   awareness_context:
     status: source_implemented
-    source_implemented: true
     module: core/awareness_context.py
     entry: assemble_awareness_context
     stage: ephemeral_awareness_read_model
@@ -417,7 +383,6 @@ capabilities:
 
   awareness_hydrator:
     status: source_implemented
-    source_implemented: true
     module: core/awareness_hydrator.py
     entry: hydrate_awareness_context
     stage: ephemeral_awareness_read_model
@@ -431,8 +396,7 @@ capabilities:
     description: Relevance-filtered awareness hydration from injected read models and memory context providers without mutating pending work, capability truth, runtime state, or canonical stores.
 
   hermes_memory_gateway:
-    status: available
-    source_implemented: true
+    status: stage1_dry_run
     module: core/hermes_memory_adapter.py
     entry: run_hermes_memory_task_packet
     stage: stage_1_synthetic_contract
@@ -449,7 +413,6 @@ capabilities:
 
   intake_lifecycle:
     status: source_implemented
-    source_implemented: true
     module: core/intake_lifecycle.py
     entry: IntakeLifecycleStore
     stage: shared_pending_intake_lifecycle
@@ -460,7 +423,6 @@ capabilities:
 
   knowledge_intake_review_queue:
     status: source_implemented
-    source_implemented: true
     module: projects/skeleton/REVIEW_QUEUE.yaml
     stage: public_safe_knowledge_intake_not_canon
     live_runtime_execution: false
@@ -472,7 +434,6 @@ capabilities:
 
   codex_runtime_preflight:
     status: planned
-    source_implemented: false
     module: scripts/runner_poll_github_tasks.py
     tested: false
     live_runtime_execution: true
@@ -481,7 +442,6 @@ capabilities:
 
   hermes_quota_aware_review:
     status: planned
-    source_implemented: false
     module: PROVIDER_ROUTING.yaml
     tested: false
     live_runtime_execution: false
@@ -490,7 +450,6 @@ capabilities:
 
   alternative_provider_backlog:
     status: planned
-    source_implemented: false
     module: PROVIDER_ROUTING.yaml
     tested: false
     live_runtime_execution: false
@@ -499,7 +458,6 @@ capabilities:
 
   memory_manager_live_storage:
     status: planned
-    source_implemented: false
     module: core/memory_manager_live_storage.py
     tested: false
     live_runtime_execution: false
@@ -507,7 +465,6 @@ capabilities:
 
   runner_controller_privileged_gateway:
     status: available
-    source_implemented: true
     module: core/runner_controller_privileged_gateway_hardening.py
     live_runtime_execution: true
     protected: true

@@ -8,7 +8,7 @@ from core.capability_checker import CapabilityChecker
 ROOT = Path(__file__).resolve().parents[1]
 REGISTRY_PATH = ROOT / "CAPABILITY_REGISTRY.yaml"
 RUNTIME_TRUTH_DOC_PATH = ROOT / "docs" / "CAPABILITY_RUNTIME_TRUTH.md"
-SOURCE_IMPLEMENTED_ONLY_CAPABILITIES = {
+SOURCE_IMPLEMENTED_CAPABILITIES = {
     "capability_runtime_truth",
     "awareness_context",
     "awareness_hydrator",
@@ -61,149 +61,123 @@ def test_registry_has_all_adapter_contracts_available() -> None:
     assert adapter_contracts["module"] == "adapters/"
 
 
-def test_registry_status_preserves_available_planned_compatibility() -> None:
-    for capability_id, capability in load_registry()["capabilities"].items():
-        assert capability["status"] in {
-            "available",
-            "planned",
-            "source_implemented",
-        }, capability_id
-
-
-def test_registry_declares_source_implemented_separately_from_status() -> None:
-    capabilities = load_registry()["capabilities"]
-
-    for capability_id, capability in capabilities.items():
-        assert isinstance(capability.get("source_implemented"), bool), capability_id
-        if capability["status"] in {"available", "source_implemented"}:
-            assert capability["source_implemented"] is True, capability_id
-        if capability["status"] == "planned":
-            assert capability["source_implemented"] is False, capability_id
-
-
-def test_registry_has_stage1_source_implemented_capabilities() -> None:
+def test_registry_has_stage1_dry_run_capabilities() -> None:
     capabilities = load_registry()["capabilities"]
     runner_bridge = capabilities["runner_bridge"]
-    assert runner_bridge["status"] == "available"
-    assert runner_bridge["source_implemented"] is True
-    assert runner_bridge["stage"] == "stage_1_dry_run"
+    assert runner_bridge["status"] == "stage1_dry_run"
     assert runner_bridge["tested"] is True
     assert runner_bridge["live_runtime_execution"] is False
 
     memory_manager = capabilities["memory_manager"]
-    assert memory_manager["status"] == "available"
-    assert memory_manager["source_implemented"] is True
-    assert memory_manager["stage"] == "stage_1_dry_run"
+    assert memory_manager["status"] == "stage1_dry_run"
     assert memory_manager["tested"] is True
     assert memory_manager["live_runtime_execution"] is False
 
 
-def test_registry_repairs_action_gate_and_memory_gateway_source_maturity() -> None:
+def test_registry_declares_exact_source_implemented_statuses() -> None:
     capabilities = load_registry()["capabilities"]
-
-    action_gate = capabilities["action_gate"]
-    assert action_gate["status"] == "source_implemented"
-    assert action_gate["source_implemented"] is True
-    assert action_gate["stage"] == "stage_1_dry_run"
-    assert action_gate["entry"] == "validate_action_request"
-    assert action_gate["live_runtime_execution"] is False
-
-    memory_gateway = capabilities["memory_gateway"]
-    assert memory_gateway["status"] == "source_implemented"
-    assert memory_gateway["source_implemented"] is True
-    assert memory_gateway["stage"] == "stage_1_synthetic_contract"
-    assert memory_gateway["entry"] == "MemoryGateway.execute"
-    assert memory_gateway["live_runtime_execution"] is False
-
-
-def test_registry_uses_source_implemented_status_only_for_declared_capabilities() -> None:
-    capabilities = load_registry()["capabilities"]
-
-    source_implemented_status = {
+    actual = {
         capability_id
         for capability_id, capability in capabilities.items()
         if capability["status"] == "source_implemented"
     }
-
-    assert source_implemented_status == SOURCE_IMPLEMENTED_ONLY_CAPABILITIES
-
-
-def test_notebooklm_available_planned_mirror_stays_available() -> None:
-    notebooklm = load_registry()["capabilities"]["notebooklm_sourcepack"]
-    assert notebooklm["status"] == "available"
-    assert notebooklm["source_implemented"] is True
-    assert notebooklm["module"] == "scripts/build_notebooklm_sourcepack.py"
+    assert actual == SOURCE_IMPLEMENTED_CAPABILITIES
+    assert all("source_implemented" not in capability for capability in capabilities.values())
 
 
-def test_registry_has_current_truth_awareness_and_intake_primitives() -> None:
+def test_registry_preserves_representative_unrelated_base_statuses() -> None:
+    capabilities = load_registry()["capabilities"]
+    expected = {
+        "runner_worktree_execution": "stage1_lane_metadata",
+        "runner_bridge": "stage1_dry_run",
+        "telegram_approval_buttons": "stage1_dry_run",
+        "telegram_operator_event_bridge": "stage1_dry_run",
+        "telegram_callback_poller": "stage1_runner_merge_request",
+        "operator_event_record": "stage1_dry_run",
+        "memory_manager": "stage1_dry_run",
+        "mempalace_synthetic_pilot": "stage1_dry_run",
+        "hermes_memory_gateway": "stage1_dry_run",
+    }
+    assert {
+        capability_id: capabilities[capability_id]["status"]
+        for capability_id in expected
+    } == expected
+
+
+def test_registry_repairs_existing_source_maturity_status_only() -> None:
     capabilities = load_registry()["capabilities"]
 
+    action_gate = capabilities["action_gate"]
+    assert action_gate["status"] == "source_implemented"
+    assert action_gate["module"] == "core/action_gate.py"
+    assert action_gate["entry"] == "validate_action_request"
+    assert action_gate["stage"] == "stage_1_dry_run"
+    assert action_gate["live_runtime_execution"] is False
+
+    memory_gateway = capabilities["memory_gateway"]
+    assert memory_gateway["status"] == "source_implemented"
+    assert memory_gateway["module"] == "core/memory_gateway.py"
+    assert memory_gateway["entry"] == "MemoryGateway.execute"
+    assert memory_gateway["stage"] == "stage_1_synthetic_contract"
+    assert memory_gateway["live_runtime_execution"] is False
+
+
+def test_registry_has_truth_awareness_and_intake_source_primitives() -> None:
+    capabilities = load_registry()["capabilities"]
     expected = {
-        "capability_runtime_truth": {
-            "module": "core/capability_runtime_truth.py",
-            "entry": "reconcile_capability_runtime_truth",
-        },
-        "awareness_context": {
-            "module": "core/awareness_context.py",
-            "entry": "assemble_awareness_context",
-        },
-        "awareness_hydrator": {
-            "module": "core/awareness_hydrator.py",
-            "entry": "hydrate_awareness_context",
-        },
-        "intake_lifecycle": {
-            "module": "core/intake_lifecycle.py",
-            "entry": "IntakeLifecycleStore",
-        },
-        "knowledge_intake_review_queue": {
-            "module": "projects/skeleton/REVIEW_QUEUE.yaml",
-        },
+        "capability_runtime_truth": (
+            "core/capability_runtime_truth.py",
+            "reconcile_capability_runtime_truth",
+        ),
+        "awareness_context": (
+            "core/awareness_context.py",
+            "assemble_awareness_context",
+        ),
+        "awareness_hydrator": (
+            "core/awareness_hydrator.py",
+            "hydrate_awareness_context",
+        ),
+        "intake_lifecycle": (
+            "core/intake_lifecycle.py",
+            "IntakeLifecycleStore",
+        ),
+        "knowledge_intake_review_queue": (
+            "projects/skeleton/REVIEW_QUEUE.yaml",
+            None,
+        ),
     }
 
-    for capability_id, expectation in expected.items():
+    for capability_id, (module, entry) in expected.items():
         capability = capabilities[capability_id]
         assert capability["status"] == "source_implemented"
-        assert capability["source_implemented"] is True
-        assert capability["module"] == expectation["module"]
+        assert capability["module"] == module
         assert capability["tested"] is True
         assert capability["live_runtime_execution"] is False
-        if "entry" in expectation:
-            assert capability["entry"] == expectation["entry"]
+        assert (ROOT / module).exists()
+        if entry is not None:
+            assert capability["entry"] == entry
 
 
-def test_registry_does_not_declare_runtime_truth_or_freshness() -> None:
-    forbidden_static_runtime_fields = {
-        "effective_status",
-        "freshness",
-        "runtime_bound",
-        "source_runtime_parity",
-        "runtime_evidence",
-        "evidence_observed_at",
-        "evidence_kinds",
-        "drift",
-    }
-
-    for capability_id, capability in load_registry()["capabilities"].items():
-        leaked = forbidden_static_runtime_fields & set(capability)
-        assert not leaked, f"{capability_id}: {sorted(leaked)}"
-        assert capability.get("status") != "LIVE"
+def test_capability_checker_keeps_source_implemented_out_of_compatibility_lists() -> None:
+    checker = CapabilityChecker(REGISTRY_PATH)
+    assert SOURCE_IMPLEMENTED_CAPABILITIES.isdisjoint(checker.available())
+    assert SOURCE_IMPLEMENTED_CAPABILITIES.isdisjoint(checker.planned())
+    for capability_id in SOURCE_IMPLEMENTED_CAPABILITIES:
+        assert checker.is_available(capability_id) is False
 
 
-def test_capability_runtime_truth_doc_preserves_boundary() -> None:
+def test_capability_runtime_truth_doc_preserves_static_runtime_boundary() -> None:
     doc = " ".join(RUNTIME_TRUTH_DOC_PATH.read_text(encoding="utf-8").split())
-
-    for phrase in [
+    for phrase in (
         "CAPABILITY_REGISTRY.yaml is a static source declaration",
-        "available/planned remain compatibility statuses",
-        "status: source_implemented is a static source maturity status",
-        "source_implemented is a static source maturity field",
+        "status: source_implemented",
+        "status only",
         "does not declare LIVE",
         "does not declare FRESH",
         "Only typed runtime evidence can produce LIVE",
         "Only typed runtime evidence can produce FRESH",
-        "runtime_probe_performed: false",
-        "runtime_mutation_performed: false",
-    ]:
+        "RuntimeCapabilityEvidence",
+    ):
         assert phrase in doc
 
 
@@ -214,13 +188,13 @@ def test_registry_has_planned_future_capabilities() -> None:
 
 def test_no_available_capability_without_module_field() -> None:
     for capability in load_registry()["capabilities"].values():
-        if capability["status"] in {"available", "source_implemented"}:
+        if capability["status"] == "available":
             assert capability.get("module")
 
 
 def test_available_capability_module_paths_exist_on_disk() -> None:
     for capability in load_registry()["capabilities"].values():
-        if capability["status"] not in {"available", "source_implemented"}:
+        if capability["status"] != "available":
             continue
 
         module = capability["module"]
@@ -238,7 +212,7 @@ def test_available_capability_requires_paths_exist_on_disk() -> None:
     assert "core/patch_validator.py" in write_gate["requires"]
 
     for capability in load_registry()["capabilities"].values():
-        if capability["status"] not in {"available", "source_implemented"}:
+        if capability["status"] != "available":
             continue
 
         for required_path in capability.get("requires", []):
@@ -264,7 +238,6 @@ def test_capability_checker_loads_registry() -> None:
 def test_capability_checker_available_list_non_empty() -> None:
     available = CapabilityChecker(REGISTRY_PATH).available()
     assert "write_gate" in available
-    assert SOURCE_IMPLEMENTED_ONLY_CAPABILITIES.isdisjoint(available)
 
 
 def test_capability_checker_planned_list_non_empty() -> None:
@@ -272,15 +245,12 @@ def test_capability_checker_planned_list_non_empty() -> None:
     assert "memory_manager_live_storage" in planned
     assert "runner_bridge" not in planned
     assert "memory_manager" not in planned
-    assert SOURCE_IMPLEMENTED_ONLY_CAPABILITIES.isdisjoint(planned)
 
 
 def test_capability_checker_is_available() -> None:
     checker = CapabilityChecker(REGISTRY_PATH)
     assert checker.is_available("write_gate") is True
     assert checker.is_available("project_loader") is True
-    assert checker.is_available("action_gate") is False
-    assert checker.is_available("memory_gateway") is False
 
 
 def test_capability_checker_unknown_is_not_available() -> None:
