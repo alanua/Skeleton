@@ -325,6 +325,28 @@ def test_request_schema_rejects_both_stdin_forms() -> None:
         HomeEdgeExecRequest.from_mapping(request(stdin_text="a", stdin_base64="Yg=="))
 
 
+def test_replay_state_prunes_completed_records_outside_retention(tmp_path: Path) -> None:
+    cache = tmp_path / "state.json"
+    exec_engine = engine(tmp_path, audit_log=None, idempotency_cache=cache)
+    old_payload = signed_request(request_id="old", idempotency_key="old", nonce="old")
+    exec_engine.execute(old_payload)
+
+    state = json.loads(cache.read_text(encoding="utf-8"))
+    stale = (datetime.now(UTC) - timedelta(days=1)).isoformat()
+    state["idempotency"]["old"]["receipt"]["finished_at"] = stale
+    state["nonces"]["old"]["receipt"]["finished_at"] = stale
+    cache.write_text(json.dumps(state), encoding="utf-8")
+
+    exec_engine.execute(
+        signed_request(request_id="fresh", idempotency_key="fresh", nonce="fresh")
+    )
+    compacted = json.loads(cache.read_text(encoding="utf-8"))
+    assert "old" not in compacted["idempotency"]
+    assert "old" not in compacted["nonces"]
+    assert "fresh" in compacted["idempotency"]
+    assert "fresh" in compacted["nonces"]
+
+
 def test_idempotency_cache_is_private_file(tmp_path: Path) -> None:
     cache = tmp_path / "state.json"
     exec_engine = engine(tmp_path, audit_log=None, idempotency_cache=cache)
