@@ -249,6 +249,48 @@ def test_concurrent_identical_idempotent_requests_execute_once(tmp_path: Path, m
     assert sorted(results) == ["executed", "replayed"]
 
 
+def test_independent_requests_execute_concurrently_without_global_state_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    exec_engine = engine(tmp_path, audit_log=None)
+    release = threading.Event()
+    both_running = threading.Event()
+    guard = threading.Lock()
+    active = 0
+    max_active = 0
+
+    def fake_run(*_args, **_kwargs):
+        nonlocal active, max_active
+        with guard:
+            active += 1
+            max_active = max(max_active, active)
+            if active >= 2:
+                both_running.set()
+        release.wait(3)
+        with guard:
+            active -= 1
+        return _CompletedProcess(returncode=0, stdout=b"ok\n", stderr=b"")
+
+    monkeypatch.setattr("core.home_edge.executor._run_bounded_process", fake_run)
+    results = []
+    payloads = [
+        signed_request(request_id="parallel-1", idempotency_key="parallel-1", nonce="parallel-1"),
+        signed_request(request_id="parallel-2", idempotency_key="parallel-2", nonce="parallel-2"),
+    ]
+    threads = [threading.Thread(target=lambda payload=payload: results.append(exec_engine.execute(payload).status)) for payload in payloads]
+    for thread in threads:
+        thread.start()
+
+    overlapped = both_running.wait(1.0)
+    release.set()
+    for thread in threads:
+        thread.join(timeout=3)
+
+    assert overlapped
+    assert max_active == 2
+    assert sorted(results) == ["ok", "ok"]
+
+
 def test_private_words_allowed_but_public_receipt_hides_private_fields(tmp_path: Path) -> None:
     exec_engine = engine(tmp_path, audit_log=None)
 
