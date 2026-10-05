@@ -8,6 +8,15 @@ from core.capability_checker import CapabilityChecker
 ROOT = Path(__file__).resolve().parents[1]
 REGISTRY_PATH = ROOT / "CAPABILITY_REGISTRY.yaml"
 RUNTIME_TRUTH_DOC_PATH = ROOT / "docs" / "CAPABILITY_RUNTIME_TRUTH.md"
+SOURCE_IMPLEMENTED_ONLY_CAPABILITIES = {
+    "capability_runtime_truth",
+    "awareness_context",
+    "awareness_hydrator",
+    "intake_lifecycle",
+    "knowledge_intake_review_queue",
+    "action_gate",
+    "memory_gateway",
+}
 
 
 def load_registry() -> dict:
@@ -54,7 +63,11 @@ def test_registry_has_all_adapter_contracts_available() -> None:
 
 def test_registry_status_preserves_available_planned_compatibility() -> None:
     for capability_id, capability in load_registry()["capabilities"].items():
-        assert capability["status"] in {"available", "planned"}, capability_id
+        assert capability["status"] in {
+            "available",
+            "planned",
+            "source_implemented",
+        }, capability_id
 
 
 def test_registry_declares_source_implemented_separately_from_status() -> None:
@@ -62,7 +75,7 @@ def test_registry_declares_source_implemented_separately_from_status() -> None:
 
     for capability_id, capability in capabilities.items():
         assert isinstance(capability.get("source_implemented"), bool), capability_id
-        if capability["status"] == "available":
+        if capability["status"] in {"available", "source_implemented"}:
             assert capability["source_implemented"] is True, capability_id
         if capability["status"] == "planned":
             assert capability["source_implemented"] is False, capability_id
@@ -89,18 +102,30 @@ def test_registry_repairs_action_gate_and_memory_gateway_source_maturity() -> No
     capabilities = load_registry()["capabilities"]
 
     action_gate = capabilities["action_gate"]
-    assert action_gate["status"] == "available"
+    assert action_gate["status"] == "source_implemented"
     assert action_gate["source_implemented"] is True
     assert action_gate["stage"] == "stage_1_dry_run"
     assert action_gate["entry"] == "validate_action_request"
     assert action_gate["live_runtime_execution"] is False
 
     memory_gateway = capabilities["memory_gateway"]
-    assert memory_gateway["status"] == "available"
+    assert memory_gateway["status"] == "source_implemented"
     assert memory_gateway["source_implemented"] is True
     assert memory_gateway["stage"] == "stage_1_synthetic_contract"
     assert memory_gateway["entry"] == "MemoryGateway.execute"
     assert memory_gateway["live_runtime_execution"] is False
+
+
+def test_registry_uses_source_implemented_status_only_for_declared_capabilities() -> None:
+    capabilities = load_registry()["capabilities"]
+
+    source_implemented_status = {
+        capability_id
+        for capability_id, capability in capabilities.items()
+        if capability["status"] == "source_implemented"
+    }
+
+    assert source_implemented_status == SOURCE_IMPLEMENTED_ONLY_CAPABILITIES
 
 
 def test_notebooklm_available_planned_mirror_stays_available() -> None:
@@ -137,7 +162,8 @@ def test_registry_has_current_truth_awareness_and_intake_primitives() -> None:
 
     for capability_id, expectation in expected.items():
         capability = capabilities[capability_id]
-        assert capability["status"] == "available"
+        assert capability["status"] == "source_implemented"
+        assert capability["source_implemented"] is True
         assert capability["module"] == expectation["module"]
         assert capability["tested"] is True
         assert capability["live_runtime_execution"] is False
@@ -168,7 +194,8 @@ def test_capability_runtime_truth_doc_preserves_boundary() -> None:
 
     for phrase in [
         "CAPABILITY_REGISTRY.yaml is a static source declaration",
-        "status stays limited to available/planned compatibility",
+        "available/planned remain compatibility statuses",
+        "status: source_implemented is a static source maturity status",
         "source_implemented is a static source maturity field",
         "does not declare LIVE",
         "does not declare FRESH",
@@ -187,13 +214,13 @@ def test_registry_has_planned_future_capabilities() -> None:
 
 def test_no_available_capability_without_module_field() -> None:
     for capability in load_registry()["capabilities"].values():
-        if capability["status"] == "available":
+        if capability["status"] in {"available", "source_implemented"}:
             assert capability.get("module")
 
 
 def test_available_capability_module_paths_exist_on_disk() -> None:
     for capability in load_registry()["capabilities"].values():
-        if capability["status"] != "available":
+        if capability["status"] not in {"available", "source_implemented"}:
             continue
 
         module = capability["module"]
@@ -211,7 +238,7 @@ def test_available_capability_requires_paths_exist_on_disk() -> None:
     assert "core/patch_validator.py" in write_gate["requires"]
 
     for capability in load_registry()["capabilities"].values():
-        if capability["status"] != "available":
+        if capability["status"] not in {"available", "source_implemented"}:
             continue
 
         for required_path in capability.get("requires", []):
@@ -237,8 +264,7 @@ def test_capability_checker_loads_registry() -> None:
 def test_capability_checker_available_list_non_empty() -> None:
     available = CapabilityChecker(REGISTRY_PATH).available()
     assert "write_gate" in available
-    assert "action_gate" in available
-    assert "memory_gateway" in available
+    assert SOURCE_IMPLEMENTED_ONLY_CAPABILITIES.isdisjoint(available)
 
 
 def test_capability_checker_planned_list_non_empty() -> None:
@@ -246,14 +272,15 @@ def test_capability_checker_planned_list_non_empty() -> None:
     assert "memory_manager_live_storage" in planned
     assert "runner_bridge" not in planned
     assert "memory_manager" not in planned
+    assert SOURCE_IMPLEMENTED_ONLY_CAPABILITIES.isdisjoint(planned)
 
 
 def test_capability_checker_is_available() -> None:
     checker = CapabilityChecker(REGISTRY_PATH)
     assert checker.is_available("write_gate") is True
     assert checker.is_available("project_loader") is True
-    assert checker.is_available("action_gate") is True
-    assert checker.is_available("memory_gateway") is True
+    assert checker.is_available("action_gate") is False
+    assert checker.is_available("memory_gateway") is False
 
 
 def test_capability_checker_unknown_is_not_available() -> None:

@@ -236,7 +236,7 @@ capabilities:
     description: Dry-run contract only. Validates and renders RunnerBridgeRequest. No GitHub calls, no network, no shell/subprocess. Stage 2 live requires separate operator-approved PR.
 
   action_gate:
-    status: available
+    status: source_implemented
     source_implemented: true
     module: core/action_gate.py
     entry: validate_action_request
@@ -337,7 +337,7 @@ capabilities:
     description: Writes an explicit-path deterministic local memory routing audit ledger and public-safe session/project state snapshots without canon promotion.
 
   memory_gateway:
-    status: available
+    status: source_implemented
     source_implemented: true
     module: core/memory_gateway.py
     entry: MemoryGateway.execute
@@ -387,7 +387,7 @@ capabilities:
     description: Local-only read-only synthetic MemPalace pilot behind MemoryGateway for bounded retrieval, attribution, deletion, rebuild, staleness, namespace isolation, and aggregate resource-cost measurement without private ingestion or live services.
 
   capability_runtime_truth:
-    status: available
+    status: source_implemented
     source_implemented: true
     module: core/capability_runtime_truth.py
     entry: reconcile_capability_runtime_truth
@@ -401,7 +401,7 @@ capabilities:
     description: Public-safe read model that reconciles static registry declarations with typed runtime evidence; LIVE and freshness are derived only from supplied runtime evidence, never from CAPABILITY_REGISTRY declarations alone.
 
   awareness_context:
-    status: available
+    status: source_implemented
     source_implemented: true
     module: core/awareness_context.py
     entry: assemble_awareness_context
@@ -416,7 +416,7 @@ capabilities:
     description: Deterministic ephemeral awareness packet assembler for memory, pending work, capability truth, and task controls with public-safe receipts and no canonical or runtime mutation.
 
   awareness_hydrator:
-    status: available
+    status: source_implemented
     source_implemented: true
     module: core/awareness_hydrator.py
     entry: hydrate_awareness_context
@@ -448,7 +448,7 @@ capabilities:
     description: Validated Hermes memory task entrypoint bound to one explicit namespace/project_id pair, routed only through MemoryGateway, with canonical writes disabled and operator approval mandatory.
 
   intake_lifecycle:
-    status: available
+    status: source_implemented
     source_implemented: true
     module: core/intake_lifecycle.py
     entry: IntakeLifecycleStore
@@ -459,7 +459,7 @@ capabilities:
     description: Local lifecycle state primitive for stable intake identity, explicit blocker metadata, branch-safe pending work, orphan recovery, and public-safe shared pending work summaries.
 
   knowledge_intake_review_queue:
-    status: available
+    status: source_implemented
     source_implemented: true
     module: projects/skeleton/REVIEW_QUEUE.yaml
     stage: public_safe_knowledge_intake_not_canon
