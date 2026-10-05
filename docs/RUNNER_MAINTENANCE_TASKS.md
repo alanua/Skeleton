@@ -70,28 +70,35 @@ repository readability, git head, Python/pytest availability, allowlisted write
 readiness, and codegen executor availability without performing workspace
 writes or runtime mutation.
 
-`runner_vnext_current_main_preflight_and_bootstrap_v1` is a one-shot
-read-only preflight for preparing a future vNext runtime-state bootstrap. It
-requires exact maintenance metadata:
+`runner_vnext_prepare_runtime_state_v1` is the bounded one-shot maintenance task
+for preparing vNext private runtime state. It requires exact maintenance
+metadata:
 
 ```text
 Mode: RUNTIME_MAINTENANCE_TASK
-Maintenance Task ID: runner_vnext_current_main_preflight_and_bootstrap_v1
+Maintenance Task ID: runner_vnext_prepare_runtime_state_v1
 Repository: alanua/Skeleton
 Expected Main SHA: <current exact 40-hex main commit>
 ```
 
 It verifies that the caller checkout `HEAD`, GitHub `main`, and `Expected Main
 SHA` are the same exact commit, and that `SKELETON_RUNNER_VNEXT_MODE` is unset
-or `off`. The report may register that the bounded future bootstrap contract is
-ready, but it must not create state directories or SQLite files, write
-attestation files, start/stop/enable/disable systemd units, change
-`SKELETON_RUNNER_VNEXT_MODE`, touch the legacy Runner service/timer, execute the
-green canary, or invoke codegen. Public output is limited to exact SHA equality,
-mode-off status, bootstrap-registered/executed booleans, legacy-touch boolean,
-and stable reason tokens. Any stale checkout, GitHub-main mismatch, invalid
-metadata, invalid vNext mode, or non-off vNext mode fails closed before future
-bootstrap eligibility.
+or `off`. After those public-safe checks pass, it creates only the fixed private
+runtime root `/var/lib/skeleton/runner-vnext`, initializes distinct
+authoritative ledger and lease SQLite stores through `build_authoritative_stores`,
+verifies owner-only modes and read-only reopen behavior, and binds only
+`SKELETON_RUNNER_VNEXT_STATE_ROOT`, `SKELETON_RUNNER_VNEXT_LEDGER_DB`, and
+`SKELETON_RUNNER_VNEXT_LEASE_DB` in `/etc/skeleton-runner.env`.
+
+The task must not write `SKELETON_RUNNER_VNEXT_MODE`, write attestation files,
+start/stop/enable/disable systemd units, touch the legacy Runner service/timer,
+execute the green canary, or invoke codegen. Public output is limited to exact
+SHA equality, mode-off status, fixed-state readiness booleans, env-file binding
+status, systemd-mutation falsehood, legacy-touch falsehood, and stable reason
+tokens. Any stale checkout, GitHub-main mismatch, invalid metadata, invalid
+vNext mode, non-off vNext mode, unsafe state ownership/mode, colliding stores,
+failed reopen verification, or attempted mode binding in the env file fails
+closed.
 
 `runner_codex_primary_health_probe` is the protected, narrow PRIMARY-CODEX
 health probe. It requires exact maintenance-mode metadata, `Repository:
