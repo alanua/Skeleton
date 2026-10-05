@@ -28315,11 +28315,364 @@ def test_codegen_bookkeeping_home_preserves_bound_codex_home(tmp_path: Path) -> 
 
 def test_runner_vnext_maintenance_ids_are_registered_with_exact_protection() -> None:
     assert runner.RUNNER_VNEXT_READONLY_PREFLIGHT_TASK_ID in runner.RUNTIME_MAINTENANCE_TASK_IDS
+    assert (
+        runner.RUNNER_VNEXT_PREPARE_RUNTIME_STATE_TASK_ID
+        in runner.RUNTIME_MAINTENANCE_TASK_IDS
+    )
     assert runner.RUNNER_VNEXT_EXTERNAL_ATTESTATION_TASK_ID in runner.RUNTIME_MAINTENANCE_TASK_IDS
     assert runner.RUNNER_VNEXT_EXACT_GREEN_CANARY_TASK_ID in runner.RUNTIME_MAINTENANCE_TASK_IDS
     assert runner.RUNNER_VNEXT_READONLY_PREFLIGHT_TASK_ID not in runner.PROTECTED_MAINTENANCE_TASK_IDS
+    assert (
+        runner.RUNNER_VNEXT_PREPARE_RUNTIME_STATE_TASK_ID
+        in runner.PROTECTED_MAINTENANCE_TASK_IDS
+    )
     assert runner.RUNNER_VNEXT_EXTERNAL_ATTESTATION_TASK_ID in runner.PROTECTED_MAINTENANCE_TASK_IDS
     assert runner.RUNNER_VNEXT_EXACT_GREEN_CANARY_TASK_ID in runner.PROTECTED_MAINTENANCE_TASK_IDS
+
+
+def _runner_vnext_prepare_runtime_state_body(expected_sha: str = HEAD_SHA) -> str:
+    return "\n".join(
+        (
+            f"Mode: {runner.RUNTIME_MAINTENANCE_MODE}",
+            f"Maintenance Task ID: {runner.RUNNER_VNEXT_PREPARE_RUNTIME_STATE_TASK_ID}",
+            f"Repository: {runner.REPO}",
+            f"Expected Main SHA: {expected_sha}",
+            "Idempotency Key: runner-vnext-prepare-runtime-state-v1",
+        )
+    )
+
+
+def _patch_runner_vnext_prepare_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    state_root = tmp_path / "runner-vnext"
+    monkeypatch.setattr(runner, "RUNNER_VNEXT_PRIVATE_STATE_ROOT", state_root)
+    monkeypatch.setattr(
+        runner, "RUNNER_VNEXT_PRIVATE_LEDGER_DB", state_root / "operation-ledger.sqlite3"
+    )
+    monkeypatch.setattr(
+        runner, "RUNNER_VNEXT_PRIVATE_LEASE_DB", state_root / "lane-leases.sqlite3"
+    )
+    monkeypatch.setattr(runner, "RUNNER_VNEXT_PRIVATE_ENV_FILE", tmp_path / "skeleton-runner.env")
+    return state_root
+
+
+def test_runner_vnext_prepare_runtime_state_initializes_fixed_private_state(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    workdir = tmp_path / "checkout"
+    workdir.mkdir()
+    state_root = _patch_runner_vnext_prepare_paths(monkeypatch, tmp_path)
+    monkeypatch.delenv(runner.RUNNER_VNEXT_MODE_ENV, raising=False)
+    commands: list[list[str]] = []
+
+    def read_only_probe(command: list[str], cwd=None, timeout=None, **_kwargs):
+        commands.append(command)
+        if command[:4] == ["git", "rev-parse", "--verify", "HEAD"]:
+            assert cwd == workdir
+            return 0, HEAD_SHA + "\n"
+        if command[:2] == ["gh", "api"]:
+            assert cwd == workdir
+            return 0, HEAD_SHA + "\n"
+        raise AssertionError(command)
+
+    monkeypatch.setattr(runner, "run_command", read_only_probe)
+
+    report = runner.dispatch_runtime_maintenance_task(
+        runner.RUNNER_VNEXT_PREPARE_RUNTIME_STATE_TASK_ID,
+        workdir,
+        _runner_vnext_prepare_runtime_state_body(),
+    )
+
+    assert runner.maintenance_report_status(report) == "DONE"
+    assert "exact_current_main=true" in report
+    assert "runner_vnext_mode=off" in report
+    assert "runner_vnext_mode_off=true" in report
+    assert "runtime_state_prepared=true" in report
+    assert "authoritative_stores_initialized=true" in report
+    assert "ledger_file_backed=true" in report
+    assert "lease_file_backed=true" in report
+    assert "distinct_ledger_lease_stores=true" in report
+    assert "reopen_ready=true" in report
+    assert "env_file_bound=true" in report
+    assert "runner_vnext_mode_written=false" in report
+    assert "systemd_mutation_performed=false" in report
+    assert "legacy_runner_touched=false" in report
+    assert "mutation_performed=true" in report
+    assert all(command[0] in {"git", "gh"} for command in commands)
+    assert not any(command[0] == "systemctl" for command in commands)
+    assert state_root.is_dir()
+    assert state_root.stat().st_mode & 0o777 == 0o700
+    ledger = state_root / "operation-ledger.sqlite3"
+    lease = state_root / "lane-leases.sqlite3"
+    assert ledger.is_file()
+    assert lease.is_file()
+    assert ledger != lease
+    assert ledger.stat().st_mode & 0o777 == 0o600
+    assert lease.stat().st_mode & 0o777 == 0o600
+    env_lines = (tmp_path / "skeleton-runner.env").read_text().splitlines()
+    assert env_lines == [
+        f"{runner.RUNNER_VNEXT_STATE_ROOT_ENV}={state_root}",
+        f"{runner.RUNNER_VNEXT_LEDGER_DB_ENV}={ledger}",
+        f"{runner.RUNNER_VNEXT_LEASE_DB_ENV}={lease}",
+    ]
+    assert all(not line.startswith(runner.RUNNER_VNEXT_MODE_ENV + "=") for line in env_lines)
+
+
+def test_runner_vnext_prepare_runtime_state_blocks_stale_or_untruthful_main(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    workdir = tmp_path / "checkout"
+    workdir.mkdir()
+    state_root = _patch_runner_vnext_prepare_paths(monkeypatch, tmp_path)
+    monkeypatch.delenv(runner.RUNNER_VNEXT_MODE_ENV, raising=False)
+
+    def read_only_probe(command: list[str], cwd=None, timeout=None, **_kwargs):
+        if command[:4] == ["git", "rev-parse", "--verify", "HEAD"]:
+            return 0, "b" * 40 + "\n"
+        if command[:2] == ["gh", "api"]:
+            return 0, HEAD_SHA + "\n"
+        raise AssertionError(command)
+
+    monkeypatch.setattr(runner, "run_command", read_only_probe)
+
+    report = runner.runner_vnext_prepare_runtime_state_v1(
+        workdir,
+        _runner_vnext_prepare_runtime_state_body(),
+    )
+
+    assert runner.maintenance_report_status(report) == "BLOCKED"
+    assert "exact_current_main=false" in report
+    assert "reason=prepare_runtime_state_not_exact_current_main" in report
+    assert "runtime_state_prepared=false" in report
+    assert "mutation_performed=false" in report
+    assert not state_root.exists()
+
+
+def test_runner_vnext_prepare_runtime_state_reports_root_creation_mutation_on_store_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    workdir = tmp_path / "checkout"
+    workdir.mkdir()
+    state_root = _patch_runner_vnext_prepare_paths(monkeypatch, tmp_path)
+    monkeypatch.delenv(runner.RUNNER_VNEXT_MODE_ENV, raising=False)
+    monkeypatch.setattr(
+        runner,
+        "run_command",
+        lambda command, cwd=None, timeout=None, **_kwargs: (
+            (0, HEAD_SHA + "\n")
+            if command[:4] == ["git", "rev-parse", "--verify", "HEAD"]
+            or command[:2] == ["gh", "api"]
+            else (_ for _ in ()).throw(AssertionError(command))
+        ),
+    )
+
+    def fail_after_root_creation(*_args, **_kwargs):
+        assert state_root.is_dir()
+        raise RuntimeError("prepare_runtime_state_forced_store_failure")
+
+    monkeypatch.setattr(runner, "build_authoritative_stores", fail_after_root_creation)
+
+    report = runner.runner_vnext_prepare_runtime_state_v1(
+        workdir,
+        _runner_vnext_prepare_runtime_state_body(),
+    )
+
+    assert runner.maintenance_report_status(report) == "BLOCKED"
+    assert "reason=prepare_runtime_state_forced_store_failure" in report
+    assert "runtime_state_prepared=false" in report
+    assert "authoritative_stores_initialized=false" in report
+    assert "env_file_bound=false" in report
+    assert "systemd_mutation_performed=false" in report
+    assert "legacy_runner_touched=false" in report
+    assert "mutation_performed=true" in report
+    assert state_root.is_dir()
+    assert state_root.stat().st_mode & 0o777 == 0o700
+    assert not (tmp_path / "skeleton-runner.env").exists()
+
+
+@pytest.mark.parametrize("configured_mode", ("shadow", "green_canary", "authoritative"))
+def test_runner_vnext_prepare_runtime_state_requires_vnext_mode_off(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    configured_mode: str,
+) -> None:
+    workdir = tmp_path / "checkout"
+    workdir.mkdir()
+    state_root = _patch_runner_vnext_prepare_paths(monkeypatch, tmp_path)
+    monkeypatch.setenv(runner.RUNNER_VNEXT_MODE_ENV, configured_mode)
+    monkeypatch.setattr(
+        runner,
+        "run_command",
+        lambda command, cwd=None, timeout=None, **_kwargs: (
+            (0, HEAD_SHA + "\n")
+            if command[:4] == ["git", "rev-parse", "--verify", "HEAD"]
+            or command[:2] == ["gh", "api"]
+            else (_ for _ in ()).throw(AssertionError(command))
+        ),
+    )
+
+    report = runner.runner_vnext_prepare_runtime_state_v1(
+        workdir,
+        _runner_vnext_prepare_runtime_state_body(),
+    )
+
+    assert runner.maintenance_report_status(report) == "BLOCKED"
+    assert f"runner_vnext_mode={configured_mode}" in report
+    assert "runner_vnext_mode_off=false" in report
+    assert "reason=prepare_runtime_state_vnext_mode_not_off" in report
+    assert "runtime_state_prepared=false" in report
+    assert "mutation_performed=false" in report
+    assert not state_root.exists()
+
+
+def test_runner_vnext_prepare_runtime_state_rejects_unsafe_preexisting_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    workdir = tmp_path / "checkout"
+    workdir.mkdir()
+    state_root = _patch_runner_vnext_prepare_paths(monkeypatch, tmp_path)
+    state_root.mkdir(mode=0o755)
+    monkeypatch.setattr(
+        runner,
+        "run_command",
+        lambda command, cwd=None, timeout=None, **_kwargs: (
+            (0, HEAD_SHA + "\n")
+            if command[:4] == ["git", "rev-parse", "--verify", "HEAD"]
+            or command[:2] == ["gh", "api"]
+            else (_ for _ in ()).throw(AssertionError(command))
+        ),
+    )
+
+    report = runner.runner_vnext_prepare_runtime_state_v1(
+        workdir,
+        _runner_vnext_prepare_runtime_state_body(),
+    )
+
+    assert runner.maintenance_report_status(report) == "BLOCKED"
+    assert "reason=prepare_runtime_state_root_unsafe" in report
+    assert "mutation_performed=false" in report
+    assert state_root.stat().st_mode & 0o777 == 0o755
+
+
+def test_runner_vnext_prepare_runtime_state_rejects_mode_binding_in_env_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    workdir = tmp_path / "checkout"
+    workdir.mkdir()
+    _patch_runner_vnext_prepare_paths(monkeypatch, tmp_path)
+    env_file = tmp_path / "skeleton-runner.env"
+    env_file.write_text(f"{runner.RUNNER_VNEXT_MODE_ENV}=authoritative\n")
+    env_file.chmod(0o600)
+    monkeypatch.setattr(
+        runner,
+        "run_command",
+        lambda command, cwd=None, timeout=None, **_kwargs: (
+            (0, HEAD_SHA + "\n")
+            if command[:4] == ["git", "rev-parse", "--verify", "HEAD"]
+            or command[:2] == ["gh", "api"]
+            else (_ for _ in ()).throw(AssertionError(command))
+        ),
+    )
+
+    report = runner.runner_vnext_prepare_runtime_state_v1(
+        workdir,
+        _runner_vnext_prepare_runtime_state_body(),
+    )
+
+    assert runner.maintenance_report_status(report) == "BLOCKED"
+    assert "reason=prepare_runtime_state_mode_binding_present" in report
+    assert "mutation_performed=true" in report
+    assert env_file.read_text() == f"{runner.RUNNER_VNEXT_MODE_ENV}=authoritative\n"
+
+
+@pytest.mark.parametrize(
+    ("lines", "reason"),
+    (
+        (
+            [
+                f"{runner.RUNNER_VNEXT_STATE_ROOT_ENV}=/elsewhere",
+            ],
+            "prepare_runtime_state_env_binding_conflict",
+        ),
+        (
+            [
+                f"{runner.RUNNER_VNEXT_LEDGER_DB_ENV}=PLACEHOLDER",
+                f"{runner.RUNNER_VNEXT_LEDGER_DB_ENV}=PLACEHOLDER",
+            ],
+            "prepare_runtime_state_env_binding_duplicate",
+        ),
+    ),
+)
+def test_runner_vnext_prepare_runtime_state_rejects_duplicate_or_conflicting_env_bindings(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    lines: list[str],
+    reason: str,
+) -> None:
+    workdir = tmp_path / "checkout"
+    workdir.mkdir()
+    state_root = _patch_runner_vnext_prepare_paths(monkeypatch, tmp_path)
+    env_file = tmp_path / "skeleton-runner.env"
+    normalized_lines = [
+        line.replace("PLACEHOLDER", str(state_root / "operation-ledger.sqlite3"))
+        for line in lines
+    ]
+    env_file.write_text("\n".join(normalized_lines) + "\n")
+    env_file.chmod(0o600)
+    monkeypatch.setattr(
+        runner,
+        "run_command",
+        lambda command, cwd=None, timeout=None, **_kwargs: (
+            (0, HEAD_SHA + "\n")
+            if command[:4] == ["git", "rev-parse", "--verify", "HEAD"]
+            or command[:2] == ["gh", "api"]
+            else (_ for _ in ()).throw(AssertionError(command))
+        ),
+    )
+
+    report = runner.runner_vnext_prepare_runtime_state_v1(
+        workdir,
+        _runner_vnext_prepare_runtime_state_body(),
+    )
+
+    assert runner.maintenance_report_status(report) == "BLOCKED"
+    assert f"reason={reason}" in report
+    assert env_file.read_text() == "\n".join(normalized_lines) + "\n"
+
+
+def test_runner_vnext_prepare_runtime_state_restores_umask(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    workdir = tmp_path / "checkout"
+    workdir.mkdir()
+    _patch_runner_vnext_prepare_paths(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        runner,
+        "run_command",
+        lambda command, cwd=None, timeout=None, **_kwargs: (
+            (0, HEAD_SHA + "\n")
+            if command[:4] == ["git", "rev-parse", "--verify", "HEAD"]
+            or command[:2] == ["gh", "api"]
+            else (_ for _ in ()).throw(AssertionError(command))
+        ),
+    )
+    previous = os.umask(0o027)
+    try:
+        report = runner.runner_vnext_prepare_runtime_state_v1(
+            workdir,
+            _runner_vnext_prepare_runtime_state_body(),
+        )
+        observed = os.umask(previous)
+    finally:
+        os.umask(previous)
+
+    assert runner.maintenance_report_status(report) == "DONE"
+    assert observed == 0o027
 
 
 def _runner_vnext_selector_body(

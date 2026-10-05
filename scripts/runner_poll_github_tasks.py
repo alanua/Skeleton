@@ -287,11 +287,19 @@ RUNNER_VNEXT_CODEGEN_NODE_ID = "node:runner-vnext-codegen-runtime"
 RUNNER_VNEXT_CODEGEN_ROUTE_RANK = 0
 RUNNER_VNEXT_NODE_SNAPSHOT_MAX_TTL_SECONDS = 60.0
 RUNNER_VNEXT_READONLY_PREFLIGHT_TASK_ID = "runner_vnext_readonly_preflight"
+RUNNER_VNEXT_PREPARE_RUNTIME_STATE_TASK_ID = "runner_vnext_prepare_runtime_state_v1"
 RUNNER_VNEXT_EXTERNAL_ATTESTATION_TASK_ID = "runner_vnext_external_attestation"
 RUNNER_VNEXT_EXACT_GREEN_CANARY_TASK_ID = "runner_vnext_exact_green_canary"
 RUNNER_VNEXT_PREFLIGHT_SCHEMA = "skeleton.runner_vnext_readonly_preflight_receipt.v1"
+RUNNER_VNEXT_PREPARE_RUNTIME_STATE_SCHEMA = (
+    "skeleton.runner_vnext_prepare_runtime_state_receipt.v1"
+)
 RUNNER_VNEXT_EXTERNAL_ATTESTATION_PROFILE = "green_diagnostic_v1"
 RUNNER_VNEXT_EXTERNAL_ATTESTATION_FILENAME = "runner-vnext-external-attestation.json"
+RUNNER_VNEXT_PRIVATE_STATE_ROOT = Path("/var/lib/skeleton/runner-vnext")
+RUNNER_VNEXT_PRIVATE_LEDGER_DB = RUNNER_VNEXT_PRIVATE_STATE_ROOT / "operation-ledger.sqlite3"
+RUNNER_VNEXT_PRIVATE_LEASE_DB = RUNNER_VNEXT_PRIVATE_STATE_ROOT / "lane-leases.sqlite3"
+RUNNER_VNEXT_PRIVATE_ENV_FILE = Path("/etc/skeleton-runner.env")
 RUNNER_LEGACY_SERVICE_UNIT = "skeleton-runner-poll.service"
 RUNNER_LEGACY_TIMER_UNIT = "skeleton-runner-poll.timer"
 RUNNER_VNEXT_CODEGEN_CAPABILITIES = (
@@ -515,6 +523,7 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_V1,
         RUNNER_CODEX_PRIMARY_HEALTH_PROBE,
         RUNNER_VNEXT_READONLY_PREFLIGHT_TASK_ID,
+        RUNNER_VNEXT_PREPARE_RUNTIME_STATE_TASK_ID,
         RUNNER_VNEXT_EXTERNAL_ATTESTATION_TASK_ID,
         RUNNER_VNEXT_EXACT_GREEN_CANARY_TASK_ID,
         BUILD_AND_LOCAL_OTA_OPERATION,
@@ -580,6 +589,7 @@ PROTECTED_MAINTENANCE_TASK_IDS = frozenset(
         QUARANTINE_STALE_CLEAN_SKELETON_WORKTREES,
         REPLENISH_RUNNER_QUEUE,
         RUNNER_CODEX_PRIMARY_HEALTH_PROBE,
+        RUNNER_VNEXT_PREPARE_RUNTIME_STATE_TASK_ID,
         RUNNER_VNEXT_EXTERNAL_ATTESTATION_TASK_ID,
         RUNNER_VNEXT_EXACT_GREEN_CANARY_TASK_ID,
     )
@@ -856,12 +866,14 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "draft_pr_url",
         "dxf_source_count",
         "error_class",
+        "env_file_bound",
         "event",
         "excluded_infrastructure_cache_name_count",
         "excluded_secret_like_count",
         "external_side_effects_executed",
         "activation_executed",
         "action_present",
+        "authoritative_stores_initialized",
         "dependency_installed_by_operation",
         "device_canary",
         "exact_base_changed_files_count",
@@ -884,6 +896,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "exit_code",
         "explicit_recovery_route",
         "executor_receipt_hash",
+        "exact_current_main",
         "file_on_main",
         "final_clean_state",
         "files_on_main_count",
@@ -917,6 +930,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "issue_worktree_id",
         "kernel_release",
         "ledger_events_written",
+        "legacy_runner_touched",
         "legacy_service_load_state",
         "legacy_timer_load_state",
         "listed_worktrees_count",
@@ -1046,7 +1060,13 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "row_count",
         "run_id",
         "runtime_state",
+        "runtime_state_bootstrap_executed",
+        "runtime_state_bootstrap_registered",
+        "runtime_state_prepared",
         "runner_root_exists",
+        "runner_vnext_mode_written",
+        "runner_vnext_mode",
+        "runner_vnext_mode_off",
         "runner_status",
         "scanned_entry_count",
         "selected_root_count",
@@ -1090,6 +1110,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "status_count_needs_review",
         "step",
         "stable_reason",
+        "state_root_ready",
         "stale_after_count",
         "stale_before_count",
         "success_criteria",
@@ -1102,6 +1123,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "synthetic_graph_node_count",
         "synthetic_smoke_timeout_seconds",
         "system",
+        "systemd_mutation_performed",
         "system_failed_unit_count",
         "target_project",
         "target",
@@ -1173,6 +1195,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "rollback_available",
         "ledger_file_backed",
         "lease_file_backed",
+        "distinct_ledger_lease_stores",
         "reopen_ready",
         "unresolved_started_count",
         "active_lease_count",
@@ -1637,23 +1660,24 @@ def _validation_command_uses_pytest(args: list[str]) -> bool:
 
 
 def _validation_pytest_temp_parent(cwd_path: Path) -> Path:
-    candidates = [Path(tempfile.gettempdir()), Path("/tmp")]
+    candidates = [
+        Path(tempfile.gettempdir()),
+        Path("/tmp"),
+    ]
+    if isinstance(tempfile.tempdir, str) and tempfile.tempdir:
+        candidates.append(Path(tempfile.tempdir))
     for candidate in candidates:
         candidate_path = candidate.resolve(strict=False)
         if candidate_path.is_relative_to(cwd_path):
             continue
-        if candidate_path.is_dir():
+        if candidate_path.is_dir() and os.access(candidate_path, os.W_OK):
             return candidate_path
     raise FileNotFoundError("no external pytest validation temp parent is available")
 
 
 def _create_validation_pytest_temp_root(cwd: str | Path) -> Path:
     cwd_path = Path(cwd)
-    if not cwd_path.is_dir():
-        raise FileNotFoundError(
-            f"pytest validation cwd is not an existing directory: {cwd_path}"
-        )
-    temp_parent = _validation_pytest_temp_parent(cwd_path.resolve(strict=True))
+    temp_parent = _validation_pytest_temp_parent(cwd_path.resolve(strict=False))
     return Path(
         tempfile.mkdtemp(
             prefix=".runner-validation-pytest-",
@@ -1663,9 +1687,12 @@ def _create_validation_pytest_temp_root(cwd: str | Path) -> Path:
 
 
 def _remove_validation_pytest_temp_root(path: Path) -> None:
+    cleanup_parent_candidates = [Path(tempfile.gettempdir()), Path("/tmp")]
+    if isinstance(tempfile.tempdir, str) and tempfile.tempdir:
+        cleanup_parent_candidates.append(Path(tempfile.tempdir))
     allowed_parents = {
         candidate.resolve(strict=False)
-        for candidate in (Path(tempfile.gettempdir()), Path("/tmp"))
+        for candidate in cleanup_parent_candidates
         if candidate.is_dir()
     }
     try:
@@ -21591,6 +21618,7 @@ def _runner_vnext_preflight_systemctl(unit: str, operation: str) -> str:
         "failed",
         "unknown",
         "not-found",
+        "activating",
         "enabled",
         "disabled",
         "static",
@@ -21607,6 +21635,7 @@ def _runner_vnext_preflight_systemctl(unit: str, operation: str) -> str:
         "unknown",
         "not-found",
         "masked",
+        "activating",
     }:
         raise RuntimeError("preflight_systemctl_probe_failed")
     return value
@@ -21832,7 +21861,7 @@ def runner_vnext_readonly_preflight(workdir: str | Path) -> str:
             f"legacy_timer_load_state={timer_load_state}",
         ]
     )
-    if service_state != "active":
+    if service_state not in {"active", "activating"}:
         blockers.append("legacy_service_not_active")
     if timer_state != "active":
         blockers.append("legacy_timer_not_active")
@@ -21967,6 +21996,327 @@ def runner_vnext_readonly_preflight(workdir: str | Path) -> str:
     )
     if not route_ready:
         blockers.append("route_inventory_not_ready")
+    if blockers:
+        status_lines.append(f"reason={blockers[0]}")
+    return _maintenance_report(
+        "DONE" if not blockers else "BLOCKED",
+        task_id,
+        status_lines,
+        "met" if not blockers else "not_met",
+    )
+
+
+def _runner_vnext_prepare_runtime_state_metadata(
+    body: str,
+) -> tuple[dict[str, str] | None, str | None]:
+    allowed_fields = {
+        "Mode",
+        "Maintenance Task ID",
+        "Repository",
+        "Expected Main SHA",
+        "Idempotency Key",
+    }
+    values: dict[str, str] = {}
+    metadata = _metadata_before_task(body).strip()
+    if not metadata:
+        return None, "prepare_runtime_state_metadata_missing"
+    for raw_line in metadata.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        match = re.fullmatch(
+            r"(?P<label>[A-Za-z][A-Za-z0-9 ]{0,80}):\s*(?P<value>\S(?:.*\S)?)",
+            line,
+        )
+        if match is None:
+            return None, "prepare_runtime_state_noncanonical_metadata"
+        label = match.group("label")
+        if label not in allowed_fields:
+            return None, "prepare_runtime_state_unknown_metadata"
+        if label in values:
+            return None, "prepare_runtime_state_duplicate_metadata"
+        values[label] = match.group("value")
+    required = {"Mode", "Maintenance Task ID", "Repository", "Expected Main SHA"}
+    if not required <= set(values):
+        return None, "prepare_runtime_state_required_metadata_missing"
+    if values["Mode"] != RUNTIME_MAINTENANCE_MODE:
+        return None, "prepare_runtime_state_mode_mismatch"
+    if values["Maintenance Task ID"] != RUNNER_VNEXT_PREPARE_RUNTIME_STATE_TASK_ID:
+        return None, "prepare_runtime_state_task_id_mismatch"
+    if values["Repository"] != REPO:
+        return None, "prepare_runtime_state_repository_mismatch"
+    if re.fullmatch(r"[0-9a-f]{40}", values["Expected Main SHA"]) is None:
+        return None, "prepare_runtime_state_expected_main_sha_invalid"
+    idempotency = values.get("Idempotency Key")
+    if idempotency is not None and re.fullmatch(
+        r"[A-Za-z0-9._:-]{1,128}", idempotency
+    ) is None:
+        return None, "prepare_runtime_state_idempotency_invalid"
+    return values, None
+
+
+def _runner_vnext_prepare_safe_root(root: Path) -> tuple[Path, bool]:
+    existed = os.path.lexists(root)
+    if existed:
+        info = root.lstat()
+        if (
+            stat.S_ISLNK(info.st_mode)
+            or not stat.S_ISDIR(info.st_mode)
+            or info.st_uid != os.geteuid()
+            or stat.S_IMODE(info.st_mode) != 0o700
+        ):
+            raise RuntimeError("prepare_runtime_state_root_unsafe")
+    else:
+        root.mkdir(mode=0o700, parents=True, exist_ok=False)
+    info = root.lstat()
+    resolved = root.resolve(strict=True)
+    if (
+        stat.S_ISLNK(info.st_mode)
+        or not stat.S_ISDIR(info.st_mode)
+        or info.st_uid != os.geteuid()
+        or stat.S_IMODE(info.st_mode) != 0o700
+    ):
+        raise RuntimeError("prepare_runtime_state_root_unsafe")
+    return resolved, not existed
+
+
+def _runner_vnext_prepare_safe_file(path: Path, root: Path, reason: str) -> Path:
+    candidate = path.resolve(strict=True)
+    try:
+        candidate.relative_to(root)
+    except ValueError as exc:
+        raise RuntimeError(reason) from exc
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(candidate, flags)
+    try:
+        info = os.fstat(fd)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.geteuid()
+            or stat.S_IMODE(info.st_mode) != 0o600
+        ):
+            raise RuntimeError(reason)
+    finally:
+        os.close(fd)
+    return candidate
+
+
+def _runner_vnext_prepare_env_file(
+    *,
+    env_file: Path,
+    state_root: Path,
+    ledger: Path,
+    lease: Path,
+) -> None:
+    managed_bindings = {
+        RUNNER_VNEXT_STATE_ROOT_ENV: str(state_root),
+        RUNNER_VNEXT_LEDGER_DB_ENV: str(ledger),
+        RUNNER_VNEXT_LEASE_DB_ENV: str(lease),
+    }
+    parent = env_file.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    parent_info = parent.lstat()
+    if stat.S_ISLNK(parent_info.st_mode) or not stat.S_ISDIR(parent_info.st_mode):
+        raise RuntimeError("prepare_runtime_state_env_parent_unsafe")
+    preserved: list[str] = []
+    seen_managed: set[str] = set()
+    if env_file.exists():
+        info = env_file.lstat()
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+            raise RuntimeError("prepare_runtime_state_env_file_unsafe")
+        if info.st_size > 65536:
+            raise RuntimeError("prepare_runtime_state_env_file_oversize")
+        if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) & 0o077:
+            raise RuntimeError("prepare_runtime_state_env_file_unsafe")
+        for raw_line in env_file.read_text(encoding="utf-8").splitlines():
+            if "=" in raw_line:
+                key, value = raw_line.split("=", 1)
+                key = key.strip()
+            else:
+                key, value = "", ""
+            if key == RUNNER_VNEXT_MODE_ENV:
+                raise RuntimeError("prepare_runtime_state_mode_binding_present")
+            if key in managed_bindings:
+                if key in seen_managed:
+                    raise RuntimeError("prepare_runtime_state_env_binding_duplicate")
+                seen_managed.add(key)
+                if value != managed_bindings[key]:
+                    raise RuntimeError("prepare_runtime_state_env_binding_conflict")
+                continue
+            preserved.append(raw_line)
+    bindings = [f"{key}={value}" for key, value in managed_bindings.items()]
+    content = "\n".join([*preserved, *bindings]).strip() + "\n"
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{env_file.name}.", suffix=".tmp", dir=str(parent)
+    )
+    tmp_path = Path(tmp_name)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, env_file)
+        env_file.chmod(0o600)
+    except Exception:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def runner_vnext_prepare_runtime_state_v1(
+    workdir: str | Path,
+    body: str,
+) -> str:
+    task_id = RUNNER_VNEXT_PREPARE_RUNTIME_STATE_TASK_ID
+    status_lines = [
+        f"schema={RUNNER_VNEXT_PREPARE_RUNTIME_STATE_SCHEMA}",
+        "report_mode=prepare_runtime_state",
+        "public_safe=true",
+        "runtime_state_prepared=false",
+        "authoritative_stores_initialized=false",
+        "env_file_bound=false",
+        "runner_vnext_mode_written=false",
+        "systemd_mutation_performed=false",
+        "legacy_runner_touched=false",
+    ]
+    metadata, metadata_reason = _runner_vnext_prepare_runtime_state_metadata(body)
+    expected_sha = metadata["Expected Main SHA"].lower() if metadata else "missing"
+    checkout_sha = "missing"
+    github_sha = "missing"
+    blockers: list[str] = []
+    if metadata_reason is not None or metadata is None:
+        blockers.append(metadata_reason or "prepare_runtime_state_metadata_invalid")
+    try:
+        code, output = run_command(
+            ["git", "rev-parse", "--verify", "HEAD"],
+            cwd=workdir,
+            timeout=15,
+        )
+        value = output.strip().lower()
+        if code != 0 or _HEAD_SHA_RE.fullmatch(value) is None:
+            raise RuntimeError("prepare_runtime_state_checkout_head_unavailable")
+        checkout_sha = value
+    except (OSError, RuntimeError):
+        blockers.append("prepare_runtime_state_checkout_head_unavailable")
+    try:
+        code, output = run_command(
+            ["gh", "api", f"repos/{REPO}/commits/main", "--jq", ".sha"],
+            cwd=workdir,
+            timeout=15,
+        )
+        value = output.strip().lower()
+        if code != 0 or _HEAD_SHA_RE.fullmatch(value) is None:
+            raise RuntimeError("prepare_runtime_state_github_main_unavailable")
+        github_sha = value
+    except (OSError, RuntimeError):
+        blockers.append("prepare_runtime_state_github_main_unavailable")
+
+    exact_current_main = (
+        expected_sha != "missing"
+        and checkout_sha == expected_sha
+        and github_sha == expected_sha
+    )
+    status_lines.extend(
+        [
+            f"expected_main_sha={expected_sha}",
+            f"checkout_head_sha={checkout_sha}",
+            f"github_main_sha={github_sha}",
+            f"exact_current_main={str(exact_current_main).lower()}",
+        ]
+    )
+    if not exact_current_main:
+        blockers.append("prepare_runtime_state_not_exact_current_main")
+
+    configured_mode = os.environ.get(RUNNER_VNEXT_MODE_ENV)
+    normalized_mode = (configured_mode or RUNNER_MODE_OFF).strip().lower()
+    mode_off = normalized_mode == RUNNER_MODE_OFF
+    status_lines.extend(
+        [
+            f"runner_vnext_mode={normalized_mode}",
+            f"runner_vnext_mode_off={str(mode_off).lower()}",
+        ]
+    )
+    if normalized_mode not in VNEXT_MODES:
+        blockers.append("prepare_runtime_state_vnext_mode_invalid")
+    elif not mode_off:
+        blockers.append("prepare_runtime_state_vnext_mode_not_off")
+
+    state_root_ready = False
+    ledger_ready = False
+    lease_ready = False
+    reopen_ready = False
+    env_file_bound = False
+    mutation_performed = False
+    if not blockers:
+        previous_umask = os.umask(0o077)
+        try:
+            root, root_created = _runner_vnext_prepare_safe_root(
+                RUNNER_VNEXT_PRIVATE_STATE_ROOT
+            )
+            mutation_performed = root_created
+            ledger_path = RUNNER_VNEXT_PRIVATE_LEDGER_DB
+            lease_path = RUNNER_VNEXT_PRIVATE_LEASE_DB
+            if ledger_path == lease_path:
+                raise RuntimeError("prepare_runtime_state_store_path_collision")
+            stores = build_authoritative_stores(
+                RunnerVNextRuntimeConfig(
+                    state_root=str(root),
+                    ledger_db_path=str(ledger_path),
+                    lease_db_path=str(lease_path),
+                ),
+                clock=time.time,
+            )
+            stores.close()
+            ledger_path.chmod(0o600)
+            lease_path.chmod(0o600)
+            mutation_performed = True
+            ledger = _runner_vnext_prepare_safe_file(
+                ledger_path, root, "prepare_runtime_state_ledger_unsafe"
+            )
+            lease = _runner_vnext_prepare_safe_file(
+                lease_path, root, "prepare_runtime_state_lease_unsafe"
+            )
+            if ledger == lease:
+                raise RuntimeError("prepare_runtime_state_store_path_collision")
+            now = time.time()
+            _runner_vnext_readonly_db_reconciled(ledger, "ledger", now)
+            _runner_vnext_readonly_db_reconciled(lease, "lease", now)
+            state_root_ready = True
+            ledger_ready = True
+            lease_ready = True
+            reopen_ready = True
+            _runner_vnext_prepare_env_file(
+                env_file=RUNNER_VNEXT_PRIVATE_ENV_FILE,
+                state_root=root,
+                ledger=ledger,
+                lease=lease,
+            )
+            env_file_bound = True
+        except (OSError, RuntimeError, RunnerVNextAuthorityError) as exc:
+            blockers.append(str(exc) or "prepare_runtime_state_failed")
+        finally:
+            os.umask(previous_umask)
+    status_lines.extend(
+        [
+            f"mutation_performed={str(mutation_performed).lower()}",
+            f"state_root_ready={str(state_root_ready).lower()}",
+            f"ledger_file_backed={str(ledger_ready).lower()}",
+            f"lease_file_backed={str(lease_ready).lower()}",
+            f"distinct_ledger_lease_stores={str(RUNNER_VNEXT_PRIVATE_LEDGER_DB != RUNNER_VNEXT_PRIVATE_LEASE_DB).lower()}",
+            f"reopen_ready={str(reopen_ready).lower()}",
+            f"authoritative_stores_initialized={str(ledger_ready and lease_ready).lower()}",
+            f"env_file_bound={str(env_file_bound).lower()}",
+            f"runtime_state_prepared={str(state_root_ready and ledger_ready and lease_ready and reopen_ready and env_file_bound).lower()}",
+        ]
+    )
+
     if blockers:
         status_lines.append(f"reason={blockers[0]}")
     return _maintenance_report(
@@ -22129,6 +22479,8 @@ def dispatch_runtime_maintenance_task(
     try:
         if task_id == RUNNER_VNEXT_READONLY_PREFLIGHT_TASK_ID:
             return runner_vnext_readonly_preflight(workdir)
+        if task_id == RUNNER_VNEXT_PREPARE_RUNTIME_STATE_TASK_ID:
+            return runner_vnext_prepare_runtime_state_v1(workdir, body)
         if task_id == RUNNER_VNEXT_EXTERNAL_ATTESTATION_TASK_ID:
             return runner_vnext_external_attestation(body)
         if task_id == RUNNER_VNEXT_EXACT_GREEN_CANARY_TASK_ID:
