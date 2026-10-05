@@ -82,9 +82,9 @@ Expected Main SHA: <current exact 40-hex main commit>
 ```
 
 It verifies that the caller checkout `HEAD`, GitHub `main`, and `Expected Main
-SHA` are the same exact commit, and that `SKELETON_RUNNER_VNEXT_MODE` is unset
-or `off`. After those public-safe checks pass, it creates only the fixed private
-runtime root `/var/lib/skeleton/runner-vnext` under restored `umask 077`,
+SHA` are the same exact commit, and that `SKELETON_RUNNER_VNEXT_MODE` is unset,
+`off`, or `shadow`. After those public-safe checks pass, it creates only the
+fixed private runtime root `/var/lib/skeleton/runner-vnext` under restored `umask 077`,
 initializes distinct authoritative ledger and lease SQLite stores through
 `build_authoritative_stores`, verifies owner-only modes and read-only reopen
 behavior, and binds only `SKELETON_RUNNER_VNEXT_STATE_ROOT`,
@@ -96,10 +96,11 @@ paths; duplicate or conflicting managed bindings fail closed.
 The task must not write `SKELETON_RUNNER_VNEXT_MODE`, write attestation files,
 start/stop/enable/disable systemd units, touch the legacy Runner service/timer,
 execute the green canary, or invoke codegen. Public output is limited to exact
-SHA equality, mode-off status, fixed-state readiness booleans, env-file binding
-status, systemd-mutation falsehood, legacy-touch falsehood, and stable reason
-tokens. Any stale checkout, GitHub-main mismatch, invalid metadata, invalid
-vNext mode, non-off vNext mode, unsafe state ownership/mode, colliding stores,
+SHA equality, mode-off and prepare-allowed status, fixed-state readiness
+booleans, env-file binding status, systemd-mutation falsehood, legacy-touch
+falsehood, and stable reason tokens. Any stale checkout, GitHub-main mismatch,
+invalid metadata, invalid vNext mode, active execution vNext mode
+(`green_canary` or `authoritative`), unsafe state ownership/mode, colliding stores,
 failed reopen verification, attempted mode binding in the env file, duplicate
 managed env binding, or conflicting managed env binding fails closed. The public
 `mutation_performed` receipt field is false for read-only preflight blockers and

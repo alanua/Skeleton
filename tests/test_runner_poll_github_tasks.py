@@ -28387,6 +28387,7 @@ def test_runner_vnext_prepare_runtime_state_initializes_fixed_private_state(
     assert "exact_current_main=true" in report
     assert "runner_vnext_mode=off" in report
     assert "runner_vnext_mode_off=true" in report
+    assert "runner_vnext_mode_prepare_allowed=true" in report
     assert "runtime_state_prepared=true" in report
     assert "authoritative_stores_initialized=true" in report
     assert "ledger_file_backed=true" in report
@@ -28492,8 +28493,45 @@ def test_runner_vnext_prepare_runtime_state_reports_root_creation_mutation_on_st
     assert not (tmp_path / "skeleton-runner.env").exists()
 
 
-@pytest.mark.parametrize("configured_mode", ("shadow", "green_canary", "authoritative"))
-def test_runner_vnext_prepare_runtime_state_requires_vnext_mode_off(
+def test_runner_vnext_prepare_runtime_state_accepts_shadow_without_changing_mode(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    workdir = tmp_path / "checkout"
+    workdir.mkdir()
+    state_root = _patch_runner_vnext_prepare_paths(monkeypatch, tmp_path)
+    monkeypatch.setenv(runner.RUNNER_VNEXT_MODE_ENV, "shadow")
+    monkeypatch.setattr(
+        runner,
+        "run_command",
+        lambda command, cwd=None, timeout=None, **_kwargs: (
+            (0, HEAD_SHA + "\n")
+            if command[:4] == ["git", "rev-parse", "--verify", "HEAD"]
+            or command[:2] == ["gh", "api"]
+            else (_ for _ in ()).throw(AssertionError(command))
+        ),
+    )
+
+    report = runner.runner_vnext_prepare_runtime_state_v1(
+        workdir,
+        _runner_vnext_prepare_runtime_state_body(),
+    )
+
+    assert runner.maintenance_report_status(report) == "DONE"
+    assert "runner_vnext_mode=shadow" in report
+    assert "runner_vnext_mode_off=false" in report
+    assert "runner_vnext_mode_prepare_allowed=true" in report
+    assert "runtime_state_prepared=true" in report
+    assert "runner_vnext_mode_written=false" in report
+    env_lines = (tmp_path / "skeleton-runner.env").read_text().splitlines()
+    assert all(
+        not line.startswith(runner.RUNNER_VNEXT_MODE_ENV + "=") for line in env_lines
+    )
+    assert state_root.is_dir()
+
+
+@pytest.mark.parametrize("configured_mode", ("green_canary", "authoritative"))
+def test_runner_vnext_prepare_runtime_state_blocks_active_vnext_modes_before_mutation(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     configured_mode: str,
@@ -28521,6 +28559,7 @@ def test_runner_vnext_prepare_runtime_state_requires_vnext_mode_off(
     assert runner.maintenance_report_status(report) == "BLOCKED"
     assert f"runner_vnext_mode={configured_mode}" in report
     assert "runner_vnext_mode_off=false" in report
+    assert "runner_vnext_mode_prepare_allowed=false" in report
     assert "reason=prepare_runtime_state_vnext_mode_not_off" in report
     assert "runtime_state_prepared=false" in report
     assert "mutation_performed=false" in report
