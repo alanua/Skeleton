@@ -70,9 +70,9 @@ repository readability, git head, Python/pytest availability, allowlisted write
 readiness, and codegen executor availability without performing workspace
 writes or runtime mutation.
 
-`runner_vnext_prepare_runtime_state_v1` is the bounded one-shot maintenance task
-for preparing vNext private runtime state. It requires exact maintenance
-metadata:
+`runner_vnext_prepare_runtime_state_v1` is a protected, bounded one-shot
+maintenance task for preparing vNext private runtime state. It requires exact
+maintenance metadata and a trusted protected approval reference:
 
 ```text
 Mode: RUNTIME_MAINTENANCE_TASK
@@ -84,11 +84,14 @@ Expected Main SHA: <current exact 40-hex main commit>
 It verifies that the caller checkout `HEAD`, GitHub `main`, and `Expected Main
 SHA` are the same exact commit, and that `SKELETON_RUNNER_VNEXT_MODE` is unset
 or `off`. After those public-safe checks pass, it creates only the fixed private
-runtime root `/var/lib/skeleton/runner-vnext`, initializes distinct
-authoritative ledger and lease SQLite stores through `build_authoritative_stores`,
-verifies owner-only modes and read-only reopen behavior, and binds only
-`SKELETON_RUNNER_VNEXT_STATE_ROOT`, `SKELETON_RUNNER_VNEXT_LEDGER_DB`, and
-`SKELETON_RUNNER_VNEXT_LEASE_DB` in `/etc/skeleton-runner.env`.
+runtime root `/var/lib/skeleton/runner-vnext` under restored `umask 077`,
+initializes distinct authoritative ledger and lease SQLite stores through
+`build_authoritative_stores`, verifies owner-only modes and read-only reopen
+behavior, and binds only `SKELETON_RUNNER_VNEXT_STATE_ROOT`,
+`SKELETON_RUNNER_VNEXT_LEDGER_DB`, and `SKELETON_RUNNER_VNEXT_LEASE_DB` in
+`/etc/skeleton-runner.env`. Unsafe pre-existing runtime roots are not repaired
+in place. Existing managed env bindings must be unique and match the fixed
+paths; duplicate or conflicting managed bindings fail closed.
 
 The task must not write `SKELETON_RUNNER_VNEXT_MODE`, write attestation files,
 start/stop/enable/disable systemd units, touch the legacy Runner service/timer,
@@ -97,8 +100,10 @@ SHA equality, mode-off status, fixed-state readiness booleans, env-file binding
 status, systemd-mutation falsehood, legacy-touch falsehood, and stable reason
 tokens. Any stale checkout, GitHub-main mismatch, invalid metadata, invalid
 vNext mode, non-off vNext mode, unsafe state ownership/mode, colliding stores,
-failed reopen verification, or attempted mode binding in the env file fails
-closed.
+failed reopen verification, attempted mode binding in the env file, duplicate
+managed env binding, or conflicting managed env binding fails closed. The public
+`mutation_performed` receipt field is false for read-only preflight blockers and
+true only after the task reaches state/store mutation.
 
 `runner_codex_primary_health_probe` is the protected, narrow PRIMARY-CODEX
 health probe. It requires exact maintenance-mode metadata, `Repository:

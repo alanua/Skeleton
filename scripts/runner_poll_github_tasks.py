@@ -589,6 +589,7 @@ PROTECTED_MAINTENANCE_TASK_IDS = frozenset(
         QUARANTINE_STALE_CLEAN_SKELETON_WORKTREES,
         REPLENISH_RUNNER_QUEUE,
         RUNNER_CODEX_PRIMARY_HEALTH_PROBE,
+        RUNNER_VNEXT_PREPARE_RUNTIME_STATE_TASK_ID,
         RUNNER_VNEXT_EXTERNAL_ATTESTATION_TASK_ID,
         RUNNER_VNEXT_EXACT_GREEN_CANARY_TASK_ID,
     )
@@ -21947,8 +21948,18 @@ def _runner_vnext_prepare_runtime_state_metadata(
 
 
 def _runner_vnext_prepare_safe_root(root: Path) -> Path:
-    root.mkdir(mode=0o700, parents=True, exist_ok=True)
-    root.chmod(0o700)
+    existed = os.path.lexists(root)
+    if existed:
+        info = root.lstat()
+        if (
+            stat.S_ISLNK(info.st_mode)
+            or not stat.S_ISDIR(info.st_mode)
+            or info.st_uid != os.geteuid()
+            or stat.S_IMODE(info.st_mode) != 0o700
+        ):
+            raise RuntimeError("prepare_runtime_state_root_unsafe")
+    else:
+        root.mkdir(mode=0o700, parents=True, exist_ok=False)
     info = root.lstat()
     resolved = root.resolve(strict=True)
     if (
@@ -21989,12 +22000,18 @@ def _runner_vnext_prepare_env_file(
     ledger: Path,
     lease: Path,
 ) -> None:
+    managed_bindings = {
+        RUNNER_VNEXT_STATE_ROOT_ENV: str(state_root),
+        RUNNER_VNEXT_LEDGER_DB_ENV: str(ledger),
+        RUNNER_VNEXT_LEASE_DB_ENV: str(lease),
+    }
     parent = env_file.parent
     parent.mkdir(parents=True, exist_ok=True)
     parent_info = parent.lstat()
     if stat.S_ISLNK(parent_info.st_mode) or not stat.S_ISDIR(parent_info.st_mode):
         raise RuntimeError("prepare_runtime_state_env_parent_unsafe")
     preserved: list[str] = []
+    seen_managed: set[str] = set()
     if env_file.exists():
         info = env_file.lstat()
         if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
@@ -22004,21 +22021,22 @@ def _runner_vnext_prepare_env_file(
         if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) & 0o077:
             raise RuntimeError("prepare_runtime_state_env_file_unsafe")
         for raw_line in env_file.read_text(encoding="utf-8").splitlines():
-            key = raw_line.split("=", 1)[0].strip() if "=" in raw_line else ""
+            if "=" in raw_line:
+                key, value = raw_line.split("=", 1)
+                key = key.strip()
+            else:
+                key, value = "", ""
             if key == RUNNER_VNEXT_MODE_ENV:
                 raise RuntimeError("prepare_runtime_state_mode_binding_present")
-            if key in {
-                RUNNER_VNEXT_STATE_ROOT_ENV,
-                RUNNER_VNEXT_LEDGER_DB_ENV,
-                RUNNER_VNEXT_LEASE_DB_ENV,
-            }:
+            if key in managed_bindings:
+                if key in seen_managed:
+                    raise RuntimeError("prepare_runtime_state_env_binding_duplicate")
+                seen_managed.add(key)
+                if value != managed_bindings[key]:
+                    raise RuntimeError("prepare_runtime_state_env_binding_conflict")
                 continue
             preserved.append(raw_line)
-    bindings = [
-        f"{RUNNER_VNEXT_STATE_ROOT_ENV}={state_root}",
-        f"{RUNNER_VNEXT_LEDGER_DB_ENV}={ledger}",
-        f"{RUNNER_VNEXT_LEASE_DB_ENV}={lease}",
-    ]
+    bindings = [f"{key}={value}" for key, value in managed_bindings.items()]
     content = "\n".join([*preserved, *bindings]).strip() + "\n"
     fd, tmp_name = tempfile.mkstemp(
         prefix=f".{env_file.name}.", suffix=".tmp", dir=str(parent)
@@ -22053,7 +22071,6 @@ def runner_vnext_prepare_runtime_state_v1(
         f"schema={RUNNER_VNEXT_PREPARE_RUNTIME_STATE_SCHEMA}",
         "report_mode=prepare_runtime_state",
         "public_safe=true",
-        "mutation_performed=true",
         "runtime_state_prepared=false",
         "authoritative_stores_initialized=false",
         "env_file_bound=false",
@@ -22128,7 +22145,9 @@ def runner_vnext_prepare_runtime_state_v1(
     lease_ready = False
     reopen_ready = False
     env_file_bound = False
+    mutation_performed = False
     if not blockers:
+        previous_umask = os.umask(0o077)
         try:
             root = _runner_vnext_prepare_safe_root(RUNNER_VNEXT_PRIVATE_STATE_ROOT)
             ledger_path = RUNNER_VNEXT_PRIVATE_LEDGER_DB
@@ -22146,6 +22165,7 @@ def runner_vnext_prepare_runtime_state_v1(
             stores.close()
             ledger_path.chmod(0o600)
             lease_path.chmod(0o600)
+            mutation_performed = True
             ledger = _runner_vnext_prepare_safe_file(
                 ledger_path, root, "prepare_runtime_state_ledger_unsafe"
             )
@@ -22170,8 +22190,11 @@ def runner_vnext_prepare_runtime_state_v1(
             env_file_bound = True
         except (OSError, RuntimeError, RunnerVNextAuthorityError) as exc:
             blockers.append(str(exc) or "prepare_runtime_state_failed")
+        finally:
+            os.umask(previous_umask)
     status_lines.extend(
         [
+            f"mutation_performed={str(mutation_performed).lower()}",
             f"state_root_ready={str(state_root_ready).lower()}",
             f"ledger_file_backed={str(ledger_ready).lower()}",
             f"lease_file_backed={str(lease_ready).lower()}",
