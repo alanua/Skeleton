@@ -426,4 +426,3 @@ def test_registered_service_status_rejects_unregistered_service_before_provider(
         )
 
     assert provider_calls == []
-
