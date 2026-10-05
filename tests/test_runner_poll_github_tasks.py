@@ -28109,11 +28109,131 @@ def test_codegen_bookkeeping_home_preserves_bound_codex_home(tmp_path: Path) -> 
 
 def test_runner_vnext_maintenance_ids_are_registered_with_exact_protection() -> None:
     assert runner.RUNNER_VNEXT_READONLY_PREFLIGHT_TASK_ID in runner.RUNTIME_MAINTENANCE_TASK_IDS
+    assert (
+        runner.RUNNER_VNEXT_CURRENT_MAIN_PREFLIGHT_BOOTSTRAP_TASK_ID
+        in runner.RUNTIME_MAINTENANCE_TASK_IDS
+    )
     assert runner.RUNNER_VNEXT_EXTERNAL_ATTESTATION_TASK_ID in runner.RUNTIME_MAINTENANCE_TASK_IDS
     assert runner.RUNNER_VNEXT_EXACT_GREEN_CANARY_TASK_ID in runner.RUNTIME_MAINTENANCE_TASK_IDS
     assert runner.RUNNER_VNEXT_READONLY_PREFLIGHT_TASK_ID not in runner.PROTECTED_MAINTENANCE_TASK_IDS
+    assert (
+        runner.RUNNER_VNEXT_CURRENT_MAIN_PREFLIGHT_BOOTSTRAP_TASK_ID
+        not in runner.PROTECTED_MAINTENANCE_TASK_IDS
+    )
     assert runner.RUNNER_VNEXT_EXTERNAL_ATTESTATION_TASK_ID in runner.PROTECTED_MAINTENANCE_TASK_IDS
     assert runner.RUNNER_VNEXT_EXACT_GREEN_CANARY_TASK_ID in runner.PROTECTED_MAINTENANCE_TASK_IDS
+
+
+def _runner_vnext_current_main_bootstrap_body(expected_sha: str = HEAD_SHA) -> str:
+    return "\n".join(
+        (
+            f"Mode: {runner.RUNTIME_MAINTENANCE_MODE}",
+            f"Maintenance Task ID: {runner.RUNNER_VNEXT_CURRENT_MAIN_PREFLIGHT_BOOTSTRAP_TASK_ID}",
+            f"Repository: {runner.REPO}",
+            f"Expected Main SHA: {expected_sha}",
+            "Idempotency Key: runner-vnext-current-main-preflight-bootstrap-v1",
+        )
+    )
+
+
+def test_runner_vnext_current_main_preflight_registers_future_bootstrap_without_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    workdir = tmp_path / "checkout"
+    workdir.mkdir()
+    monkeypatch.delenv(runner.RUNNER_VNEXT_MODE_ENV, raising=False)
+    commands: list[list[str]] = []
+
+    def read_only_probe(command: list[str], cwd=None, timeout=None, **_kwargs):
+        commands.append(command)
+        if command[:4] == ["git", "rev-parse", "--verify", "HEAD"]:
+            assert cwd == workdir
+            return 0, HEAD_SHA + "\n"
+        if command[:2] == ["gh", "api"]:
+            assert cwd == workdir
+            return 0, HEAD_SHA + "\n"
+        raise AssertionError(command)
+
+    monkeypatch.setattr(runner, "run_command", read_only_probe)
+
+    report = runner.dispatch_runtime_maintenance_task(
+        runner.RUNNER_VNEXT_CURRENT_MAIN_PREFLIGHT_BOOTSTRAP_TASK_ID,
+        workdir,
+        _runner_vnext_current_main_bootstrap_body(),
+    )
+
+    assert runner.maintenance_report_status(report) == "DONE"
+    assert "exact_current_main=true" in report
+    assert "runner_vnext_mode=off" in report
+    assert "runner_vnext_mode_off=true" in report
+    assert "runtime_state_bootstrap_registered=true" in report
+    assert "runtime_state_bootstrap_executed=false" in report
+    assert "legacy_runner_touched=false" in report
+    assert "mutation_performed=false" in report
+    assert all(command[0] in {"git", "gh"} for command in commands)
+    assert not any(command[0] == "systemctl" for command in commands)
+
+
+def test_runner_vnext_current_main_preflight_blocks_stale_or_untruthful_main(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    workdir = tmp_path / "checkout"
+    workdir.mkdir()
+    monkeypatch.delenv(runner.RUNNER_VNEXT_MODE_ENV, raising=False)
+
+    def read_only_probe(command: list[str], cwd=None, timeout=None, **_kwargs):
+        if command[:4] == ["git", "rev-parse", "--verify", "HEAD"]:
+            return 0, "b" * 40 + "\n"
+        if command[:2] == ["gh", "api"]:
+            return 0, HEAD_SHA + "\n"
+        raise AssertionError(command)
+
+    monkeypatch.setattr(runner, "run_command", read_only_probe)
+
+    report = runner.runner_vnext_current_main_preflight_and_bootstrap(
+        workdir,
+        _runner_vnext_current_main_bootstrap_body(),
+    )
+
+    assert runner.maintenance_report_status(report) == "BLOCKED"
+    assert "exact_current_main=false" in report
+    assert "reason=current_main_preflight_not_exact_current_main" in report
+    assert "runtime_state_bootstrap_executed=false" in report
+    assert "mutation_performed=false" in report
+
+
+@pytest.mark.parametrize("configured_mode", ("shadow", "green_canary", "authoritative"))
+def test_runner_vnext_current_main_preflight_keeps_vnext_mode_off(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    configured_mode: str,
+) -> None:
+    workdir = tmp_path / "checkout"
+    workdir.mkdir()
+    monkeypatch.setenv(runner.RUNNER_VNEXT_MODE_ENV, configured_mode)
+    monkeypatch.setattr(
+        runner,
+        "run_command",
+        lambda command, cwd=None, timeout=None, **_kwargs: (
+            (0, HEAD_SHA + "\n")
+            if command[:4] == ["git", "rev-parse", "--verify", "HEAD"]
+            or command[:2] == ["gh", "api"]
+            else (_ for _ in ()).throw(AssertionError(command))
+        ),
+    )
+
+    report = runner.runner_vnext_current_main_preflight_and_bootstrap(
+        workdir,
+        _runner_vnext_current_main_bootstrap_body(),
+    )
+
+    assert runner.maintenance_report_status(report) == "BLOCKED"
+    assert f"runner_vnext_mode={configured_mode}" in report
+    assert "runner_vnext_mode_off=false" in report
+    assert "reason=current_main_preflight_vnext_mode_not_off" in report
+    assert "runtime_state_bootstrap_executed=false" in report
 
 
 def _runner_vnext_selector_body(

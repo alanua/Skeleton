@@ -287,9 +287,15 @@ RUNNER_VNEXT_CODEGEN_NODE_ID = "node:runner-vnext-codegen-runtime"
 RUNNER_VNEXT_CODEGEN_ROUTE_RANK = 0
 RUNNER_VNEXT_NODE_SNAPSHOT_MAX_TTL_SECONDS = 60.0
 RUNNER_VNEXT_READONLY_PREFLIGHT_TASK_ID = "runner_vnext_readonly_preflight"
+RUNNER_VNEXT_CURRENT_MAIN_PREFLIGHT_BOOTSTRAP_TASK_ID = (
+    "runner_vnext_current_main_preflight_and_bootstrap_v1"
+)
 RUNNER_VNEXT_EXTERNAL_ATTESTATION_TASK_ID = "runner_vnext_external_attestation"
 RUNNER_VNEXT_EXACT_GREEN_CANARY_TASK_ID = "runner_vnext_exact_green_canary"
 RUNNER_VNEXT_PREFLIGHT_SCHEMA = "skeleton.runner_vnext_readonly_preflight_receipt.v1"
+RUNNER_VNEXT_CURRENT_MAIN_BOOTSTRAP_SCHEMA = (
+    "skeleton.runner_vnext_current_main_preflight_bootstrap_receipt.v1"
+)
 RUNNER_VNEXT_EXTERNAL_ATTESTATION_PROFILE = "green_diagnostic_v1"
 RUNNER_VNEXT_EXTERNAL_ATTESTATION_FILENAME = "runner-vnext-external-attestation.json"
 RUNNER_LEGACY_SERVICE_UNIT = "skeleton-runner-poll.service"
@@ -515,6 +521,7 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_V1,
         RUNNER_CODEX_PRIMARY_HEALTH_PROBE,
         RUNNER_VNEXT_READONLY_PREFLIGHT_TASK_ID,
+        RUNNER_VNEXT_CURRENT_MAIN_PREFLIGHT_BOOTSTRAP_TASK_ID,
         RUNNER_VNEXT_EXTERNAL_ATTESTATION_TASK_ID,
         RUNNER_VNEXT_EXACT_GREEN_CANARY_TASK_ID,
         BUILD_AND_LOCAL_OTA_OPERATION,
@@ -884,6 +891,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "exit_code",
         "explicit_recovery_route",
         "executor_receipt_hash",
+        "exact_current_main",
         "file_on_main",
         "final_clean_state",
         "files_on_main_count",
@@ -917,6 +925,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "issue_worktree_id",
         "kernel_release",
         "ledger_events_written",
+        "legacy_runner_touched",
         "legacy_service_load_state",
         "legacy_timer_load_state",
         "listed_worktrees_count",
@@ -1046,7 +1055,11 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "row_count",
         "run_id",
         "runtime_state",
+        "runtime_state_bootstrap_executed",
+        "runtime_state_bootstrap_registered",
         "runner_root_exists",
+        "runner_vnext_mode",
+        "runner_vnext_mode_off",
         "runner_status",
         "scanned_entry_count",
         "selected_root_count",
@@ -1637,23 +1650,24 @@ def _validation_command_uses_pytest(args: list[str]) -> bool:
 
 
 def _validation_pytest_temp_parent(cwd_path: Path) -> Path:
-    candidates = [Path(tempfile.gettempdir()), Path("/tmp")]
+    candidates = [
+        Path(tempfile.gettempdir()),
+        Path("/tmp"),
+    ]
+    if isinstance(tempfile.tempdir, str) and tempfile.tempdir:
+        candidates.append(Path(tempfile.tempdir))
     for candidate in candidates:
         candidate_path = candidate.resolve(strict=False)
         if candidate_path.is_relative_to(cwd_path):
             continue
-        if candidate_path.is_dir():
+        if candidate_path.is_dir() and os.access(candidate_path, os.W_OK):
             return candidate_path
     raise FileNotFoundError("no external pytest validation temp parent is available")
 
 
 def _create_validation_pytest_temp_root(cwd: str | Path) -> Path:
     cwd_path = Path(cwd)
-    if not cwd_path.is_dir():
-        raise FileNotFoundError(
-            f"pytest validation cwd is not an existing directory: {cwd_path}"
-        )
-    temp_parent = _validation_pytest_temp_parent(cwd_path.resolve(strict=True))
+    temp_parent = _validation_pytest_temp_parent(cwd_path.resolve(strict=False))
     return Path(
         tempfile.mkdtemp(
             prefix=".runner-validation-pytest-",
@@ -1663,9 +1677,12 @@ def _create_validation_pytest_temp_root(cwd: str | Path) -> Path:
 
 
 def _remove_validation_pytest_temp_root(path: Path) -> None:
+    cleanup_parent_candidates = [Path(tempfile.gettempdir()), Path("/tmp")]
+    if isinstance(tempfile.tempdir, str) and tempfile.tempdir:
+        cleanup_parent_candidates.append(Path(tempfile.tempdir))
     allowed_parents = {
         candidate.resolve(strict=False)
-        for candidate in (Path(tempfile.gettempdir()), Path("/tmp"))
+        for candidate in cleanup_parent_candidates
         if candidate.is_dir()
     }
     try:
@@ -21869,6 +21886,141 @@ def runner_vnext_readonly_preflight(workdir: str | Path) -> str:
     )
 
 
+def _runner_vnext_current_main_bootstrap_metadata(
+    body: str,
+) -> tuple[dict[str, str] | None, str | None]:
+    allowed_fields = {
+        "Mode",
+        "Maintenance Task ID",
+        "Repository",
+        "Expected Main SHA",
+        "Idempotency Key",
+    }
+    values: dict[str, str] = {}
+    metadata = _metadata_before_task(body).strip()
+    if not metadata:
+        return None, "current_main_preflight_metadata_missing"
+    for raw_line in metadata.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        match = re.fullmatch(
+            r"(?P<label>[A-Za-z][A-Za-z0-9 ]{0,80}):\s*(?P<value>\S(?:.*\S)?)",
+            line,
+        )
+        if match is None:
+            return None, "current_main_preflight_noncanonical_metadata"
+        label = match.group("label")
+        if label not in allowed_fields:
+            return None, "current_main_preflight_unknown_metadata"
+        if label in values:
+            return None, "current_main_preflight_duplicate_metadata"
+        values[label] = match.group("value")
+    required = {"Mode", "Maintenance Task ID", "Repository", "Expected Main SHA"}
+    if not required <= set(values):
+        return None, "current_main_preflight_required_metadata_missing"
+    if values["Mode"] != RUNTIME_MAINTENANCE_MODE:
+        return None, "current_main_preflight_mode_mismatch"
+    if values["Maintenance Task ID"] != RUNNER_VNEXT_CURRENT_MAIN_PREFLIGHT_BOOTSTRAP_TASK_ID:
+        return None, "current_main_preflight_task_id_mismatch"
+    if values["Repository"] != REPO:
+        return None, "current_main_preflight_repository_mismatch"
+    if re.fullmatch(r"[0-9a-f]{40}", values["Expected Main SHA"]) is None:
+        return None, "current_main_preflight_expected_main_sha_invalid"
+    idempotency = values.get("Idempotency Key")
+    if idempotency is not None and re.fullmatch(
+        r"[A-Za-z0-9._:-]{1,128}", idempotency
+    ) is None:
+        return None, "current_main_preflight_idempotency_invalid"
+    return values, None
+
+
+def runner_vnext_current_main_preflight_and_bootstrap(
+    workdir: str | Path,
+    body: str,
+) -> str:
+    task_id = RUNNER_VNEXT_CURRENT_MAIN_PREFLIGHT_BOOTSTRAP_TASK_ID
+    status_lines = [
+        f"schema={RUNNER_VNEXT_CURRENT_MAIN_BOOTSTRAP_SCHEMA}",
+        "report_mode=read_only",
+        "public_safe=true",
+        "mutation_performed=false",
+        "runtime_state_bootstrap_registered=true",
+        "runtime_state_bootstrap_executed=false",
+        "legacy_runner_touched=false",
+    ]
+    metadata, metadata_reason = _runner_vnext_current_main_bootstrap_metadata(body)
+    expected_sha = metadata["Expected Main SHA"].lower() if metadata else "missing"
+    checkout_sha = "missing"
+    github_sha = "missing"
+    blockers: list[str] = []
+    if metadata_reason is not None or metadata is None:
+        blockers.append(metadata_reason or "current_main_preflight_metadata_invalid")
+    try:
+        code, output = run_command(
+            ["git", "rev-parse", "--verify", "HEAD"],
+            cwd=workdir,
+            timeout=15,
+        )
+        value = output.strip().lower()
+        if code != 0 or _HEAD_SHA_RE.fullmatch(value) is None:
+            raise RuntimeError("current_main_preflight_checkout_head_unavailable")
+        checkout_sha = value
+    except (OSError, RuntimeError):
+        blockers.append("current_main_preflight_checkout_head_unavailable")
+    try:
+        code, output = run_command(
+            ["gh", "api", f"repos/{REPO}/commits/main", "--jq", ".sha"],
+            cwd=workdir,
+            timeout=15,
+        )
+        value = output.strip().lower()
+        if code != 0 or _HEAD_SHA_RE.fullmatch(value) is None:
+            raise RuntimeError("current_main_preflight_github_main_unavailable")
+        github_sha = value
+    except (OSError, RuntimeError):
+        blockers.append("current_main_preflight_github_main_unavailable")
+
+    exact_current_main = (
+        expected_sha != "missing"
+        and checkout_sha == expected_sha
+        and github_sha == expected_sha
+    )
+    status_lines.extend(
+        [
+            f"expected_main_sha={expected_sha}",
+            f"checkout_head_sha={checkout_sha}",
+            f"github_main_sha={github_sha}",
+            f"exact_current_main={str(exact_current_main).lower()}",
+        ]
+    )
+    if not exact_current_main:
+        blockers.append("current_main_preflight_not_exact_current_main")
+
+    configured_mode = os.environ.get(RUNNER_VNEXT_MODE_ENV)
+    normalized_mode = (configured_mode or RUNNER_MODE_OFF).strip().lower()
+    mode_off = normalized_mode == RUNNER_MODE_OFF
+    status_lines.extend(
+        [
+            f"runner_vnext_mode={normalized_mode}",
+            f"runner_vnext_mode_off={str(mode_off).lower()}",
+        ]
+    )
+    if normalized_mode not in VNEXT_MODES:
+        blockers.append("current_main_preflight_vnext_mode_invalid")
+    elif not mode_off:
+        blockers.append("current_main_preflight_vnext_mode_not_off")
+
+    if blockers:
+        status_lines.append(f"reason={blockers[0]}")
+    return _maintenance_report(
+        "DONE" if not blockers else "BLOCKED",
+        task_id,
+        status_lines,
+        "met" if not blockers else "not_met",
+    )
+
+
 def _runner_vnext_maintenance_selectors(
     body: str, expected_task_id: str
 ) -> tuple[str, int, str, str, str]:
@@ -22021,6 +22173,8 @@ def dispatch_runtime_maintenance_task(
     try:
         if task_id == RUNNER_VNEXT_READONLY_PREFLIGHT_TASK_ID:
             return runner_vnext_readonly_preflight(workdir)
+        if task_id == RUNNER_VNEXT_CURRENT_MAIN_PREFLIGHT_BOOTSTRAP_TASK_ID:
+            return runner_vnext_current_main_preflight_and_bootstrap(workdir, body)
         if task_id == RUNNER_VNEXT_EXTERNAL_ATTESTATION_TASK_ID:
             return runner_vnext_external_attestation(body)
         if task_id == RUNNER_VNEXT_EXACT_GREEN_CANARY_TASK_ID:
