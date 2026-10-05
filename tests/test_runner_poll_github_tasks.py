@@ -28243,6 +28243,49 @@ def test_runner_vnext_prepare_runtime_state_blocks_stale_or_untruthful_main(
     assert not state_root.exists()
 
 
+def test_runner_vnext_prepare_runtime_state_reports_root_creation_mutation_on_store_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    workdir = tmp_path / "checkout"
+    workdir.mkdir()
+    state_root = _patch_runner_vnext_prepare_paths(monkeypatch, tmp_path)
+    monkeypatch.delenv(runner.RUNNER_VNEXT_MODE_ENV, raising=False)
+    monkeypatch.setattr(
+        runner,
+        "run_command",
+        lambda command, cwd=None, timeout=None, **_kwargs: (
+            (0, HEAD_SHA + "\n")
+            if command[:4] == ["git", "rev-parse", "--verify", "HEAD"]
+            or command[:2] == ["gh", "api"]
+            else (_ for _ in ()).throw(AssertionError(command))
+        ),
+    )
+
+    def fail_after_root_creation(*_args, **_kwargs):
+        assert state_root.is_dir()
+        raise RuntimeError("prepare_runtime_state_forced_store_failure")
+
+    monkeypatch.setattr(runner, "build_authoritative_stores", fail_after_root_creation)
+
+    report = runner.runner_vnext_prepare_runtime_state_v1(
+        workdir,
+        _runner_vnext_prepare_runtime_state_body(),
+    )
+
+    assert runner.maintenance_report_status(report) == "BLOCKED"
+    assert "reason=prepare_runtime_state_forced_store_failure" in report
+    assert "runtime_state_prepared=false" in report
+    assert "authoritative_stores_initialized=false" in report
+    assert "env_file_bound=false" in report
+    assert "systemd_mutation_performed=false" in report
+    assert "legacy_runner_touched=false" in report
+    assert "mutation_performed=true" in report
+    assert state_root.is_dir()
+    assert state_root.stat().st_mode & 0o777 == 0o700
+    assert not (tmp_path / "skeleton-runner.env").exists()
+
+
 @pytest.mark.parametrize("configured_mode", ("shadow", "green_canary", "authoritative"))
 def test_runner_vnext_prepare_runtime_state_requires_vnext_mode_off(
     monkeypatch: pytest.MonkeyPatch,

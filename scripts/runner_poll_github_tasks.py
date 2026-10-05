@@ -21947,7 +21947,7 @@ def _runner_vnext_prepare_runtime_state_metadata(
     return values, None
 
 
-def _runner_vnext_prepare_safe_root(root: Path) -> Path:
+def _runner_vnext_prepare_safe_root(root: Path) -> tuple[Path, bool]:
     existed = os.path.lexists(root)
     if existed:
         info = root.lstat()
@@ -21969,7 +21969,7 @@ def _runner_vnext_prepare_safe_root(root: Path) -> Path:
         or stat.S_IMODE(info.st_mode) != 0o700
     ):
         raise RuntimeError("prepare_runtime_state_root_unsafe")
-    return resolved
+    return resolved, not existed
 
 
 def _runner_vnext_prepare_safe_file(path: Path, root: Path, reason: str) -> Path:
@@ -22149,7 +22149,10 @@ def runner_vnext_prepare_runtime_state_v1(
     if not blockers:
         previous_umask = os.umask(0o077)
         try:
-            root = _runner_vnext_prepare_safe_root(RUNNER_VNEXT_PRIVATE_STATE_ROOT)
+            root, root_created = _runner_vnext_prepare_safe_root(
+                RUNNER_VNEXT_PRIVATE_STATE_ROOT
+            )
+            mutation_performed = root_created
             ledger_path = RUNNER_VNEXT_PRIVATE_LEDGER_DB
             lease_path = RUNNER_VNEXT_PRIVATE_LEASE_DB
             if ledger_path == lease_path:

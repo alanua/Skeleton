@@ -103,7 +103,8 @@ vNext mode, non-off vNext mode, unsafe state ownership/mode, colliding stores,
 failed reopen verification, attempted mode binding in the env file, duplicate
 managed env binding, or conflicting managed env binding fails closed. The public
 `mutation_performed` receipt field is false for read-only preflight blockers and
-true only after the task reaches state/store mutation.
+true from the first actual filesystem mutation, including creation of the fixed
+runtime state root before store initialization completes.
 
 `runner_codex_primary_health_probe` is the protected, narrow PRIMARY-CODEX
 health probe. It requires exact maintenance-mode metadata, `Repository:
