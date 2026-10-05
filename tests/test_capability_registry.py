@@ -7,6 +7,7 @@ from core.capability_checker import CapabilityChecker
 
 ROOT = Path(__file__).resolve().parents[1]
 REGISTRY_PATH = ROOT / "CAPABILITY_REGISTRY.yaml"
+RUNTIME_TRUTH_DOC_PATH = ROOT / "docs" / "CAPABILITY_RUNTIME_TRUTH.md"
 
 
 def load_registry() -> dict:
@@ -62,6 +63,74 @@ def test_registry_has_stage1_dry_run_capabilities() -> None:
     assert memory_manager["status"] == "stage1_dry_run"
     assert memory_manager["tested"] is True
     assert memory_manager["live_runtime_execution"] is False
+
+
+def test_registry_has_current_truth_awareness_and_intake_primitives() -> None:
+    capabilities = load_registry()["capabilities"]
+
+    expected = {
+        "capability_runtime_truth": {
+            "module": "core/capability_runtime_truth.py",
+            "entry": "reconcile_capability_runtime_truth",
+        },
+        "awareness_context": {
+            "module": "core/awareness_context.py",
+            "entry": "assemble_awareness_context",
+        },
+        "awareness_hydrator": {
+            "module": "core/awareness_hydrator.py",
+            "entry": "hydrate_awareness_context",
+        },
+        "intake_lifecycle": {
+            "module": "core/intake_lifecycle.py",
+            "entry": "IntakeLifecycleStore",
+        },
+        "knowledge_intake_review_queue": {
+            "module": "projects/skeleton/REVIEW_QUEUE.yaml",
+        },
+    }
+
+    for capability_id, expectation in expected.items():
+        capability = capabilities[capability_id]
+        assert capability["status"] == "available"
+        assert capability["module"] == expectation["module"]
+        assert capability["tested"] is True
+        assert capability["live_runtime_execution"] is False
+        if "entry" in expectation:
+            assert capability["entry"] == expectation["entry"]
+
+
+def test_registry_does_not_declare_runtime_truth_or_freshness() -> None:
+    forbidden_static_runtime_fields = {
+        "effective_status",
+        "freshness",
+        "runtime_bound",
+        "source_runtime_parity",
+        "runtime_evidence",
+        "evidence_observed_at",
+        "evidence_kinds",
+        "drift",
+    }
+
+    for capability_id, capability in load_registry()["capabilities"].items():
+        leaked = forbidden_static_runtime_fields & set(capability)
+        assert not leaked, f"{capability_id}: {sorted(leaked)}"
+        assert capability.get("status") != "LIVE"
+
+
+def test_capability_runtime_truth_doc_preserves_boundary() -> None:
+    doc = " ".join(RUNTIME_TRUTH_DOC_PATH.read_text(encoding="utf-8").split())
+
+    for phrase in [
+        "CAPABILITY_REGISTRY.yaml is a static source declaration",
+        "does not declare LIVE",
+        "does not declare FRESH",
+        "Only typed runtime evidence can produce LIVE",
+        "Only typed runtime evidence can produce FRESH",
+        "runtime_probe_performed: false",
+        "runtime_mutation_performed: false",
+    ]:
+        assert phrase in doc
 
 
 def test_registry_has_planned_future_capabilities() -> None:

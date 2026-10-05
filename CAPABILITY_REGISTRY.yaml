@@ -354,6 +354,47 @@ capabilities:
     added: "2026-06-29"
     description: Local-only read-only synthetic MemPalace pilot behind MemoryGateway for bounded retrieval, attribution, deletion, rebuild, staleness, namespace isolation, and aggregate resource-cost measurement without private ingestion or live services.
 
+  capability_runtime_truth:
+    status: available
+    module: core/capability_runtime_truth.py
+    entry: reconcile_capability_runtime_truth
+    stage: static_registry_runtime_evidence_reconciler
+    live_runtime_execution: false
+    requires:
+      - schemas/capability_runtime_truth.schema.json
+      - docs/CAPABILITY_RUNTIME_TRUTH.md
+    tested: true
+    added: "2026-10-05"
+    description: Public-safe read model that reconciles static registry declarations with typed runtime evidence; LIVE and freshness are derived only from supplied runtime evidence, never from CAPABILITY_REGISTRY declarations alone.
+
+  awareness_context:
+    status: available
+    module: core/awareness_context.py
+    entry: assemble_awareness_context
+    stage: ephemeral_awareness_read_model
+    live_runtime_execution: false
+    requires:
+      - schemas/awareness_context.schema.json
+      - core/capability_runtime_truth.py
+      - core/intake_lifecycle.py
+    tested: true
+    added: "2026-10-05"
+    description: Deterministic ephemeral awareness packet assembler for memory, pending work, capability truth, and task controls with public-safe receipts and no canonical or runtime mutation.
+
+  awareness_hydrator:
+    status: available
+    module: core/awareness_hydrator.py
+    entry: hydrate_awareness_context
+    stage: ephemeral_awareness_read_model
+    live_runtime_execution: false
+    requires:
+      - core/awareness_context.py
+      - core/capability_runtime_truth.py
+      - core/task_memory_context.py
+    tested: true
+    added: "2026-10-05"
+    description: Relevance-filtered awareness hydration from injected read models and memory context providers without mutating pending work, capability truth, runtime state, or canonical stores.
+
   hermes_memory_gateway:
     status: stage1_dry_run
     module: core/hermes_memory_adapter.py
@@ -369,6 +410,27 @@ capabilities:
     tested: true
     added: "2026-06-27"
     description: Validated Hermes memory task entrypoint bound to one explicit namespace/project_id pair, routed only through MemoryGateway, with canonical writes disabled and operator approval mandatory.
+
+  intake_lifecycle:
+    status: available
+    module: core/intake_lifecycle.py
+    entry: IntakeLifecycleStore
+    stage: shared_pending_intake_lifecycle
+    live_runtime_execution: false
+    tested: true
+    added: "2026-10-05"
+    description: Local lifecycle state primitive for stable intake identity, explicit blocker metadata, branch-safe pending work, orphan recovery, and public-safe shared pending work summaries.
+
+  knowledge_intake_review_queue:
+    status: available
+    module: projects/skeleton/REVIEW_QUEUE.yaml
+    stage: public_safe_knowledge_intake_not_canon
+    live_runtime_execution: false
+    requires:
+      - docs/KNOWLEDGE_INTAKE.md
+    tested: true
+    added: "2026-10-05"
+    description: Public-safe knowledge intake queue for review/backlog/rejected entries; entries are not canon, do not create live work, and do not activate runtime behavior without explicit operator approval.
 
   codex_runtime_preflight:
     status: planned
