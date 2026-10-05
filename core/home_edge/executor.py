@@ -27,6 +27,9 @@ DEFAULT_MAX_OUTPUT_BYTES = 64_000
 DEFAULT_MAX_STDIN_BYTES = 256_000
 DEFAULT_MAX_TIMEOUT_SECONDS = 900
 DEFAULT_FRESHNESS_SECONDS = 300
+# Replay/idempotency state is a short-lived safety cache, not the audit history.
+# Keep it long enough to cover the longest bounded command plus retry grace.
+DEFAULT_REPLAY_STATE_RETENTION_SECONDS = DEFAULT_MAX_TIMEOUT_SECONDS + DEFAULT_FRESHNESS_SECONDS
 DEFAULT_AUDIT_LOG = Path.home() / ".local/state/skeleton/home_edge_exec/audit.jsonl"
 DEFAULT_IDEMPOTENCY_CACHE = Path.home() / ".local/state/skeleton/home_edge_exec/idempotency.json"
 DEFAULT_CANCEL_DIR = Path.home() / ".local/state/skeleton/home_edge_exec/cancel"
@@ -331,6 +334,7 @@ class HomeEdgeExecEngine:
         while True:
             pending_same_request = False
             with _locked_json_state(self.state_file) as state:
+                self._prune_replay_state(state)
                 pending_same_request = self._matching_inflight_idempotent_request(parsed, state)
                 if not pending_same_request:
                     replay = self._cached_receipt(parsed, state)
@@ -423,6 +427,37 @@ class HomeEdgeExecEngine:
         if not hmac.compare_digest(expected, request.signature):
             raise HomeEdgeExecError("request signature mismatch")
 
+    def _prune_replay_state(self, state: dict[str, Any]) -> None:
+        cutoff = datetime.now(UTC).timestamp() - DEFAULT_REPLAY_STATE_RETENTION_SECONDS
+        for section_name in ("idempotency", "nonces"):
+            section = _mutable_state_section(state, section_name)
+            expired: list[str] = []
+            for key, record in section.items():
+                if not isinstance(record, dict):
+                    expired.append(key)
+                    continue
+                receipt = record.get("receipt")
+                stamp = ""
+                if isinstance(receipt, dict):
+                    stamp = str(receipt.get("finished_at") or receipt.get("started_at") or "")
+                else:
+                    stamp = str(record.get("reserved_at") or "")
+                if not stamp:
+                    # Legacy in-flight reservations have no timestamp. Keep them
+                    # fail-closed rather than risking a duplicate physical action.
+                    continue
+                try:
+                    parsed = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+                    if parsed.tzinfo is None:
+                        parsed = parsed.replace(tzinfo=UTC)
+                    if parsed.astimezone(UTC).timestamp() < cutoff:
+                        expired.append(key)
+                except ValueError:
+                    # Malformed replay metadata is not authoritative audit data.
+                    expired.append(key)
+            for key in expired:
+                section.pop(key, None)
+
     def _matching_inflight_idempotent_request(
         self,
         request: HomeEdgeExecRequest,
@@ -461,11 +496,17 @@ class HomeEdgeExecEngine:
     def _reserve_request(self, request: HomeEdgeExecRequest, state: dict[str, Any]) -> None:
         digest = _payload_digest(request)
         nonces = _mutable_state_section(state, "nonces")
-        nonces[request.nonce or ""] = {"payload_digest": digest, "idempotency_key": request.idempotency_key}
+        reserved_at = datetime.now(UTC).isoformat()
+        nonces[request.nonce or ""] = {
+            "payload_digest": digest,
+            "idempotency_key": request.idempotency_key,
+            "reserved_at": reserved_at,
+        }
         if request.idempotency_key:
             _mutable_state_section(state, "idempotency")[request.idempotency_key] = {
                 "payload_digest": digest,
                 "nonce": request.nonce,
+                "reserved_at": reserved_at,
             }
 
     def _store_receipt(self, request: HomeEdgeExecRequest, receipt: HomeEdgeExecReceipt, state: dict[str, Any]) -> None:
