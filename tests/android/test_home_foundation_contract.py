@@ -160,3 +160,30 @@ def test_current_webview_and_native_bridge_are_intentional() -> None:
     assert "WebView(ctx).apply" in main
     assert "@JavascriptInterface" in main
     assert "addJavascriptInterface" in main
+
+
+def test_home_media_control_uses_explicit_endpoint_routing() -> None:
+    main = read("app/src/main/java/com/skeleton/home/MainActivity.kt")
+
+    assert "private data class MediaEndpointUi" in main
+    assert 'MediaEndpointUi("home_edge_tv","TV","home_edge_tv"' in main
+    assert 'MediaEndpointUi("samsung_tv","Samsung","samsung"' in main
+    assert 'api.get("/api/media/endpoints")' in main
+    assert 'private fun endpointMutation(endpointId:String' in main
+    assert 'JSONObject().put("endpoint_id",endpointId)' in main
+    assert 'private fun endpointPath(endpointId:String,suffix:String):String="/api/media/endpoints/${Uri.encode(endpointId)}$suffix"' in main
+    assert "OutputTargetSelector(endpointId,endpoints,onEndpoint)" in main
+    assert 'api.put("/api/media/target"' not in main
+    assert 'api.get("/api/media/target"' not in main
+    assert '"/api/samsung/media/' not in main
+    assert 'api.post("/api/play"' not in main
+    assert 'api.post("/api/volume"' not in main
+    assert 'api.post("/api/tv/play"' not in main
+
+
+def test_home_android_validation_does_not_autostart_tablet_video() -> None:
+    main = read("app/src/main/java/com/skeleton/home/MainActivity.kt")
+
+    assert "LaunchedEffect(api.server,selectionRevision" in main
+    assert 'api.post(endpointPath(endpoint.endpointId,"/play"),o)' in main
+    assert not re.search(r"LaunchedEffect\([^)]*\)\s*\{[^{}]*api\.post\(endpointPath\([^)]*\"/play\"", main)
