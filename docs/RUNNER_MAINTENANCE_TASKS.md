@@ -83,7 +83,8 @@ Expected Main SHA: <current exact 40-hex main commit>
 
 It verifies that the caller checkout `HEAD`, GitHub `main`, and `Expected Main
 SHA` are the same exact commit, and that `SKELETON_RUNNER_VNEXT_MODE` is unset,
-`off`, or `shadow`. After those public-safe checks pass, it handles the fixed
+`off`, or `shadow`; `off` and `shadow` are the only preparation modes. After
+those public-safe checks pass, it handles the fixed
 host boundary only through bounded code-owned noninteractive sudo: the runtime
 root is created, if missing, only after the exact fixed parent already exists
 as a root-owned directory that is not group/world writable, with the exact
@@ -99,7 +100,10 @@ behavior, and binds only `SKELETON_RUNNER_VNEXT_STATE_ROOT`,
 `SKELETON_RUNNER_VNEXT_LEDGER_DB`, and `SKELETON_RUNNER_VNEXT_LEASE_DB`.
 Unsafe pre-existing runtime roots are not repaired in place. Existing managed
 env bindings must be unique and match the fixed paths; duplicate or conflicting
-managed bindings fail closed.
+managed bindings fail closed. One existing
+`SKELETON_RUNNER_VNEXT_MODE` env-file binding is preserved unchanged only when
+it exactly equals the already resolved current preparation mode; duplicate,
+mismatched, `green_canary`, or `authoritative` mode bindings fail closed.
 
 The task must not write `SKELETON_RUNNER_VNEXT_MODE`, write attestation files,
 start/stop/enable/disable systemd units, touch the legacy Runner service/timer,
@@ -109,8 +113,8 @@ booleans, env-file binding status, systemd-mutation falsehood, legacy-touch
 falsehood, and stable reason tokens. Any stale checkout, GitHub-main mismatch,
 invalid metadata, invalid vNext mode, active execution vNext mode
 (`green_canary` or `authoritative`), unsafe state ownership/mode, colliding stores,
-failed reopen verification, attempted mode binding in the env file, duplicate
-managed env binding, or conflicting managed env binding fails closed. The public
+failed reopen verification, duplicate or mismatched mode binding in the env file,
+duplicate managed env binding, or conflicting managed env binding fails closed. The public
 `mutation_performed` receipt field is false for read-only preflight blockers and
 true from the first actual filesystem mutation, including creation of the fixed
 runtime state root before store initialization completes.
