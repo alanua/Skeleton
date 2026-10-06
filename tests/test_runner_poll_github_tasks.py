@@ -28355,6 +28355,293 @@ def _patch_runner_vnext_prepare_paths(monkeypatch: pytest.MonkeyPatch, tmp_path:
     return state_root
 
 
+def _patch_runner_vnext_prepare_fixed_paths(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> Path:
+    state_root = tmp_path / "var/lib/skeleton/runner-vnext"
+    env_file = tmp_path / "etc/skeleton-runner.env"
+    monkeypatch.setattr(runner, "RUNNER_VNEXT_FIXED_PRIVATE_STATE_ROOT", state_root)
+    monkeypatch.setattr(runner, "RUNNER_VNEXT_FIXED_PRIVATE_ENV_FILE", env_file)
+    monkeypatch.setattr(
+        runner,
+        "RUNNER_VNEXT_FIXED_PRIVATE_LEDGER_DB",
+        state_root / "operation-ledger.sqlite3",
+    )
+    monkeypatch.setattr(
+        runner,
+        "RUNNER_VNEXT_FIXED_PRIVATE_LEASE_DB",
+        state_root / "lane-leases.sqlite3",
+    )
+    monkeypatch.setattr(runner, "RUNNER_VNEXT_PRIVATE_STATE_ROOT", state_root)
+    monkeypatch.setattr(
+        runner, "RUNNER_VNEXT_PRIVATE_LEDGER_DB", state_root / "operation-ledger.sqlite3"
+    )
+    monkeypatch.setattr(
+        runner, "RUNNER_VNEXT_PRIVATE_LEASE_DB", state_root / "lane-leases.sqlite3"
+    )
+    monkeypatch.setattr(runner, "RUNNER_VNEXT_PRIVATE_ENV_FILE", env_file)
+    return state_root
+
+
+def test_runner_vnext_prepare_fixed_root_uses_bounded_sudo_install(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    state_root = _patch_runner_vnext_prepare_fixed_paths(monkeypatch, tmp_path)
+    state_root.parent.mkdir(parents=True)
+    commands: list[list[str]] = []
+    validated_parents: list[Path] = []
+
+    def validate_parent(parent: Path, *, reason: str) -> None:
+        validated_parents.append(parent)
+        assert parent == state_root.parent
+        assert reason == "prepare_runtime_state_root_parent_unsafe"
+
+    def fake_run_command(command: list[str], timeout=None, **_kwargs):
+        commands.append(command)
+        assert timeout == 30
+        assert command[:4] == ["sudo", "-n", "install", "-d"]
+        assert command[-1] == str(state_root)
+        assert "-m" in command
+        state_root.mkdir(mode=0o700, parents=True)
+        state_root.chmod(0o700)
+        return 0, ""
+
+    monkeypatch.setattr(
+        runner,
+        "_runner_vnext_prepare_validate_fixed_privileged_parent",
+        validate_parent,
+    )
+    monkeypatch.setattr(runner, "run_command", fake_run_command)
+
+    resolved, created = runner._runner_vnext_prepare_safe_root(state_root)
+
+    assert resolved == state_root.resolve()
+    assert created is True
+    assert validated_parents == [state_root.parent]
+    assert commands == [
+        [
+            "sudo",
+            "-n",
+            "install",
+            "-d",
+            "-o",
+            str(os.geteuid()),
+            "-g",
+            str(os.getegid()),
+            "-m",
+            "0700",
+            str(state_root),
+        ]
+    ]
+
+
+def test_runner_vnext_prepare_fixed_root_prevalidates_exact_parent_before_sudo(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    state_root = _patch_runner_vnext_prepare_fixed_paths(monkeypatch, tmp_path)
+
+    def fail_if_sudo_runs(command: list[str], **_kwargs):
+        raise AssertionError(command)
+
+    monkeypatch.setattr(runner, "run_command", fail_if_sudo_runs)
+
+    with pytest.raises(RuntimeError, match="prepare_runtime_state_root_parent_unsafe"):
+        runner._runner_vnext_prepare_safe_root(state_root)
+
+    assert not state_root.exists()
+
+
+def test_runner_vnext_prepare_fixed_root_rejects_unprivileged_parent_before_sudo(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    state_root = _patch_runner_vnext_prepare_fixed_paths(monkeypatch, tmp_path)
+    state_root.parent.mkdir(parents=True)
+
+    def fail_if_sudo_runs(command: list[str], **_kwargs):
+        raise AssertionError(command)
+
+    monkeypatch.setattr(runner, "run_command", fail_if_sudo_runs)
+
+    with pytest.raises(RuntimeError, match="prepare_runtime_state_root_parent_unsafe"):
+        runner._runner_vnext_prepare_safe_root(state_root)
+
+    assert not state_root.exists()
+
+
+def test_runner_vnext_prepare_fixed_root_reports_mutation_after_sudo_creation_failure_later(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    workdir = tmp_path / "checkout"
+    workdir.mkdir()
+    state_root = _patch_runner_vnext_prepare_fixed_paths(monkeypatch, tmp_path)
+    state_root.parent.mkdir(parents=True)
+    monkeypatch.delenv(runner.RUNNER_VNEXT_MODE_ENV, raising=False)
+    monkeypatch.setattr(
+        runner,
+        "_runner_vnext_prepare_validate_fixed_privileged_parent",
+        lambda parent, *, reason: None,
+    )
+
+    def fake_run_command(command: list[str], cwd=None, timeout=None, **_kwargs):
+        if command[:4] == ["git", "rev-parse", "--verify", "HEAD"]:
+            return 0, HEAD_SHA + "\n"
+        if command[:2] == ["gh", "api"]:
+            return 0, HEAD_SHA + "\n"
+        if command[:4] == ["sudo", "-n", "install", "-d"]:
+            state_root.mkdir(mode=0o700)
+            state_root.chmod(0o755)
+            return 0, ""
+        raise AssertionError(command)
+
+    monkeypatch.setattr(runner, "run_command", fake_run_command)
+
+    report = runner.runner_vnext_prepare_runtime_state_v1(
+        workdir,
+        _runner_vnext_prepare_runtime_state_body(),
+    )
+
+    assert runner.maintenance_report_status(report) == "BLOCKED"
+    assert "reason=prepare_runtime_state_root_unsafe" in report
+    assert "runtime_state_prepared=false" in report
+    assert "mutation_performed=true" in report
+    assert state_root.stat().st_mode & 0o777 == 0o755
+
+
+def test_runner_vnext_prepare_fixed_env_sudo_requires_exact_fixed_store_arguments(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    state_root = _patch_runner_vnext_prepare_fixed_paths(monkeypatch, tmp_path)
+    env_file = tmp_path / "etc/skeleton-runner.env"
+    wrong_ledger = state_root / "wrong-ledger.sqlite3"
+
+    def fail_if_sudo_runs(command: list[str], **_kwargs):
+        raise AssertionError(command)
+
+    monkeypatch.setattr(runner, "run_command", fail_if_sudo_runs)
+
+    with pytest.raises(RuntimeError, match="prepare_runtime_state_ledger_not_fixed"):
+        runner._runner_vnext_prepare_env_file(
+            env_file=env_file,
+            state_root=state_root,
+            ledger=wrong_ledger,
+            lease=state_root / "lane-leases.sqlite3",
+        )
+
+    assert not env_file.exists()
+
+
+def test_runner_vnext_prepare_fixed_env_sudo_prevalidates_parent_before_sudo(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    state_root = _patch_runner_vnext_prepare_fixed_paths(monkeypatch, tmp_path)
+    state_root.mkdir(parents=True)
+    env_file = tmp_path / "etc/skeleton-runner.env"
+    env_file.parent.mkdir(parents=True)
+
+    def fail_if_sudo_runs(command: list[str], **_kwargs):
+        raise AssertionError(command)
+
+    monkeypatch.setattr(runner, "run_command", fail_if_sudo_runs)
+
+    with pytest.raises(RuntimeError, match="prepare_runtime_state_env_parent_unsafe"):
+        runner._runner_vnext_prepare_env_file(
+            env_file=env_file,
+            state_root=state_root,
+            ledger=state_root / "operation-ledger.sqlite3",
+            lease=state_root / "lane-leases.sqlite3",
+        )
+
+    assert not env_file.exists()
+
+
+def test_runner_vnext_prepare_fixed_boundary_keeps_store_creation_unprivileged(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    workdir = tmp_path / "checkout"
+    workdir.mkdir()
+    state_root = _patch_runner_vnext_prepare_fixed_paths(monkeypatch, tmp_path)
+    state_root.parent.mkdir(parents=True)
+    env_file = tmp_path / "etc/skeleton-runner.env"
+    env_file.parent.mkdir(parents=True)
+    commands: list[list[str]] = []
+    validated_parents: list[Path] = []
+
+    def validate_parent(parent: Path, *, reason: str) -> None:
+        validated_parents.append(parent)
+        assert parent in {state_root.parent, env_file.parent}
+        assert reason in {
+            "prepare_runtime_state_root_parent_unsafe",
+            "prepare_runtime_state_env_parent_unsafe",
+        }
+
+    def fake_run_command(command: list[str], cwd=None, timeout=None, **_kwargs):
+        commands.append(command)
+        if command[:4] == ["git", "rev-parse", "--verify", "HEAD"]:
+            return 0, HEAD_SHA + "\n"
+        if command[:2] == ["gh", "api"]:
+            return 0, HEAD_SHA + "\n"
+        if command[:4] == ["sudo", "-n", "install", "-d"]:
+            assert command[-1] == str(state_root)
+            state_root.mkdir(mode=0o700, parents=True)
+            state_root.chmod(0o700)
+            return 0, ""
+        if command[:3] == ["sudo", "-n", runner.sys.executable]:
+            assert command[6] == str(env_file)
+            env_file.write_text(
+                "\n".join(
+                    (
+                        f"{runner.RUNNER_VNEXT_STATE_ROOT_ENV}={state_root}",
+                        f"{runner.RUNNER_VNEXT_LEDGER_DB_ENV}={state_root / 'operation-ledger.sqlite3'}",
+                        f"{runner.RUNNER_VNEXT_LEASE_DB_ENV}={state_root / 'lane-leases.sqlite3'}",
+                    )
+                )
+                + "\n"
+            )
+            env_file.chmod(0o600)
+            return 0, ""
+        raise AssertionError(command)
+
+    store_euid: list[int] = []
+    original_build_authoritative_stores = runner.build_authoritative_stores
+
+    def recording_build_authoritative_stores(*args, **kwargs):
+        store_euid.append(os.geteuid())
+        return original_build_authoritative_stores(*args, **kwargs)
+
+    monkeypatch.setattr(runner, "run_command", fake_run_command)
+    monkeypatch.setattr(
+        runner,
+        "_runner_vnext_prepare_validate_fixed_privileged_parent",
+        validate_parent,
+    )
+    monkeypatch.setattr(
+        runner, "build_authoritative_stores", recording_build_authoritative_stores
+    )
+
+    report = runner.runner_vnext_prepare_runtime_state_v1(
+        workdir,
+        _runner_vnext_prepare_runtime_state_body(),
+    )
+
+    assert runner.maintenance_report_status(report) == "DONE"
+    assert store_euid == [os.geteuid()]
+    assert (state_root / "operation-ledger.sqlite3").is_file()
+    assert (state_root / "lane-leases.sqlite3").is_file()
+    privileged_commands = [command for command in commands if command[:2] == ["sudo", "-n"]]
+    assert len(privileged_commands) == 2
+    assert validated_parents == [state_root.parent, env_file.parent]
+    assert all("systemctl" not in command for command in privileged_commands)
+    assert any(command[:4] == ["sudo", "-n", "install", "-d"] for command in commands)
+    assert any(command[:3] == ["sudo", "-n", runner.sys.executable] for command in commands)
+
+
 def test_runner_vnext_prepare_runtime_state_initializes_fixed_private_state(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

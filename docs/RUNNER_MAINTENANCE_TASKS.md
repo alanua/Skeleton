@@ -83,15 +83,23 @@ Expected Main SHA: <current exact 40-hex main commit>
 
 It verifies that the caller checkout `HEAD`, GitHub `main`, and `Expected Main
 SHA` are the same exact commit, and that `SKELETON_RUNNER_VNEXT_MODE` is unset,
-`off`, or `shadow`. After those public-safe checks pass, it creates only the
-fixed private runtime root `/var/lib/skeleton/runner-vnext` under restored `umask 077`,
-initializes distinct authoritative ledger and lease SQLite stores through
+`off`, or `shadow`. After those public-safe checks pass, it handles the fixed
+host boundary only through bounded code-owned noninteractive sudo: the runtime
+root is created, if missing, only after the exact fixed parent already exists
+as a root-owned directory that is not group/world writable, with the exact
+`sudo -n install -d` argv for
+`/var/lib/skeleton/runner-vnext`. The fixed `/etc/skeleton-runner.env`
+binding is rewritten only after the state root, ledger, and lease arguments are
+the exact code-owned fixed paths and `/etc` passes the same root-owned parent
+safety check, by a bounded sudo child that can read and write that one file.
+The authoritative ledger and lease SQLite stores themselves remain
+unprivileged: the Runner initializes distinct stores through
 `build_authoritative_stores`, verifies owner-only modes and read-only reopen
 behavior, and binds only `SKELETON_RUNNER_VNEXT_STATE_ROOT`,
-`SKELETON_RUNNER_VNEXT_LEDGER_DB`, and `SKELETON_RUNNER_VNEXT_LEASE_DB` in
-`/etc/skeleton-runner.env`. Unsafe pre-existing runtime roots are not repaired
-in place. Existing managed env bindings must be unique and match the fixed
-paths; duplicate or conflicting managed bindings fail closed.
+`SKELETON_RUNNER_VNEXT_LEDGER_DB`, and `SKELETON_RUNNER_VNEXT_LEASE_DB`.
+Unsafe pre-existing runtime roots are not repaired in place. Existing managed
+env bindings must be unique and match the fixed paths; duplicate or conflicting
+managed bindings fail closed.
 
 The task must not write `SKELETON_RUNNER_VNEXT_MODE`, write attestation files,
 start/stop/enable/disable systemd units, touch the legacy Runner service/timer,
