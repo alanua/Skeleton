@@ -1067,6 +1067,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "runner_vnext_mode_written",
         "runner_vnext_mode",
         "runner_vnext_mode_off",
+        "runner_vnext_mode_prepare_allowed",
         "runner_status",
         "scanned_entry_count",
         "selected_root_count",
@@ -22237,15 +22238,17 @@ def runner_vnext_prepare_runtime_state_v1(
     configured_mode = os.environ.get(RUNNER_VNEXT_MODE_ENV)
     normalized_mode = (configured_mode or RUNNER_MODE_OFF).strip().lower()
     mode_off = normalized_mode == RUNNER_MODE_OFF
+    mode_prepare_allowed = normalized_mode in {RUNNER_MODE_OFF, RUNNER_MODE_SHADOW}
     status_lines.extend(
         [
             f"runner_vnext_mode={normalized_mode}",
             f"runner_vnext_mode_off={str(mode_off).lower()}",
+            f"runner_vnext_mode_prepare_allowed={str(mode_prepare_allowed).lower()}",
         ]
     )
     if normalized_mode not in VNEXT_MODES:
         blockers.append("prepare_runtime_state_vnext_mode_invalid")
-    elif not mode_off:
+    elif not mode_prepare_allowed:
         blockers.append("prepare_runtime_state_vnext_mode_not_off")
 
     state_root_ready = False
