@@ -34,9 +34,8 @@ def test_package_identity_label_compose_and_main_entry_are_current() -> None:
 
     assert 'namespace = "com.skeleton.home"' in gradle
     assert 'applicationId = "com.skeleton.home"' in gradle
-    assert re.search(r"versionCode\s*=\s*(\d+)", gradle)
-    assert int(re.search(r"versionCode\s*=\s*(\d+)", gradle).group(1)) > 0
-    assert re.search(r'versionName\s*=\s*"\d+\.\d+\.\d+(?:[-+][^"]+)?"', gradle)
+    assert re.search(r"versionCode\s*=\s*145\b", gradle)
+    assert 'versionName = "1.4.29"' in gradle
     assert "buildFeatures { compose = true; buildConfig = true }" in gradle
     assert "androidx.activity:activity-compose" in gradle
 
@@ -179,6 +178,39 @@ def test_home_media_control_uses_explicit_endpoint_routing() -> None:
     assert 'api.post("/api/play"' not in main
     assert 'api.post("/api/volume"' not in main
     assert 'api.post("/api/tv/play"' not in main
+
+
+def test_home_header_keeps_capture_and_hyperion_home_only() -> None:
+    main = read("app/src/main/java/com/skeleton/home/MainActivity.kt")
+
+    assert "OutputTargetSelector(endpointId,endpoints,onEndpoint)" in main
+    assert "captureCharged:Boolean=false" in main
+    assert "onCapture:(()->Unit)?=null" in main
+    assert '"handoff" in endpoint.capabilities' in main
+    assert 'endpointPath(endpoint.endpointId,"/handoff/capture")' in main
+    assert "captureCharged=captureCharged,onCapture=" in main
+    assert "hyperion:Boolean?=null" in main
+    assert "onHyperion:(()->Unit)?=null" in main
+    assert "IconButton(onClick=onHyperion" in main
+    assert "Header(ui(\"Головна\"),api.server!=null,endpoint.endpointId,endpoints,onEndpoint,onMenu" in main
+    assert "hyperion=hyperion,onHyperion={onHyperion(!hyperion)}" in main
+    assert main.count('api.post("/api/hyperion"') == 1
+
+    header_body = re.search(
+        r"private fun Header\(.*?\)\s*\{(?P<body>.*?)\n\}\n\n\n@Composable private fun OutputTargetSelector",
+        main,
+        re.DOTALL,
+    ).group("body")
+    assert "SkeletonSwitch" not in header_body
+
+    for signature in [
+        "private fun VideoScreen(api:HomeApi,active:Boolean,selectionRevision:Int,endpointId:String",
+        "private fun FamilyScannerScreen(api:HomeApi,active:Boolean,endpointId:String",
+        "private fun HomeEdgeScreen(api:HomeApi,endpointId:String",
+        "private fun DevicesScreen(api:HomeApi,active:Boolean,endpointId:String",
+        "private fun SkeletonScreen(api:HomeApi,active:Boolean,endpointId:String",
+    ]:
+        assert signature in main
 
 
 def test_home_android_validation_does_not_autostart_tablet_video() -> None:

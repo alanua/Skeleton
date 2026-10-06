@@ -830,12 +830,12 @@ private fun HomeComposeApp(sharedUrl:String?, consumeShare:()->Unit) {
                 val p=profile
                 if(discovered && p!=null){
                     PersistentTabSlot(tab==0) { HomeScreen(api, tab==0, hyperion, { on -> hyperion=on; scope.launch { runCatching { api.post("/api/hyperion",JSONObject().put("enabled",on)) }.onFailure { hyperion=!on } } }, endpointId, mediaEndpoints, {selected->endpointId=selected}, {menu=true}) }
-                    PersistentTabSlot(tab==1) { VideoScreen(api, tab==1, videoSelectionRevision, hyperion, {on->hyperion=on;scope.launch{runCatching{api.post("/api/hyperion",JSONObject().put("enabled",on))}.onFailure{hyperion=!on}}},endpointId,mediaEndpoints,{selected->endpointId=selected},{menu=true},{tab=0}) }
+                    PersistentTabSlot(tab==1) { VideoScreen(api, tab==1, videoSelectionRevision, endpointId, mediaEndpoints, {selected->endpointId=selected}, {menu=true}, {tab=0}) }
                     PersistentTabSlot(tab==2) {
-                        if(p.hasSk) DevicesScreen(api, tab==2, hyperion, {on->hyperion=on;scope.launch{runCatching{api.post("/api/hyperion",JSONObject().put("enabled",on))}.onFailure{hyperion=!on}}},endpointId,mediaEndpoints,{selected->endpointId=selected},{menu=true})
-                        else FamilyScannerScreen(api, tab==2, hyperion, {on->hyperion=on;scope.launch{runCatching{api.post("/api/hyperion",JSONObject().put("enabled",on))}.onFailure{hyperion=!on}}},endpointId,mediaEndpoints,{selected->endpointId=selected},{menu=true})
+                        if(p.hasSk) DevicesScreen(api, tab==2, endpointId, mediaEndpoints, {selected->endpointId=selected}, {menu=true})
+                        else FamilyScannerScreen(api, tab==2, endpointId, mediaEndpoints, {selected->endpointId=selected}, {menu=true})
                     }
-                    if(p.hasSk) PersistentTabSlot(tab==3) { SkeletonScreen(api, tab==3, hyperion, {on->hyperion=on;scope.launch{runCatching{api.post("/api/hyperion",JSONObject().put("enabled",on))}.onFailure{hyperion=!on}}},endpointId,mediaEndpoints,{selected->endpointId=selected},{menu=true}) }
+                    if(p.hasSk) PersistentTabSlot(tab==3) { SkeletonScreen(api, tab==3, endpointId, mediaEndpoints, {selected->endpointId=selected}, {menu=true}) }
                 } else Box(Modifier.fillMaxSize(), contentAlignment=Alignment.Center) { CircularProgressIndicator(color=Accent,strokeWidth=2.dp,modifier=Modifier.size(28.dp)) }
             }
             profile?.let { BottomNav(tab,navFor(it)) { tab=it } }
@@ -1231,7 +1231,7 @@ private fun SaverTypeRow(api:HomeApi,x:SaverType,active:Boolean,onSelect:()->Uni
 }
 
 @Composable
-private fun Header(title:String, connected:Boolean, hyperion:Boolean, onHyperion:(Boolean)->Unit, endpointId:String, endpoints:List<MediaEndpointUi>, onEndpoint:(String)->Unit, onMenu:()->Unit, subtitle:String="Home Edge", ambientColor:Color?=null) {
+private fun Header(title:String, connected:Boolean, endpointId:String, endpoints:List<MediaEndpointUi>, onEndpoint:(String)->Unit, onMenu:()->Unit, subtitle:String="Home Edge", ambientColor:Color?=null, captureCharged:Boolean=false, onCapture:(()->Unit)?=null, hyperion:Boolean?=null, onHyperion:(()->Unit)?=null) {
     // Top controls must remain readable regardless of the poster palette.
     val headerColor=Color(0xFFF3F6F8)
     Row(Modifier.fillMaxWidth().height(74.dp).background(Color(0x8A070A0D)).padding(start=16.dp,end=10.dp,top=8.dp,bottom=6.dp),verticalAlignment=Alignment.CenterVertically) {
@@ -1244,9 +1244,16 @@ private fun Header(title:String, connected:Boolean, hyperion:Boolean, onHyperion
         }
         OutputTargetSelector(endpointId,endpoints,onEndpoint)
         Spacer(Modifier.width(7.dp))
-        Mdi(if(hyperion)"lightbulb-on-outline" else "lightbulb-outline",21.dp,if(hyperion)Color(0xFFFF8B38) else Color(0xFFE4E9ED))
-        Spacer(Modifier.width(3.dp))
-        SkeletonSwitch(hyperion,onHyperion,42.dp,24.dp,18.dp)
+        if(onCapture!=null){
+            IconButton(onClick=onCapture,enabled=captureCharged,modifier=Modifier.size(40.dp)){
+                Mdi("keyboard-return",22.dp,if(captureCharged)Accent else Muted)
+            }
+        }
+        if(hyperion!=null&&onHyperion!=null){
+            IconButton(onClick=onHyperion,modifier=Modifier.size(40.dp)){
+                Mdi(if(hyperion)"lightbulb-on-outline" else "lightbulb-outline",22.dp,if(hyperion)Color(0xFFFF8B38) else Color(0xFFE4E9ED))
+            }
+        }
         IconButton(onClick=onMenu,modifier=Modifier.size(40.dp)){Mdi("dots-vertical",23.dp,Color(0xFFF3F6F8))}
     }
 }
@@ -1358,10 +1365,11 @@ private fun Header(title:String, connected:Boolean, hyperion:Boolean, onHyperion
     val ambientPoster=when(mode){"kiosk"->youtubePlayer.optString("poster_landscape",youtubePlayer.optString("poster",""));"tv"->"";else->videoPlayer.optString("poster",videoPlayer.optString("poster_landscape",""))}
     val ambientBitmap=remoteBitmap(if(ambientPoster.isNotBlank()&&api.server!=null)api.server+ambientPoster else null,720,1080)
     val ambientUiColor=remember(ambientBitmap){ambientComplement(ambientBitmap)}
+    val captureCharged=api.server!=null&&"handoff" in endpoint.capabilities
     Box(Modifier.fillMaxSize()){
         AmbientPosterBackground(ambientBitmap,Modifier.fillMaxSize())
         Column(Modifier.fillMaxSize()) {
-        Header(ui("Головна"),api.server!=null,hyperion,onHyperion,endpoint.endpointId,endpoints,onEndpoint,onMenu,ambientColor=ambientUiColor.takeIf{ambientBitmap!=null})
+        Header(ui("Головна"),api.server!=null,endpoint.endpointId,endpoints,onEndpoint,onMenu,ambientColor=ambientUiColor.takeIf{ambientBitmap!=null},captureCharged=captureCharged,onCapture={scope.launch{runCatching{api.post(endpointPath(endpoint.endpointId,"/handoff/capture"),endpointMutation(endpoint.endpointId))};refresh()}},hyperion=hyperion,onHyperion={onHyperion(!hyperion)})
         Column(Modifier.weight(1f).padding(horizontal=13.dp)) {
             ModeRow(mode,ambientUiColor.takeIf{ambientBitmap!=null},includeGames=endpoint.adapterKind!="samsung"){target->if(target!=mode){mode=target;scope.launch{val sm=when(target){"kiosk"->"youtube";"tv"->"tv";else->"video"};runCatching{api.post(endpointPath(endpoint.endpointId,"/mode"),endpointMutation(endpoint.endpointId,"mode" to sm))};refresh()}}}
             Spacer(Modifier.height(6.dp))
@@ -1394,7 +1402,7 @@ private fun Header(title:String, connected:Boolean, hyperion:Boolean, onHyperion
     val panel=when(mode){"kiosk"->0;"tv"->2;else->1}
     Box(Modifier.fillMaxSize()){
         PersistentTabSlot(panel==0){YoutubeRemoteCard(api,endpointId,youtubePlayer,youtubeRemotePlayer,volume,onVolume,onRemote,onSeek,onMute)}
-        PersistentTabSlot(panel==1){VideoRemoteCard(api,videoPlayer,volume,onVolume,onControl,onSeek,onMute)}
+        PersistentTabSlot(panel==1){VideoRemoteCard(api,endpointId,videoPlayer,volume,onVolume,onControl,onSeek,onMute)}
         PersistentTabSlot(panel==2){TvRemoteCard(api,active,endpointId,tvPlayer,volume,onVolume,onControl,onMute)}
     }
 }
@@ -1475,7 +1483,7 @@ private fun Header(title:String, connected:Boolean, hyperion:Boolean, onHyperion
     }
 }
 
-@Composable private fun VideoRemoteCard(api:HomeApi,p:JSONObject,volume:Int,onVolume:(Int)->Unit,onControl:(String)->Unit,onSeek:(Int)->Unit,onMute:()->Unit){
+@Composable private fun VideoRemoteCard(api:HomeApi,endpointId:String,p:JSONObject,volume:Int,onVolume:(Int)->Unit,onControl:(String)->Unit,onSeek:(Int)->Unit,onMute:()->Unit){
     val running=p.optBoolean("running")
     val title=if(running)p.optString("display-title",p.optString("media-title","Відео")) else "Нічого не відтворюється"
     val se=if(running&&p.has("season")&&!p.isNull("season")){val s=p.optString("season","").takeUnless{it.equals("null",true)}.orEmpty();val e=if(p.has("episode")&&!p.isNull("episode"))p.optString("episode","").filter{it.isDigit()} else "";if(s.isNotBlank())"S$s"+(if(e.isNotBlank())" · E$e" else "") else ""}else ""
@@ -1714,7 +1722,7 @@ private const val MOVIEBASE_PACKAGE = "com.moviebase"
 
 
 @Composable
-private fun VideoScreen(api:HomeApi,active:Boolean,selectionRevision:Int,hyperion:Boolean,onHyperion:(Boolean)->Unit,endpointId:String,endpoints:List<MediaEndpointUi>,onEndpoint:(String)->Unit,onMenu:()->Unit,onApplied:()->Unit){
+private fun VideoScreen(api:HomeApi,active:Boolean,selectionRevision:Int,endpointId:String,endpoints:List<MediaEndpointUi>,onEndpoint:(String)->Unit,onMenu:()->Unit,onApplied:()->Unit){
     val scope=rememberCoroutineScope(); val context=LocalContext.current
     val endpoint=endpointById(endpoints,endpointId)
     var history by remember{mutableStateOf(emptyList<JSONObject>())}; var historyOpen by remember{mutableStateOf(false)}; var seasonOpen by remember{mutableStateOf(false)}; var detailOpen by remember{mutableStateOf(false)}; var loadingSeason by remember{mutableStateOf("")}
@@ -1798,7 +1806,7 @@ private fun VideoScreen(api:HomeApi,active:Boolean,selectionRevision:Int,hyperio
     Box(Modifier.fillMaxSize()){
         AmbientPosterBackground(bm,Modifier.fillMaxSize())
         Column(Modifier.fillMaxSize()){
-        Header(ui("Відео"),api.server!=null,hyperion,onHyperion,endpoint.endpointId,endpoints,onEndpoint,onMenu,ambientColor=remember(bm){ambientComplement(bm)}.takeIf{bm!=null})
+        Header(ui("Відео"),api.server!=null,endpoint.endpointId,endpoints,onEndpoint,onMenu,ambientColor=remember(bm){ambientComplement(bm)}.takeIf{bm!=null})
         LazyColumn(Modifier.weight(1f).padding(horizontal=13.dp),contentPadding=PaddingValues(top=4.dp,bottom=18.dp)){
             item{
                 Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(Card).border(1.dp,Line,RoundedCornerShape(16.dp)).padding(start=12.dp,end=12.dp,top=14.dp,bottom=12.dp)){
@@ -2478,11 +2486,11 @@ private fun shareMfpPdf(context:Context,api:HomeApi,doc:JSONObject){
 }
 
 
-@Composable private fun FamilyScannerScreen(api:HomeApi,active:Boolean,hyperion:Boolean,onHyperion:(Boolean)->Unit,endpointId:String,endpoints:List<MediaEndpointUi>,onEndpoint:(String)->Unit,onMenu:()->Unit){
+@Composable private fun FamilyScannerScreen(api:HomeApi,active:Boolean,endpointId:String,endpoints:List<MediaEndpointUi>,onEndpoint:(String)->Unit,onMenu:()->Unit){
     var open by rememberSaveable{mutableStateOf(true)}
     LaunchedEffect(active){if(active)open=true}
     Column(Modifier.fillMaxSize().background(Bg)){
-        Header(ui("Сканувати"),api.server!=null,hyperion,onHyperion,endpointId,endpoints,onEndpoint,onMenu)
+        Header(ui("Сканувати"),api.server!=null,endpointId,endpoints,onEndpoint,onMenu)
         Box(Modifier.weight(1f),contentAlignment=Alignment.Center){
             Button(onClick={open=true},shape=RoundedCornerShape(14.dp),colors=ButtonDefaults.buttonColors(containerColor=Accent),modifier=Modifier.fillMaxWidth(.72f).height(56.dp)){Mdi("scanner",22.dp,Color.White);Spacer(Modifier.width(9.dp));Text(ui("Відкрити сканер"),fontWeight=FontWeight.Bold)}
         }
@@ -2490,7 +2498,7 @@ private fun shareMfpPdf(context:Context,api:HomeApi,doc:JSONObject){
     }
 }
 
-@Composable private fun HomeEdgeScreen(api:HomeApi,hyperion:Boolean,onHyperion:(Boolean)->Unit,endpointId:String,endpoints:List<MediaEndpointUi>,onEndpoint:(String)->Unit,onMenu:()->Unit,onBack:()->Unit){
+@Composable private fun HomeEdgeScreen(api:HomeApi,endpointId:String,endpoints:List<MediaEndpointUi>,onEndpoint:(String)->Unit,onMenu:()->Unit,onBack:()->Unit){
     val scope=rememberCoroutineScope();val context=LocalContext.current
     val healthAdapter=remember(context){SkeletonHealthConnectAdapter(context.applicationContext)}
     var healthAvailability by remember{mutableStateOf(SkeletonHealthConnectAdapter.availability(context))}
@@ -2575,7 +2583,7 @@ private fun shareMfpPdf(context:Context,api:HomeApi,doc:JSONObject){
     }
     val filePicker=rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()){uri->if(uri!=null){scope.launch{busy=true;status="Перевіряю файл…";runCatching{api.uploadSecretFile(context,uri)}.onSuccess{status="Секрет прийнято · ${it.optString("label","готово")}";refresh()}.onFailure{status=it.message?:"Не вдалося додати секрет"};busy=false}}}
     Column(Modifier.fillMaxSize().background(Bg)){
-        Header("Home Edge",api.server!=null,hyperion,onHyperion,endpointId,endpoints,onEndpoint,onMenu,subtitle="Керування вузлом")
+        Header("Home Edge",api.server!=null,endpointId,endpoints,onEndpoint,onMenu,subtitle="Керування вузлом")
         Row(Modifier.fillMaxWidth().padding(horizontal=12.dp,vertical=4.dp),verticalAlignment=Alignment.CenterVertically){TextButton(onClick=onBack){Mdi("chevron-left",18.dp,Muted);Spacer(Modifier.width(5.dp));Text("Пристрої",color=Muted)}}
         LazyColumn(Modifier.weight(1f).padding(horizontal=13.dp),contentPadding=PaddingValues(bottom=24.dp),verticalArrangement=Arrangement.spacedBy(12.dp)){
             item{Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(Card).border(1.dp,Line,RoundedCornerShape(16.dp)).padding(16.dp)){
@@ -2763,14 +2771,14 @@ private fun orderNativeDevices(items:List<NativeDeviceUi>,prefs:android.content.
  Dialog(onDismissRequest=onDismiss){Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp)).background(Card).padding(16.dp)){Text(ui("Порядок пристроїв"),fontSize=20.sp,fontWeight=FontWeight.Bold,color=Text);Text(ui("Стрілками змініть порядок."),fontSize=11.sp,color=Muted,modifier=Modifier.padding(top=4.dp,bottom=10.dp));LazyColumn(Modifier.heightIn(max=500.dp)){items(ids.size,key={ids[it]}){i->val id=ids[i];Row(Modifier.fillMaxWidth().padding(vertical=5.dp),verticalAlignment=Alignment.CenterVertically){Text(names[id]?:id,Modifier.weight(1f),fontSize=14.sp,color=Text,maxLines=2,overflow=TextOverflow.Ellipsis);IconButton(onClick={if(i>0){val m=ids.toMutableList();val x=m.removeAt(i);m.add(i-1,x);ids=m}},enabled=i>0){Mdi("chevron-up",22.dp,if(i>0)Text else Muted)};IconButton(onClick={if(i<ids.lastIndex){val m=ids.toMutableList();val x=m.removeAt(i);m.add(i+1,x);ids=m}},enabled=i<ids.lastIndex){Mdi("chevron-down",22.dp,if(i<ids.lastIndex)Text else Muted)}}}};Row(Modifier.fillMaxWidth().padding(top=12.dp),horizontalArrangement=Arrangement.End){TextButton(onClick=onDismiss){Text(ui("Скасувати"),color=Muted)};Spacer(Modifier.width(8.dp));Button(onClick={prefs.edit().putString(DEVICE_ORDER_PREF,ids.joinToString("|")).apply();Toast.makeText(context,"Порядок пристроїв збережено",Toast.LENGTH_SHORT).show();onDismiss()},colors=ButtonDefaults.buttonColors(containerColor=Accent)){Text(ui("Зберегти"),color=Color.White,fontWeight=FontWeight.Bold)}}}}
 }
 
-@Composable private fun DevicesScreen(api:HomeApi,active:Boolean,hyperion:Boolean,onHyperion:(Boolean)->Unit,endpointId:String,endpoints:List<MediaEndpointUi>,onEndpoint:(String)->Unit,onMenu:()->Unit){
+@Composable private fun DevicesScreen(api:HomeApi,active:Boolean,endpointId:String,endpoints:List<MediaEndpointUi>,onEndpoint:(String)->Unit,onMenu:()->Unit){
     var sharpRemoteOpen by rememberSaveable{mutableStateOf(false)}; var mfpOpen by rememberSaveable{mutableStateOf(false)}; var homeEdgeOpen by rememberSaveable{mutableStateOf(false)}; var devices by remember{mutableStateOf(emptyList<NativeDeviceUi>())}; var loaded by remember{mutableStateOf(false)}
     val context=LocalContext.current; val devicePrefs=remember(context){context.getSharedPreferences("home_ui",Context.MODE_PRIVATE)}
     LaunchedEffect(Unit){if(deviceOrderIds(devicePrefs).isEmpty())devicePrefs.edit().putString(DEVICE_ORDER_PREF,"brother_printer").apply()}
     LaunchedEffect(api.server,active){if(api.server!=null){suspend fun pull():Boolean{var ok=false;runCatching{api.get("/api/native/devices")}.onSuccess{j->devices=j.optJSONArray("items")?.objects().orEmpty().map{d->val id=d.cleanText("device_id");val role=d.cleanText("role");val adapter=d.cleanText("adapter");val location=d.cleanText("location");val deps=d.optJSONArray("dependency_names")?.strings().orEmpty();val controller=d.cleanText("controller_name",d.cleanText("controller"));NativeDeviceUi(id,d.cleanText("name",id),role,adapter,d.optBoolean("online"),location,deps,controller,nativeDeviceDomain(id,role,location),nativeDeviceConnection(id,role,adapter,location,deps,controller))};loaded=true;ok=true};return ok};while(!loaded){if(pull())break;delay(1500)};if(active)while(true){delay(15000);pull()}}}
-    if(homeEdgeOpen){HomeEdgeScreen(api,hyperion,onHyperion,endpointId,endpoints,onEndpoint,onMenu){homeEdgeOpen=false};return}
+    if(homeEdgeOpen){HomeEdgeScreen(api,endpointId,endpoints,onEndpoint,onMenu){homeEdgeOpen=false};return}
     Column(Modifier.fillMaxSize().background(Bg)){
-        Header(ui("Пристрої"),api.server!=null,hyperion,onHyperion,endpointId,endpoints,onEndpoint,onMenu)
+        Header(ui("Пристрої"),api.server!=null,endpointId,endpoints,onEndpoint,onMenu)
         LazyColumn(Modifier.weight(1f).padding(horizontal=13.dp),contentPadding=PaddingValues(top=6.dp,bottom=18.dp),verticalArrangement=Arrangement.spacedBy(10.dp)){
             if(!loaded)item{SimpleSection("Домашня схема","Читаю актуальний список пристроїв…")}
             val ordered=orderNativeDevices(devices,devicePrefs);ordered.map{it.domain}.distinct().forEach{domain->val group=ordered.filter{it.domain==domain};if(group.isNotEmpty())item(key=domain){DeviceDomainCard(domain,group,{sharpRemoteOpen=true},{mfpOpen=true},{homeEdgeOpen=true})}}
@@ -2818,13 +2826,13 @@ private fun skEventAge(at:Long):String{if(at<=0)return "";val sec=((System.curre
  Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(Card).border(1.dp,Line,RoundedCornerShape(16.dp)).padding(12.dp)){Text("Потік роботи Skeleton",fontSize=15.sp,fontWeight=FontWeight.Bold,color=Text);Text("Де знаходиться робота і де вона застрягає. Кожна крапка — конкретна підтверджена задача.",fontSize=10.sp,lineHeight=14.sp,color=Muted,modifier=Modifier.padding(top=3.dp,bottom=10.dp));Row(Modifier.fillMaxWidth().height(190.dp),horizontalArrangement=Arrangement.spacedBy(3.dp)){stages.forEach{stage->val items=flow.items.filter{it.stage==stage};val blocked=items.count{it.blocked};val chosen=selected==stage;Column(Modifier.weight(1f).fillMaxHeight().clip(RoundedCornerShape(9.dp)).background(if(chosen)Color(0xFF252A34)else Color(0xFF111319)).clickable{selected=if(chosen)"" else stage}.padding(horizontal=3.dp,vertical=7.dp),horizontalAlignment=Alignment.CenterHorizontally){Text(items.size.toString(),fontSize=16.sp,fontWeight=FontWeight.Bold,color=if(blocked>0)Color(0xFFE3A65A)else if(items.isNotEmpty())Green else Muted);Box(Modifier.weight(1f),contentAlignment=Alignment.BottomCenter){Column(verticalArrangement=Arrangement.spacedBy(3.dp),horizontalAlignment=Alignment.CenterHorizontally){items.take(7).forEach{w->Box(Modifier.size(if(w.blocked)11.dp else 8.dp).clip(CircleShape).background(if(w.blocked)Color(0xFFE3A65A)else Color(0xFF8B78E6)))};if(items.size>7)Text("+${items.size-7}",fontSize=7.sp,color=Muted)}};Text(stage,fontSize=7.sp,lineHeight=8.sp,maxLines=2,textAlign=TextAlign.Center,color=if(chosen)Text else Muted,modifier=Modifier.height(20.dp))}}};if(flow.items.isEmpty())Text("Немає підтверджених задач для потоку.",fontSize=10.sp,color=Muted,modifier=Modifier.padding(top=8.dp))else Column(Modifier.padding(top=8.dp)){Text(if(selected.isBlank())"У потоці: ${flow.items.size}" else "$selected: ${active.size}",fontSize=10.sp,fontWeight=FontWeight.Bold,color=Text);active.take(4).forEach{w->Row(Modifier.fillMaxWidth().padding(top=5.dp),verticalAlignment=Alignment.Top){Box(Modifier.padding(top=4.dp).size(7.dp).clip(CircleShape).background(if(w.blocked)Color(0xFFE3A65A)else Color(0xFF8B78E6)));Text(w.title,fontSize=9.sp,lineHeight=12.sp,maxLines=2,overflow=TextOverflow.Ellipsis,color=if(w.blocked)Color(0xFFE3C08B)else Muted,modifier=Modifier.padding(start=6.dp).weight(1f))}}}}
 }
 
-@Composable private fun SkeletonScreen(api:HomeApi,active:Boolean,hyperion:Boolean,onHyperion:(Boolean)->Unit,endpointId:String,endpoints:List<MediaEndpointUi>,onEndpoint:(String)->Unit,onMenu:()->Unit){
+@Composable private fun SkeletonScreen(api:HomeApi,active:Boolean,endpointId:String,endpoints:List<MediaEndpointUi>,onEndpoint:(String)->Unit,onMenu:()->Unit){
     var live by remember{mutableStateOf(SkLiveData("attention","Читаю стан Skeleton…","Дані оновлюються автоматично.",emptyList(),"",emptyList(),emptyList(),emptyList(),emptyList(),listOf("state","timeline","heatmap"),0L))}
     var selectedView by rememberSaveable{mutableStateOf("state")}
     var loaded by remember{mutableStateOf(false)}
     LaunchedEffect(api.server,active){if(api.server!=null){suspend fun pull():Boolean{var ok=false;runCatching{api.get("/api/native/skeleton-dashboard")}.onSuccess{live=parseSkLive(it);loaded=true;ok=true};return ok};while(!loaded){if(pull())break;delay(1500)};if(active)while(true){delay(15000);pull()}}}
     Column(Modifier.fillMaxSize().background(Bg)){
-        Header(ui("СК"),api.server!=null,hyperion,onHyperion,endpointId,endpoints,onEndpoint,onMenu,subtitle="Skeleton")
+        Header(ui("СК"),api.server!=null,endpointId,endpoints,onEndpoint,onMenu,subtitle="Skeleton")
         LazyColumn(Modifier.weight(1f).padding(horizontal=13.dp),contentPadding=PaddingValues(bottom=18.dp),verticalArrangement=Arrangement.spacedBy(10.dp)){
             item{Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(Card).border(1.dp,Line,RoundedCornerShape(16.dp)).padding(16.dp)){Text(if(loaded)live.summaryTitle else "Читаю стан Skeleton…",fontSize=16.sp,fontWeight=FontWeight.SemiBold,color=Text);Text(if(loaded)"${live.summaryText} · Оновлено ${skAgeLabel(live.updatedAt)}" else "Дані з’являться автоматично.",fontSize=10.sp,lineHeight=15.sp,color=Muted,modifier=Modifier.padding(top=5.dp))}}
             if(selectedView=="state") item{SkWorkFlowViz(live.workFlow)}
