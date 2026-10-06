@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from contextvars import ContextVar
 import csv
 from dataclasses import dataclass
@@ -296,10 +296,18 @@ RUNNER_VNEXT_PREPARE_RUNTIME_STATE_SCHEMA = (
 )
 RUNNER_VNEXT_EXTERNAL_ATTESTATION_PROFILE = "green_diagnostic_v1"
 RUNNER_VNEXT_EXTERNAL_ATTESTATION_FILENAME = "runner-vnext-external-attestation.json"
-RUNNER_VNEXT_PRIVATE_STATE_ROOT = Path("/var/lib/skeleton/runner-vnext")
-RUNNER_VNEXT_PRIVATE_LEDGER_DB = RUNNER_VNEXT_PRIVATE_STATE_ROOT / "operation-ledger.sqlite3"
-RUNNER_VNEXT_PRIVATE_LEASE_DB = RUNNER_VNEXT_PRIVATE_STATE_ROOT / "lane-leases.sqlite3"
-RUNNER_VNEXT_PRIVATE_ENV_FILE = Path("/etc/skeleton-runner.env")
+RUNNER_VNEXT_FIXED_PRIVATE_STATE_ROOT = Path("/var/lib/skeleton/runner-vnext")
+RUNNER_VNEXT_FIXED_PRIVATE_ENV_FILE = Path("/etc/skeleton-runner.env")
+RUNNER_VNEXT_FIXED_PRIVATE_LEDGER_DB = (
+    RUNNER_VNEXT_FIXED_PRIVATE_STATE_ROOT / "operation-ledger.sqlite3"
+)
+RUNNER_VNEXT_FIXED_PRIVATE_LEASE_DB = (
+    RUNNER_VNEXT_FIXED_PRIVATE_STATE_ROOT / "lane-leases.sqlite3"
+)
+RUNNER_VNEXT_PRIVATE_STATE_ROOT = RUNNER_VNEXT_FIXED_PRIVATE_STATE_ROOT
+RUNNER_VNEXT_PRIVATE_LEDGER_DB = RUNNER_VNEXT_FIXED_PRIVATE_LEDGER_DB
+RUNNER_VNEXT_PRIVATE_LEASE_DB = RUNNER_VNEXT_FIXED_PRIVATE_LEASE_DB
+RUNNER_VNEXT_PRIVATE_ENV_FILE = RUNNER_VNEXT_FIXED_PRIVATE_ENV_FILE
 RUNNER_LEGACY_SERVICE_UNIT = "skeleton-runner-poll.service"
 RUNNER_LEGACY_TIMER_UNIT = "skeleton-runner-poll.timer"
 RUNNER_VNEXT_CODEGEN_CAPABILITIES = (
@@ -22056,7 +22064,65 @@ def _runner_vnext_prepare_runtime_state_metadata(
     return values, None
 
 
-def _runner_vnext_prepare_safe_root(root: Path) -> tuple[Path, bool]:
+def _runner_vnext_prepare_is_fixed_path(path: Path, fixed: Path) -> bool:
+    return path == fixed or str(path) == str(fixed)
+
+
+def _runner_vnext_prepare_root_owner_spec() -> tuple[str, str]:
+    return str(os.geteuid()), str(os.getegid())
+
+
+def _runner_vnext_prepare_validate_fixed_privileged_parent(
+    parent: Path, *, reason: str
+) -> None:
+    try:
+        parent_info = parent.lstat()
+    except OSError as exc:
+        raise RuntimeError(reason) from exc
+    if (
+        stat.S_ISLNK(parent_info.st_mode)
+        or not stat.S_ISDIR(parent_info.st_mode)
+        or parent_info.st_uid != 0
+        or stat.S_IMODE(parent_info.st_mode) & 0o022
+    ):
+        raise RuntimeError(reason)
+
+
+def _runner_vnext_prepare_validate_fixed_root_parent(root: Path) -> None:
+    if not _runner_vnext_prepare_is_fixed_path(
+        root, RUNNER_VNEXT_FIXED_PRIVATE_STATE_ROOT
+    ):
+        raise RuntimeError("prepare_runtime_state_root_not_fixed")
+    if root.parent != RUNNER_VNEXT_FIXED_PRIVATE_STATE_ROOT.parent:
+        raise RuntimeError("prepare_runtime_state_root_parent_not_fixed")
+    _runner_vnext_prepare_validate_fixed_privileged_parent(
+        root.parent,
+        reason="prepare_runtime_state_root_parent_unsafe",
+    )
+
+
+def _runner_vnext_prepare_fixed_private_root(root: Path) -> None:
+    _runner_vnext_prepare_validate_fixed_root_parent(root)
+    owner, group = _runner_vnext_prepare_root_owner_spec()
+    code, _output = run_command(
+        _non_interactive_sudo(
+            "install",
+            "-d",
+            "-o",
+            owner,
+            "-g",
+            group,
+            "-m",
+            "0700",
+            str(root),
+        ),
+        timeout=30,
+    )
+    if code != 0:
+        raise RuntimeError("prepare_runtime_state_root_sudo_failed")
+
+
+def _runner_vnext_prepare_validate_root(root: Path) -> tuple[Path, bool]:
     existed = os.path.lexists(root)
     if existed:
         info = root.lstat()
@@ -22067,8 +22133,6 @@ def _runner_vnext_prepare_safe_root(root: Path) -> tuple[Path, bool]:
             or stat.S_IMODE(info.st_mode) != 0o700
         ):
             raise RuntimeError("prepare_runtime_state_root_unsafe")
-    else:
-        root.mkdir(mode=0o700, parents=True, exist_ok=False)
     info = root.lstat()
     resolved = root.resolve(strict=True)
     if (
@@ -22078,6 +22142,26 @@ def _runner_vnext_prepare_safe_root(root: Path) -> tuple[Path, bool]:
         or stat.S_IMODE(info.st_mode) != 0o700
     ):
         raise RuntimeError("prepare_runtime_state_root_unsafe")
+    return resolved, not existed
+
+
+def _runner_vnext_prepare_safe_root(
+    root: Path,
+    *,
+    on_mutation: Callable[[], None] | None = None,
+) -> tuple[Path, bool]:
+    existed = os.path.lexists(root)
+    if not existed and _runner_vnext_prepare_is_fixed_path(
+        root, RUNNER_VNEXT_FIXED_PRIVATE_STATE_ROOT
+    ):
+        _runner_vnext_prepare_fixed_private_root(root)
+        if on_mutation is not None:
+            on_mutation()
+    elif not existed:
+        root.mkdir(mode=0o700, parents=True, exist_ok=False)
+        if on_mutation is not None:
+            on_mutation()
+    resolved, _created = _runner_vnext_prepare_validate_root(root)
     return resolved, not existed
 
 
@@ -22102,6 +22186,136 @@ def _runner_vnext_prepare_safe_file(path: Path, root: Path, reason: str) -> Path
     return candidate
 
 
+def _runner_vnext_prepare_fixed_env_file_sudo(
+    *,
+    env_file: Path,
+    state_root: Path,
+    ledger: Path,
+    lease: Path,
+) -> None:
+    if not _runner_vnext_prepare_is_fixed_path(
+        env_file, RUNNER_VNEXT_FIXED_PRIVATE_ENV_FILE
+    ):
+        raise RuntimeError("prepare_runtime_state_env_file_not_fixed")
+    if not _runner_vnext_prepare_is_fixed_path(
+        state_root, RUNNER_VNEXT_FIXED_PRIVATE_STATE_ROOT
+    ):
+        raise RuntimeError("prepare_runtime_state_root_not_fixed")
+    if not _runner_vnext_prepare_is_fixed_path(
+        ledger, RUNNER_VNEXT_FIXED_PRIVATE_LEDGER_DB
+    ):
+        raise RuntimeError("prepare_runtime_state_ledger_not_fixed")
+    if not _runner_vnext_prepare_is_fixed_path(
+        lease, RUNNER_VNEXT_FIXED_PRIVATE_LEASE_DB
+    ):
+        raise RuntimeError("prepare_runtime_state_lease_not_fixed")
+    if env_file.parent != RUNNER_VNEXT_FIXED_PRIVATE_ENV_FILE.parent:
+        raise RuntimeError("prepare_runtime_state_env_parent_not_fixed")
+    _runner_vnext_prepare_validate_fixed_privileged_parent(
+        env_file.parent,
+        reason="prepare_runtime_state_env_parent_unsafe",
+    )
+    script = r'''
+from __future__ import annotations
+import os
+from pathlib import Path
+import stat
+import sys
+import tempfile
+
+MODE_KEY = sys.argv[1]
+env_file = Path(sys.argv[2])
+managed = dict(arg.split("=", 1) for arg in sys.argv[3:])
+reason = "prepare_runtime_state_env_file_sudo_failed"
+try:
+    parent = env_file.parent
+    parent_info = parent.lstat()
+    if (
+        stat.S_ISLNK(parent_info.st_mode)
+        or not stat.S_ISDIR(parent_info.st_mode)
+        or parent_info.st_uid != 0
+        or stat.S_IMODE(parent_info.st_mode) & 0o022
+    ):
+        raise RuntimeError("prepare_runtime_state_env_parent_unsafe")
+    preserved = []
+    seen = set()
+    if env_file.exists():
+        info = env_file.lstat()
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+            raise RuntimeError("prepare_runtime_state_env_file_unsafe")
+        if info.st_size > 65536:
+            raise RuntimeError("prepare_runtime_state_env_file_oversize")
+        if info.st_uid != 0 or stat.S_IMODE(info.st_mode) & 0o077:
+            raise RuntimeError("prepare_runtime_state_env_file_unsafe")
+        for raw_line in env_file.read_text(encoding="utf-8").splitlines():
+            if "=" in raw_line:
+                key, value = raw_line.split("=", 1)
+                key = key.strip()
+            else:
+                key, value = "", ""
+            if key == MODE_KEY:
+                raise RuntimeError("prepare_runtime_state_mode_binding_present")
+            if key in managed:
+                if key in seen:
+                    raise RuntimeError("prepare_runtime_state_env_binding_duplicate")
+                seen.add(key)
+                if value != managed[key]:
+                    raise RuntimeError("prepare_runtime_state_env_binding_conflict")
+                continue
+            preserved.append(raw_line)
+    content = "\n".join([*preserved, *(f"{key}={value}" for key, value in managed.items())]).strip() + "\n"
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{env_file.name}.", suffix=".tmp", dir=str(parent))
+    tmp_path = Path(tmp_name)
+    try:
+        os.fchmod(fd, 0o600)
+        os.fchown(fd, 0, 0)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, env_file)
+        os.chown(env_file, 0, 0)
+        os.chmod(env_file, 0o600)
+    except Exception:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
+        raise
+except Exception as exc:
+    token = str(exc) or reason
+    if not token.startswith("prepare_runtime_state_"):
+        token = reason
+    sys.stderr.write(token + "\n")
+    raise SystemExit(1)
+'''
+    code, output = run_command(
+        _non_interactive_sudo(
+            sys.executable,
+            "-c",
+            script,
+            RUNNER_VNEXT_MODE_ENV,
+            str(env_file),
+            f"{RUNNER_VNEXT_STATE_ROOT_ENV}={state_root}",
+            f"{RUNNER_VNEXT_LEDGER_DB_ENV}={ledger}",
+            f"{RUNNER_VNEXT_LEASE_DB_ENV}={lease}",
+        ),
+        timeout=30,
+    )
+    if code != 0:
+        reason = output.strip().splitlines()[-1:] or [
+            "prepare_runtime_state_env_file_sudo_failed"
+        ]
+        token = reason[0].strip()
+        if not token.startswith("prepare_runtime_state_"):
+            token = "prepare_runtime_state_env_file_sudo_failed"
+        raise RuntimeError(token)
+
+
 def _runner_vnext_prepare_env_file(
     *,
     env_file: Path,
@@ -22114,6 +22328,28 @@ def _runner_vnext_prepare_env_file(
         RUNNER_VNEXT_LEDGER_DB_ENV: str(ledger),
         RUNNER_VNEXT_LEASE_DB_ENV: str(lease),
     }
+    if _runner_vnext_prepare_is_fixed_path(
+        env_file, RUNNER_VNEXT_FIXED_PRIVATE_ENV_FILE
+    ):
+        if not _runner_vnext_prepare_is_fixed_path(
+            state_root, RUNNER_VNEXT_FIXED_PRIVATE_STATE_ROOT
+        ):
+            raise RuntimeError("prepare_runtime_state_root_not_fixed")
+        if not _runner_vnext_prepare_is_fixed_path(
+            ledger, RUNNER_VNEXT_FIXED_PRIVATE_LEDGER_DB
+        ):
+            raise RuntimeError("prepare_runtime_state_ledger_not_fixed")
+        if not _runner_vnext_prepare_is_fixed_path(
+            lease, RUNNER_VNEXT_FIXED_PRIVATE_LEASE_DB
+        ):
+            raise RuntimeError("prepare_runtime_state_lease_not_fixed")
+        _runner_vnext_prepare_fixed_env_file_sudo(
+            env_file=env_file,
+            state_root=state_root,
+            ledger=ledger,
+            lease=lease,
+        )
+        return
     parent = env_file.parent
     parent.mkdir(parents=True, exist_ok=True)
     parent_info = parent.lstat()
@@ -22260,10 +22496,15 @@ def runner_vnext_prepare_runtime_state_v1(
     if not blockers:
         previous_umask = os.umask(0o077)
         try:
+            def mark_mutation_performed() -> None:
+                nonlocal mutation_performed
+                mutation_performed = True
+
             root, root_created = _runner_vnext_prepare_safe_root(
-                RUNNER_VNEXT_PRIVATE_STATE_ROOT
+                RUNNER_VNEXT_PRIVATE_STATE_ROOT,
+                on_mutation=mark_mutation_performed,
             )
-            mutation_performed = root_created
+            mutation_performed = mutation_performed or root_created
             ledger_path = RUNNER_VNEXT_PRIVATE_LEDGER_DB
             lease_path = RUNNER_VNEXT_PRIVATE_LEASE_DB
             if ledger_path == lease_path:
