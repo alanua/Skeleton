@@ -27,6 +27,9 @@ DEFAULT_MAX_OUTPUT_BYTES = 64_000
 DEFAULT_MAX_STDIN_BYTES = 256_000
 DEFAULT_MAX_TIMEOUT_SECONDS = 900
 DEFAULT_FRESHNESS_SECONDS = 300
+# Replay/idempotency state is a short-lived safety cache, not the audit history.
+# Keep it long enough to cover the longest bounded command plus retry grace.
+DEFAULT_REPLAY_STATE_RETENTION_SECONDS = DEFAULT_MAX_TIMEOUT_SECONDS + DEFAULT_FRESHNESS_SECONDS
 DEFAULT_AUDIT_LOG = Path.home() / ".local/state/skeleton/home_edge_exec/audit.jsonl"
 DEFAULT_IDEMPOTENCY_CACHE = Path.home() / ".local/state/skeleton/home_edge_exec/idempotency.json"
 DEFAULT_CANCEL_DIR = Path.home() / ".local/state/skeleton/home_edge_exec/cancel"
@@ -321,15 +324,33 @@ class HomeEdgeExecEngine:
         if self.state_file is None:
             raise HomeEdgeExecError("persistent nonce/idempotency state is not configured")
         self.state_file.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+
+        # The state lock protects replay/idempotency bookkeeping only. Holding it
+        # while the physical command runs serializes every independent Home Edge
+        # action behind the slowest one (media remote, sensors, audits, etc.).
+        # Reserve atomically, release the lock for execution, then merge the
+        # receipt back under the lock.
+        wait_deadline = time.monotonic() + max(1.0, float(parsed.timeout_seconds) + 5.0)
+        while True:
+            pending_same_request = False
+            with _locked_json_state(self.state_file) as state:
+                self._prune_replay_state(state)
+                pending_same_request = self._matching_inflight_idempotent_request(parsed, state)
+                if not pending_same_request:
+                    replay = self._cached_receipt(parsed, state)
+                    if replay is not None:
+                        return replay
+                    self._reserve_request(parsed, state)
+                    break
+            if time.monotonic() >= wait_deadline:
+                raise HomeEdgeExecError("idempotent request is still in flight")
+            time.sleep(0.01)
+
+        receipt = self._execute_once(parsed, idempotency="executed")
         with _locked_json_state(self.state_file) as state:
-            replay = self._cached_receipt(parsed, state)
-            if replay is not None:
-                return replay
-            self._reserve_request(parsed, state)
-            receipt = self._execute_once(parsed, idempotency="executed")
             self._store_receipt(parsed, receipt, state)
-            self._audit(parsed, receipt)
-            return receipt
+        self._audit(parsed, receipt)
+        return receipt
 
     def _execute_once(self, parsed: HomeEdgeExecRequest, *, idempotency: str) -> HomeEdgeExecReceipt:
         self._enforce_identity(parsed)
@@ -406,6 +427,52 @@ class HomeEdgeExecEngine:
         if not hmac.compare_digest(expected, request.signature):
             raise HomeEdgeExecError("request signature mismatch")
 
+    def _prune_replay_state(self, state: dict[str, Any]) -> None:
+        cutoff = datetime.now(UTC).timestamp() - DEFAULT_REPLAY_STATE_RETENTION_SECONDS
+        for section_name in ("idempotency", "nonces"):
+            section = _mutable_state_section(state, section_name)
+            expired: list[str] = []
+            for key, record in section.items():
+                if not isinstance(record, dict):
+                    expired.append(key)
+                    continue
+                receipt = record.get("receipt")
+                stamp = ""
+                if isinstance(receipt, dict):
+                    stamp = str(receipt.get("finished_at") or receipt.get("started_at") or "")
+                else:
+                    stamp = str(record.get("reserved_at") or "")
+                if not stamp:
+                    # Legacy in-flight reservations have no timestamp. Keep them
+                    # fail-closed rather than risking a duplicate physical action.
+                    continue
+                try:
+                    parsed = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+                    if parsed.tzinfo is None:
+                        parsed = parsed.replace(tzinfo=UTC)
+                    if parsed.astimezone(UTC).timestamp() < cutoff:
+                        expired.append(key)
+                except ValueError:
+                    # Malformed replay metadata is not authoritative audit data.
+                    expired.append(key)
+            for key in expired:
+                section.pop(key, None)
+
+    def _matching_inflight_idempotent_request(
+        self,
+        request: HomeEdgeExecRequest,
+        state: Mapping[str, Any],
+    ) -> bool:
+        if not request.idempotency_key:
+            return False
+        cached = _state_section(state, "idempotency").get(request.idempotency_key)
+        if not isinstance(cached, dict):
+            return False
+        digest = _payload_digest(request)
+        if cached.get("payload_digest") != digest:
+            return False
+        return not isinstance(cached.get("receipt"), dict)
+
     def _cached_receipt(self, request: HomeEdgeExecRequest, state: Mapping[str, Any]) -> HomeEdgeExecReceipt | None:
         digest = _payload_digest(request)
         if request.idempotency_key:
@@ -429,11 +496,17 @@ class HomeEdgeExecEngine:
     def _reserve_request(self, request: HomeEdgeExecRequest, state: dict[str, Any]) -> None:
         digest = _payload_digest(request)
         nonces = _mutable_state_section(state, "nonces")
-        nonces[request.nonce or ""] = {"payload_digest": digest, "idempotency_key": request.idempotency_key}
+        reserved_at = datetime.now(UTC).isoformat()
+        nonces[request.nonce or ""] = {
+            "payload_digest": digest,
+            "idempotency_key": request.idempotency_key,
+            "reserved_at": reserved_at,
+        }
         if request.idempotency_key:
             _mutable_state_section(state, "idempotency")[request.idempotency_key] = {
                 "payload_digest": digest,
                 "nonce": request.nonce,
+                "reserved_at": reserved_at,
             }
 
     def _store_receipt(self, request: HomeEdgeExecRequest, receipt: HomeEdgeExecReceipt, state: dict[str, Any]) -> None:
