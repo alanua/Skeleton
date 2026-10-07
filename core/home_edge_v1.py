@@ -5,7 +5,7 @@ from enum import StrEnum
 from typing import Any, Mapping, Protocol
 from uuid import uuid4
 
-from core.exo_device_control_plane import canonical_exo_public_registry
+from core.exo_device_control_plane import ExoDeviceRegistry, canonical_exo_public_registry
 
 
 class CapabilityDomain(StrEnum):
@@ -74,12 +74,50 @@ class DeviceRegistry:
     devices: tuple[RegistryDevice, ...] = ()
     services: tuple[RegistryService, ...] = ()
 
-    def resolve(self, capability_name: str) -> tuple[RegistryNode, Capability] | None:
+    def resolve(self, capability_name: str, *, target: str | None = None) -> tuple[RegistryNode, Capability] | None:
+        if target:
+            resolved = self._resolve_target(capability_name, target)
+            if resolved is not None:
+                return resolved
+
         for node in self.nodes:
             capability = node.capability(capability_name)
             if capability is not None:
                 return node, capability
         return None
+
+    def _resolve_target(self, capability_name: str, target: str) -> tuple[RegistryNode, Capability] | None:
+        for node in self.nodes:
+            if target not in {node.node_id, node.current_host}:
+                continue
+            capability = node.capability(capability_name)
+            if capability is not None:
+                return node, capability
+
+        for service in self.services:
+            if service.service_id != target:
+                continue
+            capability = next((item for item in service.capabilities if item.name == capability_name), None)
+            if capability is not None:
+                owner = self._node_by_id(service.owner_node_id)
+                if owner is not None:
+                    return owner, capability
+
+        for device in self.devices:
+            if device.device_id != target:
+                continue
+            capability = device.capability(capability_name)
+            if capability is not None:
+                gateway = self._portable_gateway()
+                if gateway is not None:
+                    return gateway, capability
+        return None
+
+    def _node_by_id(self, node_id: str) -> RegistryNode | None:
+        return next((node for node in self.nodes if node.node_id == node_id), None)
+
+    def _portable_gateway(self) -> RegistryNode | None:
+        return next((node for node in self.nodes if node.portable_role), None)
 
 
 @dataclass(frozen=True)
@@ -206,7 +244,7 @@ class HomeEdgeRouter:
                 message="task requires approval before execution",
             )
 
-        resolved = self.registry.resolve(task.capability)
+        resolved = self.registry.resolve(task.capability, target=task.target)
         if resolved is None:
             return None, AuditEvent(
                 task_id=task.task_id,
@@ -215,7 +253,7 @@ class HomeEdgeRouter:
                 domain=None,
                 decision=decision,
                 status="blocked",
-                message="no node with requested capability",
+                message="no registry target with requested capability",
             )
 
         node, capability = resolved
@@ -243,8 +281,12 @@ class HomeEdgeRouter:
         )
 
 
-def home_edge_v1_bootstrap_registry() -> DeviceRegistry:
-    exo = canonical_exo_public_registry()
+def home_edge_v1_bootstrap_registry(
+    exo_registry: ExoDeviceRegistry | Mapping[str, Any] | None = None,
+) -> DeviceRegistry:
+    exo = exo_registry.to_mapping() if isinstance(exo_registry, ExoDeviceRegistry) else exo_registry
+    if exo is None:
+        exo = canonical_exo_public_registry()
     exo_devices = tuple(exo["devices"])
     home_edge = next(
         device
@@ -287,6 +329,7 @@ def _registry_device_from_exo(device: Mapping[str, Any]) -> RegistryDevice:
         str(device["adapter_kind"]),
         location=device.get("location"),
         capabilities=tuple(
-            Capability(str(item["name"]), CapabilityDomain(str(item["domain"]))) for item in device["capabilities"]
+            Capability(str(item["name"]), CapabilityDomain(str(item["domain"])), RiskLevel(str(item["risk"])))
+            for item in device["capabilities"]
         ),
     )

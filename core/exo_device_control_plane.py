@@ -127,9 +127,14 @@ class ExoDeviceRegistry:
     devices: tuple[ExoDevice, ...]
 
     def __post_init__(self) -> None:
-        ids = [device.device_id for device in self.devices]
-        if len(ids) != len(set(ids)):
-            raise ExoControlError("duplicate_device_id")
+        identities: dict[str, str] = {}
+        for device in self.devices:
+            for identity in (device.device_id, *device.identity.registry_aliases):
+                if not _safe_id(identity):
+                    raise ExoControlError("device_id_invalid")
+                existing = identities.setdefault(identity, device.device_id)
+                if existing != device.device_id:
+                    raise ExoControlError("duplicate_device_id")
 
     def get(self, device_id: str) -> ExoDevice:
         for device in self.devices:
@@ -479,12 +484,12 @@ def canonical_exo_registry() -> ExoDeviceRegistry:
         devices=(
             ExoDevice(
                 identity=StableDeviceIdentity(
-                    device_id="home_edge.home_edge_01",
+                    device_id="home_edge_01",
                     adapter_kind="home_edge",
                     vendor="Skeleton",
                     model="Portable Home Edge role",
                     location="home_lan",
-                    registry_aliases=("home_edge_01", "home-edge-01", "home-edge-role", "home_edge_tv"),
+                    registry_aliases=("home_edge.home_edge_01", "home-edge-01", "home-edge-role", "home_edge_tv"),
                 ),
                 current_host="home-edge-01",
                 portable_role=True,
@@ -502,12 +507,12 @@ def canonical_exo_registry() -> ExoDeviceRegistry:
             ),
             ExoDevice(
                 identity=StableDeviceIdentity(
-                    device_id="display.samsung_tv",
+                    device_id="samsung_tv",
                     adapter_kind="samsung_adb",
                     vendor="Samsung",
                     model="Android display endpoint",
                     location="living_room",
-                    registry_aliases=("samsung_tv", "samsung"),
+                    registry_aliases=("display.samsung_tv", "samsung"),
                 ),
                 capabilities=(
                     ExoCapability("adb.watchdog", CapabilityDomain.PROVISIONING_RECOVERY),
@@ -519,12 +524,12 @@ def canonical_exo_registry() -> ExoDeviceRegistry:
             ),
             ExoDevice(
                 identity=StableDeviceIdentity(
-                    device_id="display.sharp_tv_living_room",
+                    device_id="sharp_tv_living_room",
                     adapter_kind="sharp_ir",
                     vendor="Sharp",
                     model="IR television",
                     location="living_room",
-                    registry_aliases=("sharp_tv_living_room", "sharp_tv"),
+                    registry_aliases=("display.sharp_tv_living_room", "sharp_tv"),
                 ),
                 capabilities=(
                     ExoCapability("ir.transmit", CapabilityDomain.DEVICE_CONTROL, RiskLevel.YELLOW),
@@ -584,8 +589,8 @@ def canonical_exo_control_plane(
     )
 
 
-def canonical_exo_public_registry() -> dict[str, Any]:
-    return canonical_exo_registry().to_mapping()
+def canonical_exo_public_registry(registry: ExoDeviceRegistry | None = None) -> dict[str, Any]:
+    return (registry or canonical_exo_registry()).to_mapping()
 
 
 def _blocked_result(

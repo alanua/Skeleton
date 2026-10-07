@@ -22,9 +22,9 @@ from core.exo_device_control_plane import (
 )
 
 
-HOME_EDGE_ID = "home_edge.home_edge_01"
-SAMSUNG_ID = "display.samsung_tv"
-SHARP_ID = "display.sharp_tv_living_room"
+HOME_EDGE_ID = "home_edge_01"
+SAMSUNG_ID = "samsung_tv"
+SHARP_ID = "sharp_tv_living_room"
 
 
 class _FlakyTransport:
@@ -52,18 +52,47 @@ def test_canonical_registry_has_stable_separate_device_identities() -> None:
     assert devices[SHARP_ID]["adapter_kind"] == "sharp_ir"
     assert devices[HOME_EDGE_ID]["portable_role"] is True
     assert devices[HOME_EDGE_ID]["current_host"] == "home-edge-01"
-    assert "home_edge_01" in devices[HOME_EDGE_ID]["registry_aliases"]
-    assert "samsung_tv" in devices[SAMSUNG_ID]["registry_aliases"]
-    assert "sharp_tv_living_room" in devices[SHARP_ID]["registry_aliases"]
+    assert "home_edge.home_edge_01" in devices[HOME_EDGE_ID]["registry_aliases"]
+    assert "display.samsung_tv" in devices[SAMSUNG_ID]["registry_aliases"]
+    assert "display.sharp_tv_living_room" in devices[SHARP_ID]["registry_aliases"]
 
 
 def test_legacy_aliases_resolve_to_canonical_device_ids() -> None:
     plane = canonical_exo_control_plane()
 
-    result = plane.execute(ExoCommand(device_id="samsung_tv", capability="adb.watchdog"))
+    result = plane.execute(ExoCommand(device_id="display.samsung_tv", capability="adb.watchdog"))
 
     assert result.device_id == SAMSUNG_ID
     assert result.observation.device_id == SAMSUNG_ID
+
+
+def test_registry_rejects_aliases_that_collide_with_other_device_ids() -> None:
+    with pytest.raises(ExoControlError, match="duplicate_device_id"):
+        ExoDeviceRegistry(
+            devices=(
+                ExoDevice(
+                    identity=StableDeviceIdentity(
+                        device_id="display.one",
+                        adapter_kind="samsung_adb",
+                        vendor="Samsung",
+                        model="Android display endpoint",
+                        registry_aliases=("display.two",),
+                    ),
+                    capabilities=(ExoCapability("adb.watchdog", CapabilityDomain.PROVISIONING_RECOVERY),),
+                    transport_ids=("adb_one",),
+                ),
+                ExoDevice(
+                    identity=StableDeviceIdentity(
+                        device_id="display.two",
+                        adapter_kind="sharp_ir",
+                        vendor="Sharp",
+                        model="IR television",
+                    ),
+                    capabilities=(ExoCapability("ir.transmit", CapabilityDomain.DEVICE_CONTROL, RiskLevel.YELLOW),),
+                    transport_ids=("ir_two",),
+                ),
+            )
+        )
 
 
 def test_capability_driven_adapters_do_not_flatten_heterogeneous_devices() -> None:
