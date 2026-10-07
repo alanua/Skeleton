@@ -5,6 +5,8 @@ from enum import StrEnum
 from typing import Any, Mapping, Protocol
 from uuid import uuid4
 
+from core.exo_device_control_plane import canonical_exo_public_registry
+
 
 class CapabilityDomain(StrEnum):
     CONNECTIVITY = "connectivity"
@@ -53,6 +55,9 @@ class RegistryDevice:
     device_type: str
     location: str | None = None
     capabilities: tuple[Capability, ...] = ()
+
+    def capability(self, capability_name: str) -> Capability | None:
+        return next((item for item in self.capabilities if item.name == capability_name), None)
 
 
 @dataclass(frozen=True)
@@ -239,13 +244,18 @@ class HomeEdgeRouter:
 
 
 def home_edge_v1_bootstrap_registry() -> DeviceRegistry:
+    exo = canonical_exo_public_registry()
+    exo_devices = {device["device_id"]: device for device in exo["devices"]}
+    home_edge = exo_devices["home_edge_01"]
+    samsung = exo_devices["samsung_tv"]
+    sharp = exo_devices["sharp_tv_living_room"]
     return DeviceRegistry(
         nodes=(
             RegistryNode(
                 node_id="home-edge-role",
                 node_type="portable_home_gateway",
-                current_host="home-edge-01",
-                portable_role=True,
+                current_host=home_edge["current_host"],
+                portable_role=bool(home_edge["portable_role"]),
                 capabilities=(
                     Capability("connectivity.health", CapabilityDomain.CONNECTIVITY),
                     Capability("ha.service_call", CapabilityDomain.DEVICE_CONTROL),
@@ -260,6 +270,30 @@ def home_edge_v1_bootstrap_registry() -> DeviceRegistry:
         devices=(
             RegistryDevice("display-client", "human_interface", capabilities=(Capability("ui.display", CapabilityDomain.HUMAN_INTERFACE),)),
             RegistryDevice("smart-light", "home_automation", capabilities=(Capability("ha.service_call", CapabilityDomain.DEVICE_CONTROL),)),
+            RegistryDevice(
+                home_edge["device_id"],
+                home_edge["adapter_kind"],
+                location=home_edge.get("location"),
+                capabilities=tuple(
+                    Capability(str(item["name"]), CapabilityDomain(str(item["domain"]))) for item in home_edge["capabilities"]
+                ),
+            ),
+            RegistryDevice(
+                samsung["device_id"],
+                samsung["adapter_kind"],
+                location=samsung.get("location"),
+                capabilities=tuple(
+                    Capability(str(item["name"]), CapabilityDomain(str(item["domain"]))) for item in samsung["capabilities"]
+                ),
+            ),
+            RegistryDevice(
+                sharp["device_id"],
+                sharp["adapter_kind"],
+                location=sharp.get("location"),
+                capabilities=tuple(
+                    Capability(str(item["name"]), CapabilityDomain(str(item["domain"]))) for item in sharp["capabilities"]
+                ),
+            ),
         ),
         services=(
             RegistryService("home_assistant", "home_automation", "home-edge-role", (Capability("ha.service_call", CapabilityDomain.DEVICE_CONTROL),)),

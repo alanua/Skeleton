@@ -16,6 +16,18 @@ def test_role_is_portable() -> None:
     assert node.portable_role is True
 
 
+def test_bootstrap_registry_includes_migrated_exo_device_identities() -> None:
+    registry = home_edge_v1_bootstrap_registry()
+    devices = {device.device_id: device for device in registry.devices}
+
+    assert {"home_edge_01", "samsung_tv", "sharp_tv_living_room"} <= set(devices)
+    assert devices["home_edge_01"].device_type == "home_edge"
+    assert devices["samsung_tv"].device_type == "samsung_adb"
+    assert devices["sharp_tv_living_room"].device_type == "sharp_ir"
+    assert devices["samsung_tv"].capability("adb.watchdog") is not None
+    assert devices["sharp_tv_living_room"].capability("ir.transmit") is not None
+
+
 def test_all_domains_have_executor_stubs() -> None:
     assert set(default_executors()) == set(CapabilityDomain)
 
