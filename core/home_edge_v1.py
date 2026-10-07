@@ -245,10 +245,12 @@ class HomeEdgeRouter:
 
 def home_edge_v1_bootstrap_registry() -> DeviceRegistry:
     exo = canonical_exo_public_registry()
-    exo_devices = {device["device_id"]: device for device in exo["devices"]}
-    home_edge = exo_devices["home_edge_01"]
-    samsung = exo_devices["samsung_tv"]
-    sharp = exo_devices["sharp_tv_living_room"]
+    exo_devices = tuple(exo["devices"])
+    home_edge = next(
+        device
+        for device in exo_devices
+        if device["adapter_kind"] == "home_edge" and bool(device["portable_role"])
+    )
     return DeviceRegistry(
         nodes=(
             RegistryNode(
@@ -270,33 +272,21 @@ def home_edge_v1_bootstrap_registry() -> DeviceRegistry:
         devices=(
             RegistryDevice("display-client", "human_interface", capabilities=(Capability("ui.display", CapabilityDomain.HUMAN_INTERFACE),)),
             RegistryDevice("smart-light", "home_automation", capabilities=(Capability("ha.service_call", CapabilityDomain.DEVICE_CONTROL),)),
-            RegistryDevice(
-                home_edge["device_id"],
-                home_edge["adapter_kind"],
-                location=home_edge.get("location"),
-                capabilities=tuple(
-                    Capability(str(item["name"]), CapabilityDomain(str(item["domain"]))) for item in home_edge["capabilities"]
-                ),
-            ),
-            RegistryDevice(
-                samsung["device_id"],
-                samsung["adapter_kind"],
-                location=samsung.get("location"),
-                capabilities=tuple(
-                    Capability(str(item["name"]), CapabilityDomain(str(item["domain"]))) for item in samsung["capabilities"]
-                ),
-            ),
-            RegistryDevice(
-                sharp["device_id"],
-                sharp["adapter_kind"],
-                location=sharp.get("location"),
-                capabilities=tuple(
-                    Capability(str(item["name"]), CapabilityDomain(str(item["domain"]))) for item in sharp["capabilities"]
-                ),
-            ),
+            *tuple(_registry_device_from_exo(device) for device in exo_devices),
         ),
         services=(
             RegistryService("home_assistant", "home_automation", "home-edge-role", (Capability("ha.service_call", CapabilityDomain.DEVICE_CONTROL),)),
             RegistryService("logitech_media_server", "media", "home-edge-role", (Capability("media.play", CapabilityDomain.MEDIA_PRESENCE),)),
+        ),
+    )
+
+
+def _registry_device_from_exo(device: Mapping[str, Any]) -> RegistryDevice:
+    return RegistryDevice(
+        str(device["device_id"]),
+        str(device["adapter_kind"]),
+        location=device.get("location"),
+        capabilities=tuple(
+            Capability(str(item["name"]), CapabilityDomain(str(item["domain"]))) for item in device["capabilities"]
         ),
     )

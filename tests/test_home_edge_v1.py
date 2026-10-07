@@ -9,6 +9,11 @@ from core.home_edge_v1 import (
 )
 
 
+HOME_EDGE_ID = "home_edge.home_edge_01"
+SAMSUNG_ID = "display.samsung_tv"
+SHARP_ID = "display.sharp_tv_living_room"
+
+
 def test_role_is_portable() -> None:
     node = home_edge_v1_bootstrap_registry().nodes[0]
     assert node.node_id == "home-edge-role"
@@ -20,12 +25,12 @@ def test_bootstrap_registry_includes_migrated_exo_device_identities() -> None:
     registry = home_edge_v1_bootstrap_registry()
     devices = {device.device_id: device for device in registry.devices}
 
-    assert {"home_edge_01", "samsung_tv", "sharp_tv_living_room"} <= set(devices)
-    assert devices["home_edge_01"].device_type == "home_edge"
-    assert devices["samsung_tv"].device_type == "samsung_adb"
-    assert devices["sharp_tv_living_room"].device_type == "sharp_ir"
-    assert devices["samsung_tv"].capability("adb.watchdog") is not None
-    assert devices["sharp_tv_living_room"].capability("ir.transmit") is not None
+    assert {HOME_EDGE_ID, SAMSUNG_ID, SHARP_ID} <= set(devices)
+    assert devices[HOME_EDGE_ID].device_type == "home_edge"
+    assert devices[SAMSUNG_ID].device_type == "samsung_adb"
+    assert devices[SHARP_ID].device_type == "sharp_ir"
+    assert devices[SAMSUNG_ID].capability("adb.watchdog") is not None
+    assert devices[SHARP_ID].capability("ir.transmit") is not None
 
 
 def test_all_domains_have_executor_stubs() -> None:

@@ -479,12 +479,12 @@ def canonical_exo_registry() -> ExoDeviceRegistry:
         devices=(
             ExoDevice(
                 identity=StableDeviceIdentity(
-                    device_id="home_edge_01",
+                    device_id="home_edge.home_edge_01",
                     adapter_kind="home_edge",
                     vendor="Skeleton",
                     model="Portable Home Edge role",
                     location="home_lan",
-                    registry_aliases=("home-edge-01", "home-edge-role", "home_edge_tv"),
+                    registry_aliases=("home_edge_01", "home-edge-01", "home-edge-role", "home_edge_tv"),
                 ),
                 current_host="home-edge-01",
                 portable_role=True,
@@ -502,12 +502,12 @@ def canonical_exo_registry() -> ExoDeviceRegistry:
             ),
             ExoDevice(
                 identity=StableDeviceIdentity(
-                    device_id="samsung_tv",
+                    device_id="display.samsung_tv",
                     adapter_kind="samsung_adb",
                     vendor="Samsung",
                     model="Android display endpoint",
                     location="living_room",
-                    registry_aliases=("samsung",),
+                    registry_aliases=("samsung_tv", "samsung"),
                 ),
                 capabilities=(
                     ExoCapability("adb.watchdog", CapabilityDomain.PROVISIONING_RECOVERY),
@@ -519,12 +519,12 @@ def canonical_exo_registry() -> ExoDeviceRegistry:
             ),
             ExoDevice(
                 identity=StableDeviceIdentity(
-                    device_id="sharp_tv_living_room",
+                    device_id="display.sharp_tv_living_room",
                     adapter_kind="sharp_ir",
                     vendor="Sharp",
                     model="IR television",
                     location="living_room",
-                    registry_aliases=("sharp_tv",),
+                    registry_aliases=("sharp_tv_living_room", "sharp_tv"),
                 ),
                 capabilities=(
                     ExoCapability("ir.transmit", CapabilityDomain.DEVICE_CONTROL, RiskLevel.YELLOW),
@@ -546,31 +546,41 @@ def canonical_exo_adapters() -> dict[str, DeviceAdapter]:
 
 def canonical_exo_supervisors(
     transports: Mapping[str, Sequence[DeviceTransport]] | None = None,
+    *,
+    registry: ExoDeviceRegistry | None = None,
 ) -> dict[str, PerDeviceTransportSupervisor]:
     configured = dict(transports or {})
-    defaults: dict[str, tuple[DeviceTransport, ...]] = {
-        "home_edge_01": (StaticTransport("home_edge_exec_gateway", reason="home_edge_gateway_available"),),
-        "samsung_tv": (StaticTransport("samsung_usb_adb_watchdog", reason="samsung_watchdog_available"),),
-        "sharp_tv_living_room": (StaticTransport("android_consumer_ir", reason="sharp_ir_bridge_available"),),
-    }
-    return {
-        device_id: PerDeviceTransportSupervisor(
-            device_id=device_id,
-            transports=tuple(configured.get(device_id, fallback)),
+    source = registry or canonical_exo_registry()
+    supervisors: dict[str, PerDeviceTransportSupervisor] = {}
+    for device in source.devices:
+        fallback = tuple(
+            StaticTransport(
+                transport_id,
+                reason=f"{device.adapter_kind}_transport_available",
+            )
+            for transport_id in device.transport_ids
+        )
+        selected = tuple(configured.get(device.device_id, fallback))
+        if not selected:
+            continue
+        supervisors[device.device_id] = PerDeviceTransportSupervisor(
+            device_id=device.device_id,
+            transports=selected,
             recovery_policy=BoundedRecoveryPolicy(max_attempts=2, allow_failover=True),
         )
-        for device_id, fallback in defaults.items()
-    }
+    return supervisors
 
 
 def canonical_exo_control_plane(
     *,
+    registry: ExoDeviceRegistry | None = None,
     transports: Mapping[str, Sequence[DeviceTransport]] | None = None,
 ) -> ExoDeviceControlPlane:
+    source = registry or canonical_exo_registry()
     return ExoDeviceControlPlane(
-        registry=canonical_exo_registry(),
+        registry=source,
         adapters=canonical_exo_adapters(),
-        supervisors=canonical_exo_supervisors(transports),
+        supervisors=canonical_exo_supervisors(transports, registry=source),
     )
 
 

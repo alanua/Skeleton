@@ -26,7 +26,7 @@ Tasks route by capability, not by hardcoded host.
 
 The Device Registry is the source of truth for home capabilities. Discovery tools update the registry; they are not the source of truth.
 
-`core/exo_device_control_plane.py` is the canonical EXO device-control plane for this rule. It keeps stable registry identities for `home_edge_01`, `samsung_tv` and `sharp_tv_living_room`, selects adapters by device capability, and gives each device its own transport supervisor. The Home Edge adapter delegates to the existing Home Edge executor gateway; it does not introduce a second executor.
+`core/exo_device_control_plane.py` is the canonical EXO device-control plane for this rule. It keeps canonical stable registry identities such as `home_edge.home_edge_01`, `display.samsung_tv` and `display.sharp_tv_living_room`, with older short names retained only as aliases. The registry, not a fixed device list, drives the N-device control plane: adapters are selected by each device capability and adapter kind, and each registry device with transports gets its own transport supervisor. A device with no configured supervisor fails closed before transport. The Home Edge adapter delegates to the existing Home Edge executor gateway; it does not introduce a second executor.
 
 Verification states are intentionally truthful:
 
