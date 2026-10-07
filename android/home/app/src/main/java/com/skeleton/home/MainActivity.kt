@@ -1462,8 +1462,8 @@ private fun Header(title:String, connected:Boolean, endpointId:String, endpoints
     LaunchedEffect(api.server,active,endpoint.endpointId,mode){
         if(api.server!=null&&active&&endpoint.adapterKind!="samsung"&&mode=="kiosk"){
             while(true){
-                delay(4000)
                 runCatching{api.get(endpointPath(endpoint.endpointId,"/remote/status"))}.onSuccess{youtubeRemoteStatus=it}
+                delay(850)
             }
         }
     }
@@ -1541,7 +1541,10 @@ private fun Header(title:String, connected:Boolean, endpointId:String, endpoints
     val youtubeControls=remote.optJSONObject("youtube_context")?.optJSONObject("controls")
         ?: remote.optJSONObject("controls")
         ?: JSONObject()
-    val running=lastGoodPlayer.optBoolean("running")
+    val remoteState=liveRemote.optInt("state",-99)
+    val remoteDuration=liveRemote.optDouble("duration",0.0).toFloat()
+    val videoId=liveRemote.optString("video_id","").ifBlank{lastGoodPlayer.optString("video_id","")}
+    val running=lastGoodPlayer.optBoolean("running") || (videoId.isNotBlank()&&remoteDuration>1f&&remoteState in setOf(1,2,3))
     val title=if(running)lastGoodPlayer.optString("display-title",lastGoodPlayer.optString("title",lastGoodPlayer.optString("media-title","Відео"))) else "Нічого не відтворюється"
     val se=if(running&&p.has("season")&&!p.isNull("season")){val s=p.optString("season","").takeUnless{it.equals("null",true)}.orEmpty();val e=if(p.has("episode")&&!p.isNull("episode"))p.optString("episode","").filter{it.isDigit()} else "";if(s.isNotBlank())"S$s"+(if(e.isNotBlank())" · E$e" else "") else ""}else ""
     // YouTube card is always 16:9. A portrait fallback contains an intentionally blurred
@@ -1551,14 +1554,14 @@ private fun Header(title:String, connected:Boolean, endpointId:String, endpoints
     val posterUrl=if(poster.isBlank())null else if(poster.startsWith("http://")||poster.startsWith("https://"))poster else if(api.server!=null)api.server+poster else null
     val bitmap=remoteBitmap(posterUrl,960,540)
     var seek by remember{mutableFloatStateOf(0f)}
-    val videoId=lastGoodPlayer.optString("video_id","")
     val isLive=liveRemote.optBoolean("is_live",false)
-    val serverPos=lastGoodPlayer.optDouble("time-pos",0.0).toFloat()
-    val rawDuration=lastGoodPlayer.optDouble("duration",0.0).toFloat()
+    val fallbackPos=lastGoodPlayer.optDouble("time-pos",0.0)
+    val serverPos=(if(liveRemote.has("time"))liveRemote.optDouble("time",fallbackPos) else fallbackPos).toFloat()
+    val rawDuration=if(remoteDuration>1f)remoteDuration else lastGoodPlayer.optDouble("duration",0.0).toFloat()
     val canSeek=liveRemote.optBoolean("is_seekable",!isLive&&rawDuration>1.0)
     val duration=rawDuration.coerceAtLeast(1f)
     LaunchedEffect(videoId,serverPos,rawDuration){seek=serverPos.coerceIn(0f,duration)}
-    val paused=lastGoodPlayer.optBoolean("pause",false)
+    val paused=when(remoteState){1->false;2,3->true;else->lastGoodPlayer.optBoolean("pause",false)}
     LaunchedEffect(videoId,running,canSeek,paused,rawDuration){
         if(running&&canSeek&&!paused&&rawDuration>1f)while(true){
             delay(1000)
