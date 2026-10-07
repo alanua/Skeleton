@@ -3665,6 +3665,73 @@ def test_target_project_publication_body_propagates_declared_existing_pr_binding
     assert "Expected PR Head Branch: runner/issue-13" in body
 
 
+def test_safe_issue_publish_branch_name_accepts_bounded_suffix() -> None:
+    assert runner._safe_issue_publish_branch_name("runner/issue-23")
+    assert runner._safe_issue_publish_branch_name("runner/bauclock-issue-23")
+    assert runner._safe_issue_publish_branch_name(
+        "runner/bauclock-issue-23-manual-time-access-tests-ci-backed"
+    )
+
+
+@pytest.mark.parametrize(
+    "branch",
+    (
+        "runner/nested/issue-23-manual-time-access-tests-ci-backed",
+        "runner/../issue-23-manual-time-access-tests-ci-backed",
+        "runner//issue-23-manual-time-access-tests-ci-backed",
+        " runner/issue-23-manual-time-access-tests-ci-backed",
+        "runner/issue-23-manual-time-access-tests-ci-backed ",
+        "runner/bauclock-manual-time-access-tests-ci-backed",
+        "runner/issue-23-",
+        f"runner/issue-23-{'a' * 65}",
+    ),
+)
+def test_safe_issue_publish_branch_name_rejects_unsafe_suffixed_shapes(
+    branch: str,
+) -> None:
+    assert not runner._safe_issue_publish_branch_name(branch)
+
+
+def test_target_project_publication_body_preserves_4519_existing_pr_metadata() -> None:
+    head_sha = "b" * 40
+    expected_branch = "runner/bauclock-issue-23-manual-time-access-tests-ci-backed"
+    issue_body = "\n".join(
+        (
+            "Selected Repository: alanua/bauclock",
+            "Base: main",
+            "Base SHA: " + "a" * 40,
+            "Allowed Files:",
+            "- BauClock/Package.swift",
+            "Existing PR: 54",
+            f"Expected PR Head SHA: {head_sha}",
+            f"Expected PR Head Branch: {expected_branch}",
+            "Expected Output: one protected draft PR",
+            "",
+            "```task",
+            "Continue the retained #4519 repair for manual time access tests.",
+            "```",
+        )
+    )
+    task, reason = runner.extract_runner_task(
+        issue_body,
+        default_repository="alanua/bauclock",
+    )
+    assert reason is None
+    assert task is not None
+
+    body = runner._target_project_publication_body(
+        issue_number=4519,
+        issue_body=issue_body,
+        runner_task=task,
+        source_repository=runner.REPO,
+    )
+
+    assert runner._declared_existing_pr_expected_head_branch(issue_body) == expected_branch
+    assert "Existing PR: 54" in body
+    assert f"Expected PR Head SHA: {head_sha}" in body
+    assert f"Expected PR Head Branch: {expected_branch}" in body
+
+
 def test_target_project_publication_body_omits_existing_pr_binding_for_new_pr() -> None:
     task, reason = runner.extract_runner_task(
         _lavalamp_codegen_issue_body(),
