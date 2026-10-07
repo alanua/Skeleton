@@ -276,3 +276,33 @@ def test_home_android_validation_does_not_autostart_tablet_video() -> None:
     assert "LaunchedEffect(api.server,selectionRevision" in main
     assert 'api.post(endpointPath(endpoint.endpointId,"/play"),o)' in main
     assert not re.search(r"LaunchedEffect\([^)]*\)\s*\{[^{}]*api\.post\(endpointPath\([^)]*\"/play\"", main)
+
+
+def test_home_video_selection_freshness_polls_lightweight_endpoint_selection_only() -> None:
+    main = read("app/src/main/java/com/skeleton/home/MainActivity.kt")
+
+    assert "private fun videoSelectionIdentity(selection:JSONObject):String=" in main
+    assert 'listOf("job_id","source_id","season","episode","voice")' in main
+    assert "var selectionIdentity by remember{mutableStateOf(\"\")}" in main
+    assert "suspend fun applyEndpointSelection(latest:JSONObject,reloadWork:Boolean)" in main
+    assert "selectionIdentity=videoSelectionIdentity(latest)" in main
+    assert "if(reloadWork&&jobId.isNotBlank()){loadJob(jobId);loadMonitor()}" in main
+    assert "LaunchedEffect(api.server,active,endpoint.endpointId)" in main
+    assert "if(api.server!=null&&active)while(true)" in main
+    assert "runCatching{endpointVideoSelection(api,endpoint.endpointId)}.onSuccess{latest->" in main
+    assert "val latestIdentity=videoSelectionIdentity(latest)" in main
+    assert "if(latestIdentity!=selectionIdentity)applyEndpointSelection(latest,true)" in main
+    assert "LaunchedEffect(selectionIdentity,job,sources,isSeries)" in main
+
+    video_screen = main.split("private fun VideoScreen", 1)[1]
+    poll_body = re.search(
+        r"LaunchedEffect\(api\.server,active,endpoint\.endpointId\)\{(?P<body>.*?)\n    \}",
+        video_screen,
+        re.DOTALL,
+    ).group("body")
+    assert "endpointVideoSelection(api,endpoint.endpointId)" in poll_body
+    assert "loadJob(jobId)" not in poll_body
+    assert "mediaHistoryPath" not in poll_body
+    assert "/api/jobs/" not in poll_body
+    assert "/api/video/external-links" not in poll_body
+    assert "/api/video/monitor" not in poll_body
