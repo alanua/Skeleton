@@ -22192,6 +22192,7 @@ def _runner_vnext_prepare_fixed_env_file_sudo(
     state_root: Path,
     ledger: Path,
     lease: Path,
+    current_mode: str,
 ) -> None:
     if not _runner_vnext_prepare_is_fixed_path(
         env_file, RUNNER_VNEXT_FIXED_PRIVATE_ENV_FILE
@@ -22224,8 +22225,9 @@ import sys
 import tempfile
 
 MODE_KEY = sys.argv[1]
-env_file = Path(sys.argv[2])
-managed = dict(arg.split("=", 1) for arg in sys.argv[3:])
+current_mode = sys.argv[2]
+env_file = Path(sys.argv[3])
+managed = dict(arg.split("=", 1) for arg in sys.argv[4:])
 reason = "prepare_runtime_state_env_file_sudo_failed"
 try:
     parent = env_file.parent
@@ -22238,6 +22240,7 @@ try:
     ):
         raise RuntimeError("prepare_runtime_state_env_parent_unsafe")
     preserved = []
+    mode_binding_seen = False
     seen = set()
     if env_file.exists():
         info = env_file.lstat()
@@ -22254,7 +22257,13 @@ try:
             else:
                 key, value = "", ""
             if key == MODE_KEY:
-                raise RuntimeError("prepare_runtime_state_mode_binding_present")
+                if mode_binding_seen:
+                    raise RuntimeError("prepare_runtime_state_mode_binding_duplicate")
+                mode_binding_seen = True
+                if value != current_mode:
+                    raise RuntimeError("prepare_runtime_state_mode_binding_mismatch")
+                preserved.append(raw_line)
+                continue
             if key in managed:
                 if key in seen:
                     raise RuntimeError("prepare_runtime_state_env_binding_duplicate")
@@ -22299,6 +22308,7 @@ except Exception as exc:
             "-c",
             script,
             RUNNER_VNEXT_MODE_ENV,
+            current_mode,
             str(env_file),
             f"{RUNNER_VNEXT_STATE_ROOT_ENV}={state_root}",
             f"{RUNNER_VNEXT_LEDGER_DB_ENV}={ledger}",
@@ -22322,7 +22332,10 @@ def _runner_vnext_prepare_env_file(
     state_root: Path,
     ledger: Path,
     lease: Path,
+    current_mode: str,
 ) -> None:
+    if current_mode not in {RUNNER_MODE_OFF, RUNNER_MODE_SHADOW}:
+        raise RuntimeError("prepare_runtime_state_vnext_mode_not_off")
     managed_bindings = {
         RUNNER_VNEXT_STATE_ROOT_ENV: str(state_root),
         RUNNER_VNEXT_LEDGER_DB_ENV: str(ledger),
@@ -22348,6 +22361,7 @@ def _runner_vnext_prepare_env_file(
             state_root=state_root,
             ledger=ledger,
             lease=lease,
+            current_mode=current_mode,
         )
         return
     parent = env_file.parent
@@ -22372,7 +22386,13 @@ def _runner_vnext_prepare_env_file(
             else:
                 key, value = "", ""
             if key == RUNNER_VNEXT_MODE_ENV:
-                raise RuntimeError("prepare_runtime_state_mode_binding_present")
+                if RUNNER_VNEXT_MODE_ENV in seen_managed:
+                    raise RuntimeError("prepare_runtime_state_mode_binding_duplicate")
+                seen_managed.add(RUNNER_VNEXT_MODE_ENV)
+                if value != current_mode:
+                    raise RuntimeError("prepare_runtime_state_mode_binding_mismatch")
+                preserved.append(raw_line)
+                continue
             if key in managed_bindings:
                 if key in seen_managed:
                     raise RuntimeError("prepare_runtime_state_env_binding_duplicate")
@@ -22541,6 +22561,7 @@ def runner_vnext_prepare_runtime_state_v1(
                 state_root=root,
                 ledger=ledger,
                 lease=lease,
+                current_mode=normalized_mode,
             )
             env_file_bound = True
         except (OSError, RuntimeError, RunnerVNextAuthorityError) as exc:

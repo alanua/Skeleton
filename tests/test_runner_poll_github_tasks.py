@@ -28530,6 +28530,7 @@ def test_runner_vnext_prepare_fixed_env_sudo_requires_exact_fixed_store_argument
             state_root=state_root,
             ledger=wrong_ledger,
             lease=state_root / "lane-leases.sqlite3",
+            current_mode="off",
         )
 
     assert not env_file.exists()
@@ -28555,6 +28556,7 @@ def test_runner_vnext_prepare_fixed_env_sudo_prevalidates_parent_before_sudo(
             state_root=state_root,
             ledger=state_root / "operation-ledger.sqlite3",
             lease=state_root / "lane-leases.sqlite3",
+            current_mode="off",
         )
 
     assert not env_file.exists()
@@ -28593,7 +28595,8 @@ def test_runner_vnext_prepare_fixed_boundary_keeps_store_creation_unprivileged(
             state_root.chmod(0o700)
             return 0, ""
         if command[:3] == ["sudo", "-n", runner.sys.executable]:
-            assert command[6] == str(env_file)
+            assert command[6] == "off"
+            assert command[7] == str(env_file)
             env_file.write_text(
                 "\n".join(
                     (
@@ -28787,6 +28790,9 @@ def test_runner_vnext_prepare_runtime_state_accepts_shadow_without_changing_mode
     workdir = tmp_path / "checkout"
     workdir.mkdir()
     state_root = _patch_runner_vnext_prepare_paths(monkeypatch, tmp_path)
+    env_file = tmp_path / "skeleton-runner.env"
+    env_file.write_text(f"{runner.RUNNER_VNEXT_MODE_ENV}=shadow\n")
+    env_file.chmod(0o600)
     monkeypatch.setenv(runner.RUNNER_VNEXT_MODE_ENV, "shadow")
     monkeypatch.setattr(
         runner,
@@ -28810,10 +28816,13 @@ def test_runner_vnext_prepare_runtime_state_accepts_shadow_without_changing_mode
     assert "runner_vnext_mode_prepare_allowed=true" in report
     assert "runtime_state_prepared=true" in report
     assert "runner_vnext_mode_written=false" in report
-    env_lines = (tmp_path / "skeleton-runner.env").read_text().splitlines()
-    assert all(
-        not line.startswith(runner.RUNNER_VNEXT_MODE_ENV + "=") for line in env_lines
-    )
+    env_lines = env_file.read_text().splitlines()
+    assert env_lines == [
+        f"{runner.RUNNER_VNEXT_MODE_ENV}=shadow",
+        f"{runner.RUNNER_VNEXT_STATE_ROOT_ENV}={state_root}",
+        f"{runner.RUNNER_VNEXT_LEDGER_DB_ENV}={state_root / 'operation-ledger.sqlite3'}",
+        f"{runner.RUNNER_VNEXT_LEASE_DB_ENV}={state_root / 'lane-leases.sqlite3'}",
+    ]
     assert state_root.is_dir()
 
 
@@ -28883,7 +28892,7 @@ def test_runner_vnext_prepare_runtime_state_rejects_unsafe_preexisting_root(
     assert state_root.stat().st_mode & 0o777 == 0o755
 
 
-def test_runner_vnext_prepare_runtime_state_rejects_mode_binding_in_env_file(
+def test_runner_vnext_prepare_runtime_state_rejects_mismatched_mode_binding_in_env_file(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -28910,9 +28919,90 @@ def test_runner_vnext_prepare_runtime_state_rejects_mode_binding_in_env_file(
     )
 
     assert runner.maintenance_report_status(report) == "BLOCKED"
-    assert "reason=prepare_runtime_state_mode_binding_present" in report
+    assert "reason=prepare_runtime_state_mode_binding_mismatch" in report
     assert "mutation_performed=true" in report
     assert env_file.read_text() == f"{runner.RUNNER_VNEXT_MODE_ENV}=authoritative\n"
+
+
+def test_runner_vnext_prepare_runtime_state_preserves_matching_off_mode_binding(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    workdir = tmp_path / "checkout"
+    workdir.mkdir()
+    state_root = _patch_runner_vnext_prepare_paths(monkeypatch, tmp_path)
+    env_file = tmp_path / "skeleton-runner.env"
+    env_file.write_text(f"{runner.RUNNER_VNEXT_MODE_ENV}=off\n")
+    env_file.chmod(0o600)
+    monkeypatch.delenv(runner.RUNNER_VNEXT_MODE_ENV, raising=False)
+    monkeypatch.setattr(
+        runner,
+        "run_command",
+        lambda command, cwd=None, timeout=None, **_kwargs: (
+            (0, HEAD_SHA + "\n")
+            if command[:4] == ["git", "rev-parse", "--verify", "HEAD"]
+            or command[:2] == ["gh", "api"]
+            else (_ for _ in ()).throw(AssertionError(command))
+        ),
+    )
+
+    report = runner.runner_vnext_prepare_runtime_state_v1(
+        workdir,
+        _runner_vnext_prepare_runtime_state_body(),
+    )
+
+    assert runner.maintenance_report_status(report) == "DONE"
+    assert "runner_vnext_mode=off" in report
+    assert "runner_vnext_mode_prepare_allowed=true" in report
+    assert env_file.read_text().splitlines() == [
+        f"{runner.RUNNER_VNEXT_MODE_ENV}=off",
+        f"{runner.RUNNER_VNEXT_STATE_ROOT_ENV}={state_root}",
+        f"{runner.RUNNER_VNEXT_LEDGER_DB_ENV}={state_root / 'operation-ledger.sqlite3'}",
+        f"{runner.RUNNER_VNEXT_LEASE_DB_ENV}={state_root / 'lane-leases.sqlite3'}",
+    ]
+
+
+def test_runner_vnext_prepare_runtime_state_rejects_duplicate_mode_binding_in_env_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    workdir = tmp_path / "checkout"
+    workdir.mkdir()
+    _patch_runner_vnext_prepare_paths(monkeypatch, tmp_path)
+    env_file = tmp_path / "skeleton-runner.env"
+    env_file.write_text(
+        "\n".join(
+            (
+                f"{runner.RUNNER_VNEXT_MODE_ENV}=off",
+                f"{runner.RUNNER_VNEXT_MODE_ENV}=off",
+            )
+        )
+        + "\n"
+    )
+    env_file.chmod(0o600)
+    monkeypatch.delenv(runner.RUNNER_VNEXT_MODE_ENV, raising=False)
+    monkeypatch.setattr(
+        runner,
+        "run_command",
+        lambda command, cwd=None, timeout=None, **_kwargs: (
+            (0, HEAD_SHA + "\n")
+            if command[:4] == ["git", "rev-parse", "--verify", "HEAD"]
+            or command[:2] == ["gh", "api"]
+            else (_ for _ in ()).throw(AssertionError(command))
+        ),
+    )
+
+    report = runner.runner_vnext_prepare_runtime_state_v1(
+        workdir,
+        _runner_vnext_prepare_runtime_state_body(),
+    )
+
+    assert runner.maintenance_report_status(report) == "BLOCKED"
+    assert "reason=prepare_runtime_state_mode_binding_duplicate" in report
+    assert env_file.read_text() == (
+        f"{runner.RUNNER_VNEXT_MODE_ENV}=off\n"
+        f"{runner.RUNNER_VNEXT_MODE_ENV}=off\n"
+    )
 
 
 @pytest.mark.parametrize(
