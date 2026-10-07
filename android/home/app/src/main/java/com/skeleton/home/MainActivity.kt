@@ -310,6 +310,26 @@ private fun endpointMutation(endpointId:String,vararg pairs:Pair<String,Any?>):J
     return o
 }
 private fun endpointPath(endpointId:String,suffix:String):String="/api/media/endpoints/${Uri.encode(endpointId)}$suffix"
+private fun mediaUiMode(raw:String,current:String="unknown"):String=when(raw.trim().lowercase(Locale.ROOT)){
+    ""->current
+    "youtube"->"kiosk"
+    "video"->"mpv"
+    else->raw.trim()
+}
+private suspend fun endpointVideoSelection(api:HomeApi,endpointId:String):JSONObject=
+    runCatching{api.get(endpointPath(endpointId,"/video/selection"))}.getOrElse{
+        api.get("/api/video/selection?endpoint_id=${Uri.encode(endpointId)}")
+    }
+private data class MediaEndpointSnapshot(val mode:String?,val player:JSONObject?,val remoteStatus:JSONObject?,val volume:Int?)
+private fun parseMediaEndpointSnapshot(j:JSONObject,currentMode:String,currentVolume:Int):MediaEndpointSnapshot{
+    val mode=mediaUiMode(j.cleanText("mode",j.cleanText("tv_mode")),currentMode)
+    val player=j.optJSONObject("player") ?: j.optJSONObject("player_status") ?: j.optJSONObject("status")
+    val remoteStatus=j.optJSONObject("remote_status") ?: j.optJSONObject("remote") ?: if(j.has("youtube_player")||j.has("youtube_context"))j else null
+    val volumeObj=j.optJSONObject("volume")
+    val volume=volumeObj?.optInt("master",volumeObj.optInt("volume",currentVolume))
+        ?: if(j.has("master")||j.has("volume"))j.optInt("master",j.optInt("volume",currentVolume)) else null
+    return MediaEndpointSnapshot(mode,player,remoteStatus,volume)
+}
 
 private data class HomeUpdateInfo(val versionCode:Int,val versionName:String,val sha256:String,val bytes:Long,val apkPath:String)
 private fun installedVersionCode(context:Context):Int {
@@ -1050,7 +1070,7 @@ private fun HomeComposeApp(sharedUrl:String?, consumeShare:()->Unit) {
 @Composable private fun HistoryEditorDialog(api:HomeApi,endpointId:String,onDismiss:()->Unit){
     val scope=rememberCoroutineScope();var items by remember{mutableStateOf(emptyList<JSONObject>())};var query by remember{mutableStateOf("")};var busy by remember{mutableStateOf(false)};val focusRequester=remember{FocusRequester()};val keyboard=LocalSoftwareKeyboardController.current
     suspend fun reload(){if(api.server==null)return;busy=true;items=runCatching{api.get(endpointPath(endpointId,"/video/history")).optJSONArray("items")?.objects().orEmpty()}.getOrElse{emptyList()};busy=false}
-    LaunchedEffect(api.server){reload()}
+    LaunchedEffect(api.server,endpointId){reload()}
     val q=query.trim().lowercase(Locale.ROOT)
     val visible=if(q.isBlank())items else items.filter{ x -> listOf(x.optString("title"),x.optString("year"),x.optString("content_type"),x.optString("overview")).joinToString(" ").lowercase(Locale.ROOT).contains(q) }
     Dialog(onDismissRequest=onDismiss,properties=DialogProperties(usePlatformDefaultWidth=false)){
@@ -1356,19 +1376,30 @@ private fun Header(title:String, connected:Boolean, endpointId:String, endpoints
 @Composable private fun HomeScreen(api:HomeApi,active:Boolean,hyperion:Boolean,onHyperion:(Boolean)->Unit,endpointId:String,endpoints:List<MediaEndpointUi>,onEndpoint:(String)->Unit,onMenu:()->Unit,captureCharged:Boolean,onCaptureCharged:(Boolean)->Unit,refreshMediaTarget:suspend ()->Boolean) {
     val scope=rememberCoroutineScope()
     val endpoint=endpointById(endpoints,endpointId)
-    var mode by remember{mutableStateOf("unknown")}
-    var youtubePlayer by remember{mutableStateOf(JSONObject())}
-    var youtubeRemotePlayer by remember{mutableStateOf(JSONObject())}
-    var videoPlayer by remember{mutableStateOf(JSONObject())}
-    var tvPlayer by remember{mutableStateOf(JSONObject())}
-    var volume by remember{mutableIntStateOf(25)}
-    var lastNonzero by remember{mutableIntStateOf(25)}
+    val endpointVolumes=remember{mutableStateMapOf<String,Int>()}
+    val endpointLastNonzero=remember{mutableStateMapOf<String,Int>()}
+    var mode by remember(endpoint.endpointId){mutableStateOf("unknown")}
+    var youtubePlayer by remember(endpoint.endpointId){mutableStateOf(JSONObject())}
+    var youtubeRemoteStatus by remember(endpoint.endpointId){mutableStateOf(JSONObject())}
+    var videoPlayer by remember(endpoint.endpointId){mutableStateOf(JSONObject())}
+    var tvPlayer by remember(endpoint.endpointId){mutableStateOf(JSONObject())}
+    var volume by remember(endpoint.endpointId){mutableIntStateOf(endpointVolumes[endpoint.endpointId] ?: 25)}
+    var lastNonzero by remember(endpoint.endpointId){mutableIntStateOf(endpointLastNonzero[endpoint.endpointId] ?: endpointVolumes[endpoint.endpointId]?.takeIf{it>0} ?: 25)}
+    fun setEndpointVolume(v:Int){
+        val clamped=v.coerceIn(0,100)
+        volume=clamped
+        endpointVolumes[endpoint.endpointId]=clamped
+        if(clamped>0){
+            lastNonzero=clamped
+            endpointLastNonzero[endpoint.endpointId]=clamped
+        }
+    }
     suspend fun refresh(){
         if(api.server==null)return
         if(endpoint.adapterKind=="samsung"){
             runCatching{api.get(endpointPath(endpoint.endpointId,"/status"))}.onSuccess{ss->
                 mode=when(ss.optString("mode","video")){"youtube"->"kiosk";"tv"->"tv";else->"mpv"}
-                volume=ss.optInt("volume",volume);if(volume>0)lastNonzero=volume
+                setEndpointVolume(ss.optInt("volume",volume))
                 val samsungTitle=ss.optString("display_title","").ifBlank{"Samsung · "+when(mode){"kiosk"->"YouTube";"tv"->"TV";else->"Відео"}}
                 val samsungRunning=if(mode=="kiosk")ss.optBoolean("active",false) else ss.optBoolean("online",false)
                 val sp=JSONObject().put("endpoint_id",endpoint.endpointId).put("running",samsungRunning).put("pause",!ss.optBoolean("playing",false)).put("time-pos",ss.optDouble("position_seconds",0.0)).put("duration",ss.optDouble("duration_seconds",0.0)).put("display-title",samsungTitle)
@@ -1380,19 +1411,28 @@ private fun Header(title:String, connected:Boolean, endpointId:String, endpoints
                 when(mode){
                     "kiosk"->{
                         youtubePlayer=sp
-                        youtubeRemotePlayer=JSONObject().put("video_id",ss.optString("video_id","")).put("time",ss.optDouble("position_seconds",0.0)).put("duration",ss.optDouble("duration_seconds",0.0)).put("is_live",ss.optBoolean("is_live",false)).put("is_seekable",ss.optBoolean("is_seekable",false)).put("state",if(ss.optBoolean("playing",false))1 else 2)
+                        youtubeRemoteStatus=JSONObject().put("youtube_player",JSONObject().put("video_id",ss.optString("video_id","")).put("time",ss.optDouble("position_seconds",0.0)).put("duration",ss.optDouble("duration_seconds",0.0)).put("is_live",ss.optBoolean("is_live",false)).put("is_seekable",ss.optBoolean("is_seekable",false)).put("state",if(ss.optBoolean("playing",false))1 else 2))
                     }
                     "tv"->tvPlayer=sp
                     else->videoPlayer=sp
                 }
             }
         }else{
-            val newMode=runCatching{api.get(endpointPath(endpoint.endpointId,"/mode"))}.getOrNull()?.let{it.optString("mode",it.optString("tv_mode","unknown"))}?:mode
-            val p=runCatching{api.get(endpointPath(endpoint.endpointId,"/player"))}.getOrNull()
-            mode=newMode
-            if(p!=null)when(newMode){"kiosk"->youtubePlayer=p;"tv"->tvPlayer=p;else->videoPlayer=p}
-            if(newMode=="kiosk")runCatching{api.get(endpointPath(endpoint.endpointId,"/remote/status"))}.onSuccess{youtubeRemotePlayer=it.optJSONObject("youtube_player")?:JSONObject()}
-            runCatching{api.get(endpointPath(endpoint.endpointId,"/volume"))}.onSuccess{volume=it.optInt("master",it.optInt("volume",volume));if(volume>0)lastNonzero=volume}
+            val snapshot=runCatching{parseMediaEndpointSnapshot(api.get(endpointPath(endpoint.endpointId,"/snapshot")),mode,volume)}.getOrNull()
+            if(snapshot!=null){
+                val newMode=snapshot.mode ?: mode
+                mode=newMode
+                snapshot.player?.let{p->when(newMode){"kiosk"->youtubePlayer=p;"tv"->tvPlayer=p;else->videoPlayer=p}}
+                if(newMode=="kiosk")youtubeRemoteStatus=snapshot.remoteStatus ?: JSONObject()
+                snapshot.volume?.let{setEndpointVolume(it)}
+            }else{
+                val newMode=runCatching{api.get(endpointPath(endpoint.endpointId,"/mode"))}.getOrNull()?.let{mediaUiMode(it.optString("mode",it.optString("tv_mode","unknown")),mode)}?:mode
+                val p=runCatching{api.get(endpointPath(endpoint.endpointId,"/player"))}.getOrNull()
+                mode=newMode
+                if(p!=null)when(newMode){"kiosk"->youtubePlayer=p;"tv"->tvPlayer=p;else->videoPlayer=p}
+                if(newMode=="kiosk")runCatching{api.get(endpointPath(endpoint.endpointId,"/remote/status"))}.onSuccess{youtubeRemoteStatus=it}
+                runCatching{api.get(endpointPath(endpoint.endpointId,"/volume"))}.onSuccess{setEndpointVolume(it.optInt("master",it.optInt("volume",volume)))}
+            }
         }
     }
     LaunchedEffect(api.server,active,endpoint.endpointId){if(api.server!=null){refresh();if(active)while(true){delay(2500);refresh()}}}
@@ -1431,15 +1471,15 @@ private fun Header(title:String, connected:Boolean, endpointId:String, endpoints
                 endpointId=endpoint.endpointId,
                 mode=mode,
                 youtubePlayer=youtubePlayer,
-                youtubeRemotePlayer=youtubeRemotePlayer,
+                youtubeRemotePlayer=youtubeRemoteStatus,
                 videoPlayer=videoPlayer,
                 tvPlayer=tvPlayer,
                 volume=volume,
-                onVolume={v->volume=v;if(v>0)lastNonzero=v;scope.launch{runCatching{api.post(endpointPath(endpoint.endpointId,"/volume"),endpointMutation(endpoint.endpointId,"level" to v))}}},
+                onVolume={v->setEndpointVolume(v);scope.launch{runCatching{api.post(endpointPath(endpoint.endpointId,"/volume"),endpointMutation(endpoint.endpointId,"level" to v.coerceIn(0,100)))}}},
                 onRemote={act->scope.launch{runCatching{api.post(endpointPath(endpoint.endpointId,"/remote/control"),endpointMutation(endpoint.endpointId,"action" to act,"phase" to "tap"))}}},
                 onControl={ctl->scope.launch{runCatching{api.post(endpointPath(endpoint.endpointId,"/control/$ctl"),endpointMutation(endpoint.endpointId))};refresh()}},
                 onSeek={pos->scope.launch{runCatching{api.post(endpointPath(endpoint.endpointId,"/seek"),endpointMutation(endpoint.endpointId,"position" to pos))};refresh()}},
-                onMute={scope.launch{val v=if(volume==0)lastNonzero.coerceAtLeast(1) else 0;runCatching{api.post(endpointPath(endpoint.endpointId,"/volume"),endpointMutation(endpoint.endpointId,"level" to v))};refresh()}}
+                onMute={scope.launch{val v=if(volume==0)lastNonzero.coerceAtLeast(1) else 0;setEndpointVolume(v);runCatching{api.post(endpointPath(endpoint.endpointId,"/volume"),endpointMutation(endpoint.endpointId,"level" to v))};refresh()}}
             )
         }
         }
@@ -1460,28 +1500,21 @@ private fun Header(title:String, connected:Boolean, endpointId:String, endpoints
 }
 
 @Composable private fun YoutubeRemoteCard(api:HomeApi,endpointId:String,p:JSONObject,remote:JSONObject,volume:Int,onVolume:(Int)->Unit,onRemote:(String)->Unit,onSeek:(Int)->Unit,onMute:()->Unit){
-    var youtubeControls by remember{mutableStateOf(JSONObject())}
-    var liveRemote by remember(remote){mutableStateOf(remote)}
-    var lastGoodPlayer by remember{mutableStateOf(JSONObject())}
+    var liveRemote by remember(endpointId){mutableStateOf(JSONObject())}
+    var lastGoodPlayer by remember(endpointId){mutableStateOf(JSONObject())}
     val samsungSmartTube=p.optString("backend")=="smarttube"
     LaunchedEffect(p,remote){
         if(p.optString("backend") in setOf("youtube-web","smarttube")) lastGoodPlayer=p
-        if(samsungSmartTube) liveRemote=remote
+        val yp=remote.optJSONObject("youtube_player") ?: remote
+        val player=remote.optJSONObject("player")
+        val playerId=player?.optString("video_id","").orEmpty()
+        val remoteId=yp.optString("video_id","").orEmpty()
+        if(yp.length()>0) liveRemote=yp
+        if(player!=null&&player.optString("backend")=="youtube-web"&&(remoteId.isBlank()||playerId.isBlank()||playerId==remoteId)) lastGoodPlayer=player
     }
-    LaunchedEffect(api.server,samsungSmartTube,endpointId){
-        if(api.server!=null&&!samsungSmartTube)while(true){
-            runCatching{api.get(endpointPath(endpointId,"/remote/status"))}.onSuccess{st->
-                st.optJSONObject("youtube_context")?.optJSONObject("controls")?.let{youtubeControls=it}
-                val yp=st.optJSONObject("youtube_player")
-                val player=st.optJSONObject("player")
-                val playerId=player?.optString("video_id","").orEmpty()
-                val remoteId=yp?.optString("video_id","").orEmpty()
-                if(yp!=null) liveRemote=yp
-                if(player!=null&&player.optString("backend")=="youtube-web"&&(remoteId.isBlank()||playerId.isBlank()||playerId==remoteId)) lastGoodPlayer=player
-            }
-            delay(1500)
-        }
-    }
+    val youtubeControls=remote.optJSONObject("youtube_context")?.optJSONObject("controls")
+        ?: remote.optJSONObject("controls")
+        ?: JSONObject()
     val running=lastGoodPlayer.optBoolean("running") || liveRemote.optString("video_id").isNotBlank()
     val title=if(running)lastGoodPlayer.optString("display-title",lastGoodPlayer.optString("media-title","Відео")) else "Нічого не відтворюється"
     val se=if(running&&p.has("season")&&!p.isNull("season")){val s=p.optString("season","").takeUnless{it.equals("null",true)}.orEmpty();val e=if(p.has("episode")&&!p.isNull("episode"))p.optString("episode","").filter{it.isDigit()} else "";if(s.isNotBlank())"S$s"+(if(e.isNotBlank())" · E$e" else "") else ""}else ""
@@ -1499,6 +1532,13 @@ private fun Header(title:String, connected:Boolean, endpointId:String, endpoints
     val rawDuration=liveRemote.optDouble("duration",0.0).toFloat()
     val duration=rawDuration.coerceAtLeast(1f)
     LaunchedEffect(videoId,serverPos,rawDuration){seek=serverPos.coerceIn(0f,duration)}
+    val paused=liveRemote.optInt("state",0)==2 || lastGoodPlayer.optBoolean("pause",false)
+    LaunchedEffect(videoId,running,canSeek,paused,rawDuration){
+        if(running&&canSeek&&!paused&&rawDuration>1f)while(true){
+            delay(1000)
+            seek=(seek+1f).coerceIn(0f,duration)
+        }
+    }
     Column(Modifier.fillMaxSize().clip(RoundedCornerShape(16.dp)).background(Card)){
         Box(Modifier.fillMaxWidth().aspectRatio(16f/9f).background(Color(0xFF080A0C)),contentAlignment=Alignment.Center){
             if(bitmap!=null) Image(bitmap,null,Modifier.fillMaxSize(),contentScale=ContentScale.Crop)
@@ -1802,7 +1842,7 @@ private fun VideoScreen(api:HomeApi,active:Boolean,selectionRevision:Int,endpoin
     suspend fun loadAll():Boolean{
         if(api.server==null)return false
         // Fast path first: render the selected work immediately. History is the expensive call.
-        val sel=runCatching{api.get("/api/video/selection")};sel.onSuccess{selection=it;jobId=it.optString("job_id")}
+        val sel=runCatching{endpointVideoSelection(api,endpoint.endpointId)};sel.onSuccess{selection=it;jobId=it.optString("job_id")}
         runCatching{api.get(endpointPath(endpoint.endpointId,"/player"))}.onSuccess{currentPlayer=it}
         if(sel.isSuccess&&jobId.isNotBlank()){loadJob(jobId);loadMonitor()}
         val h=runCatching{api.get(endpointPath(endpoint.endpointId,"/video/history"))};h.onSuccess{history=it.optJSONArray("items")?.objects().orEmpty()}
@@ -1905,14 +1945,14 @@ private fun VideoScreen(api:HomeApi,active:Boolean,selectionRevision:Int,endpoin
                                 if(subSel.isNotBlank()){val id=if(subSel=="Вимкнено")"off" else subTracks.getOrNull(subTrackLabels.indexOf(subSel))?.opt("id");if(id!=null)api.post(endpointPath(endpoint.endpointId,"/player/track/subtitle"),endpointMutation(endpoint.endpointId,"id" to id))}
                                 val selBody=JSONObject().put("endpoint_id",endpoint.endpointId).put("job_id",jobId).put("locked",true).put("voice",voice).put("source_id",src.optString("source_id")).put("title",cat.optString("title"))
                                 if(isSeries)selBody.put("season",season).put("episode",episode)
-                                api.put("/api/video/selection",selBody);message="Відтворення змінено";onApplied()
+                                api.put(endpointPath(endpoint.endpointId,"/video/selection"),selBody);message="Відтворення змінено";onApplied()
                             }else{
                                 val o=endpointMutation(endpoint.endpointId,"job_id" to jobId,"source_id" to src.optString("source_id"),"voice" to voice,"quality" to quality,"subtitles" to "off")
                                 if(isSeries)o.put("season",season).put("episode",episode)
                                 runCatching{api.post(endpointPath(endpoint.endpointId,"/play"),o)}.onSuccess{
                                     val selBody=JSONObject().put("endpoint_id",endpoint.endpointId).put("job_id",jobId).put("locked",true).put("voice",voice).put("source_id",src.optString("source_id")).put("title",cat.optString("title"))
                                     if(isSeries)selBody.put("season",season).put("episode",episode)
-                                    api.put("/api/video/selection",selBody);message="Застосовано";onApplied()
+                                    api.put(endpointPath(endpoint.endpointId,"/video/selection"),selBody);message="Застосовано";onApplied()
                                 }.onFailure{message=it.message?:"Не вдалося застосувати"}
                             }
                         }}
