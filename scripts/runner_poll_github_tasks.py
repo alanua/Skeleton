@@ -14240,7 +14240,7 @@ def _safe_issue_publish_branch_name(branch: str) -> bool:
         and "//" not in branch
         and re.fullmatch(
             r"runner/(?:issue-[1-9]\d*|[A-Za-z0-9._-]+-issue-[1-9]\d*)"
-            r"(?:-[A-Za-z0-9](?:[A-Za-z0-9-]{0,62}[A-Za-z0-9])?)?",
+            r"(?:-[A-Za-z0-9][A-Za-z0-9._-]{0,79})?",
             branch,
         )
         is not None

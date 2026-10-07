@@ -3671,6 +3671,9 @@ def test_safe_issue_publish_branch_name_accepts_bounded_suffix() -> None:
     assert runner._safe_issue_publish_branch_name(
         "runner/bauclock-issue-23-manual-time-access-tests-ci-backed"
     )
+    assert runner._safe_issue_publish_branch_name("runner/issue-23-a.b")
+    assert runner._safe_issue_publish_branch_name("runner/issue-23-a_b")
+    assert runner._safe_issue_publish_branch_name(f"runner/issue-23-a{'b' * 79}")
 
 
 @pytest.mark.parametrize(
@@ -3683,7 +3686,7 @@ def test_safe_issue_publish_branch_name_accepts_bounded_suffix() -> None:
         "runner/issue-23-manual-time-access-tests-ci-backed ",
         "runner/bauclock-manual-time-access-tests-ci-backed",
         "runner/issue-23-",
-        f"runner/issue-23-{'a' * 65}",
+        f"runner/issue-23-a{'b' * 80}",
     ),
 )
 def test_safe_issue_publish_branch_name_rejects_unsafe_suffixed_shapes(
