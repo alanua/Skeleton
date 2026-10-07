@@ -34,9 +34,8 @@ def test_package_identity_label_compose_and_main_entry_are_current() -> None:
 
     assert 'namespace = "com.skeleton.home"' in gradle
     assert 'applicationId = "com.skeleton.home"' in gradle
-    assert re.search(r"versionCode\s*=\s*(\d+)", gradle)
-    assert int(re.search(r"versionCode\s*=\s*(\d+)", gradle).group(1)) > 0
-    assert re.search(r'versionName\s*=\s*"\d+\.\d+\.\d+(?:[-+][^"]+)?"', gradle)
+    assert re.search(r"versionCode\s*=\s*145\b", gradle)
+    assert 'versionName = "1.4.29"' in gradle
     assert "buildFeatures { compose = true; buildConfig = true }" in gradle
     assert "androidx.activity:activity-compose" in gradle
 
@@ -160,3 +159,120 @@ def test_current_webview_and_native_bridge_are_intentional() -> None:
     assert "WebView(ctx).apply" in main
     assert "@JavascriptInterface" in main
     assert "addJavascriptInterface" in main
+
+
+def test_home_media_control_uses_explicit_endpoint_routing() -> None:
+    main = read("app/src/main/java/com/skeleton/home/MainActivity.kt")
+
+    assert "private data class MediaEndpointUi" in main
+    assert "private data class MediaTargetState" in main
+    assert 'MediaEndpointUi("home_edge_tv","TV","home_edge_tv"' in main
+    assert 'MediaEndpointUi("samsung_tv","Samsung","samsung"' in main
+    assert 'api.get("/api/media/target")' in main
+    assert 'api.post("/api/media/target",JSONObject().put("target",selected).put("endpoint_id",selected))' in main
+    assert 'j.optJSONArray("targets") ?: j.optJSONArray("endpoints")' in main
+    assert 'charged=j.optBoolean("charged",false)' in main
+    assert 'private fun endpointMutation(endpointId:String' in main
+    assert 'JSONObject().put("endpoint_id",endpointId)' in main
+    assert 'private fun endpointPath(endpointId:String,suffix:String):String="/api/media/endpoints/${Uri.encode(endpointId)}$suffix"' in main
+    assert "OutputTargetSelector(endpointId,endpoints,onEndpoint)" in main
+    assert 'api.post("/api/media/handoff",JSONObject().put("action","capture").put("source",endpoint.endpointId))' in main
+    assert 'api.post("/api/media/handoff",JSONObject().put("target",endpoint.endpointId))' in main
+    assert 'endpointPath(endpoint.endpointId,"/handoff/capture")' not in main
+    assert 'api.put("/api/media/target"' not in main
+    assert '"/api/samsung/media/' not in main
+    assert 'api.post("/api/play"' not in main
+    assert 'api.post("/api/volume"' not in main
+    assert 'api.post("/api/tv/play"' not in main
+
+
+def test_home_header_keeps_capture_and_hyperion_home_only() -> None:
+    main = read("app/src/main/java/com/skeleton/home/MainActivity.kt")
+    hand_open = read("app/src/main/res/drawable/hand_open.xml")
+    hand_fist = read("app/src/main/res/drawable/hand_fist.xml")
+
+    assert "OutputTargetSelector(endpointId,endpoints,onEndpoint)" in main
+    assert "captureCharged:Boolean=false" in main
+    assert "captureEnabled:Boolean=false" in main
+    assert "onCapture:(()->Unit)?=null" in main
+    assert '"handoff" in endpoint.capabilities||"capture" in endpoint.capabilities' in main
+    assert '"hand-open" -> R.drawable.hand_open' in main
+    assert '"hand-fist" -> R.drawable.hand_fist' in main
+    assert 'Mdi(if(captureCharged)"hand-fist" else "hand-open",22.dp,if(captureCharged)Accent else Color.White)' in main
+    assert "captureCharged=captureCharged,captureEnabled=captureEnabled,onCapture={capturePress()}" in main
+    assert "hyperion:Boolean?=null" in main
+    assert "onHyperion:(()->Unit)?=null" in main
+    assert "IconButton(onClick=onHyperion" in main
+    assert 'Mdi(if(hyperion)"lightbulb-on-outline" else "lightbulb-outline",22.dp,if(hyperion)Accent else Color.White)' in main
+    assert "Header(ui(\"Головна\"),api.server!=null,endpoint.endpointId,endpoints,onEndpoint,onMenu" in main
+    assert "hyperion=hyperion,onHyperion={onHyperion(!hyperion)}" in main
+    assert main.count('api.post("/api/hyperion"') == 1
+    assert "<vector" in hand_open and "<path" in hand_open
+    assert "<vector" in hand_fist and "<path" in hand_fist
+    assert hand_open != hand_fist
+
+    header_body = re.search(
+        r"private fun Header\(.*?\)\s*\{(?P<body>.*?)\n\}\n\n\n@Composable private fun OutputTargetSelector",
+        main,
+        re.DOTALL,
+    ).group("body")
+    assert "SkeletonSwitch" not in header_body
+    assert "keyboard-return" not in header_body
+    assert 'enabled=captureEnabled' in header_body
+    assert '"hand-fist" else "hand-open"' in header_body
+    assert 'if(hyperion)"lightbulb-on-outline" else "lightbulb-outline"' in header_body
+
+    for signature in [
+        "private fun VideoScreen(api:HomeApi,active:Boolean,selectionRevision:Int,endpointId:String",
+        "private fun FamilyScannerScreen(api:HomeApi,active:Boolean,endpointId:String",
+        "private fun HomeEdgeScreen(api:HomeApi,endpointId:String",
+        "private fun DevicesScreen(api:HomeApi,active:Boolean,endpointId:String",
+        "private fun SkeletonScreen(api:HomeApi,active:Boolean,endpointId:String",
+    ]:
+        assert signature in main
+
+    for screen_title in ['ui("Відео")', 'ui("Сканувати")', '"Home Edge"', 'ui("Пристрої")', 'ui("СК")']:
+        match = re.search(rf"Header\({re.escape(screen_title)}.*?\)", main)
+        assert match is not None
+        assert "onCapture" not in match.group(0)
+        assert "onHyperion" not in match.group(0)
+
+
+def test_capture_handoff_state_is_backend_authoritative() -> None:
+    main = read("app/src/main/java/com/skeleton/home/MainActivity.kt")
+
+    assert "var mediaCharged by remember { mutableStateOf(false) }" in main
+    assert "suspend fun refreshMediaTarget():Boolean" in main
+    assert "mediaCharged=latest.charged" in main
+    assert "onFailure = { false }" in main
+    assert 'if(api.server!=null)runCatching{api.post("/api/media/target",JSONObject().put("target",selected).put("endpoint_id",selected))}' in main
+
+    selector_change = re.search(
+        r"fun selectMediaEndpoint\(selected:String\)\{(?P<body>.*?)\n    \}",
+        main,
+        re.DOTALL,
+    ).group("body")
+    assert "/api/media/handoff" not in selector_change
+    assert "mediaCharged" not in selector_change
+
+    capture_press = re.search(
+        r"fun capturePress\(\)\{(?P<body>.*?)\n    \}\n    Box\(Modifier\.fillMaxSize",
+        main,
+        re.DOTALL,
+    ).group("body")
+    assert 'JSONObject().put("action","capture").put("source",endpoint.endpointId)' in capture_press
+    assert 'JSONObject().put("target",endpoint.endpointId)' in capture_press
+    assert 'api.post("/api/media/handoff"' in capture_press
+    assert 'endpointPath(' not in capture_press
+    assert 'onSuccess{out->' in capture_press
+    assert 'if(out.has("charged"))onCaptureCharged(out.optBoolean("charged"))' in capture_press
+    assert "refreshMediaTarget()" in capture_press
+    assert "onFailure" not in capture_press
+
+
+def test_home_android_validation_does_not_autostart_tablet_video() -> None:
+    main = read("app/src/main/java/com/skeleton/home/MainActivity.kt")
+
+    assert "LaunchedEffect(api.server,selectionRevision" in main
+    assert 'api.post(endpointPath(endpoint.endpointId,"/play"),o)' in main
+    assert not re.search(r"LaunchedEffect\([^)]*\)\s*\{[^{}]*api\.post\(endpointPath\([^)]*\"/play\"", main)
