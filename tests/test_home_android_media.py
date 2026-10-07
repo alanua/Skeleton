@@ -60,6 +60,32 @@ def test_home_tv_youtube_uses_endpoint_player_without_snapshot_polling() -> None
     assert "api.get(" not in card
 
 
+def test_home_refresh_applies_only_to_selected_endpoint() -> None:
+    text = _source()
+
+    home = text.split("@Composable private fun HomeScreen", 1)[1].split("@OptIn(ExperimentalFoundationApi::class)", 1)[0]
+    assert "val selectedEndpointId by rememberUpdatedState(endpoint.endpointId)" in home
+    assert "fun isSelectedEndpoint()=selectedEndpointId==endpoint.endpointId" in home
+    assert 'runCatching{api.get(endpointPath(endpoint.endpointId,"/status"))}.onSuccess{ss->\n                if(!isSelectedEndpoint())return@onSuccess' in home
+    assert 'val newMode=runCatching{api.get(endpointPath(endpoint.endpointId,"/mode"))}.getOrNull()?.let{mediaUiMode(it.optString("mode",it.optString("tv_mode","unknown")),mode)}?:mode\n            if(!isSelectedEndpoint())return' in home
+    assert 'val playerState=runCatching{parseMediaEndpointPlayerState(api.get(endpointPath(endpoint.endpointId,"/player")),newMode,volume)}.getOrNull()\n            if(!isSelectedEndpoint())return' in home
+    assert 'if(!volumeReady)runCatching{api.get(endpointPath(endpoint.endpointId,"/volume"))}.onSuccess{if(isSelectedEndpoint())setEndpointVolume(it.optInt("master",it.optInt("volume",volume)))}' in home
+    assert 'runCatching{api.get(endpointPath(endpoint.endpointId,"/remote/status"))}.onSuccess{if(isSelectedEndpoint())youtubeRemoteStatus=it}' in home
+
+
+def test_home_endpoint_selection_does_not_mutate_player_mode_or_volume() -> None:
+    text = _source()
+
+    select = text.split("fun selectMediaEndpoint(selected:String){", 1)[1].split("    LaunchedEffect(Unit)", 1)[0]
+    assert "endpointId=selected" in select
+    assert 'api.post("/api/media/target",JSONObject().put("target",selected).put("endpoint_id",selected))' in select
+    assert '"/mode"' not in select
+    assert '"/volume"' not in select
+    assert '"/control' not in select
+    assert '"/remote/control"' not in select
+    assert '"/play"' not in select
+
+
 def test_home_video_selection_and_history_are_canonical_endpoint_scoped() -> None:
     text = _source()
 

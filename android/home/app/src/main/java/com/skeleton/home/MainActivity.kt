@@ -1414,6 +1414,8 @@ private fun Header(title:String, connected:Boolean, endpointId:String, endpoints
     var volume by remember(endpoint.endpointId){mutableIntStateOf(endpointVolumes[endpoint.endpointId] ?: 25)}
     var lastNonzero by remember(endpoint.endpointId){mutableIntStateOf(endpointLastNonzero[endpoint.endpointId] ?: endpointVolumes[endpoint.endpointId]?.takeIf{it>0} ?: 25)}
     var volumeReady by remember(endpoint.endpointId){mutableStateOf(endpointVolumeReady[endpoint.endpointId] == true)}
+    val selectedEndpointId by rememberUpdatedState(endpoint.endpointId)
+    fun isSelectedEndpoint()=selectedEndpointId==endpoint.endpointId
     fun setEndpointVolume(v:Int){
         val clamped=v.coerceIn(0,100)
         volume=clamped
@@ -1429,6 +1431,7 @@ private fun Header(title:String, connected:Boolean, endpointId:String, endpoints
         if(api.server==null)return
         if(endpoint.adapterKind=="samsung"){
             runCatching{api.get(endpointPath(endpoint.endpointId,"/status"))}.onSuccess{ss->
+                if(!isSelectedEndpoint())return@onSuccess
                 mode=when(ss.optString("mode","video")){"youtube"->"kiosk";"tv"->"tv";else->"mpv"}
                 setEndpointVolume(ss.optInt("volume",volume))
                 val samsungTitle=ss.optString("display_title","").ifBlank{"Samsung · "+when(mode){"kiosk"->"YouTube";"tv"->"TV";else->"Відео"}}
@@ -1450,12 +1453,14 @@ private fun Header(title:String, connected:Boolean, endpointId:String, endpoints
             }
         }else{
             val newMode=runCatching{api.get(endpointPath(endpoint.endpointId,"/mode"))}.getOrNull()?.let{mediaUiMode(it.optString("mode",it.optString("tv_mode","unknown")),mode)}?:mode
+            if(!isSelectedEndpoint())return
             val playerState=runCatching{parseMediaEndpointPlayerState(api.get(endpointPath(endpoint.endpointId,"/player")),newMode,volume)}.getOrNull()
+            if(!isSelectedEndpoint())return
             mode=playerState?.mode ?: newMode
             playerState?.player?.let{p->when(mode){"kiosk"->youtubePlayer=p;"tv"->tvPlayer=p;else->videoPlayer=p}}
             if(mode=="kiosk")playerState?.remoteStatus?.let{youtubeRemoteStatus=it}
             playerState?.volume?.let{setEndpointVolume(it)}
-            if(!volumeReady)runCatching{api.get(endpointPath(endpoint.endpointId,"/volume"))}.onSuccess{setEndpointVolume(it.optInt("master",it.optInt("volume",volume)))}
+            if(!volumeReady)runCatching{api.get(endpointPath(endpoint.endpointId,"/volume"))}.onSuccess{if(isSelectedEndpoint())setEndpointVolume(it.optInt("master",it.optInt("volume",volume)))}
         }
     }
     LaunchedEffect(api.server,active,endpoint.endpointId){if(api.server!=null){refresh();if(active)while(true){delay(if(endpoint.adapterKind!="samsung"&&mode=="kiosk")850 else 2500);refresh()}}}
@@ -1463,7 +1468,7 @@ private fun Header(title:String, connected:Boolean, endpointId:String, endpoints
         if(api.server!=null&&active&&endpoint.adapterKind!="samsung"&&mode=="kiosk"){
             while(true){
                 delay(4000)
-                runCatching{api.get(endpointPath(endpoint.endpointId,"/remote/status"))}.onSuccess{youtubeRemoteStatus=it}
+                runCatching{api.get(endpointPath(endpoint.endpointId,"/remote/status"))}.onSuccess{if(isSelectedEndpoint())youtubeRemoteStatus=it}
             }
         }
     }
