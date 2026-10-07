@@ -46,14 +46,18 @@ def test_home_tv_youtube_uses_endpoint_player_without_snapshot_polling() -> None
     assert "val player=j" in text
     assert 'lastGoodPlayer.optString("display-title",lastGoodPlayer.optString("title",lastGoodPlayer.optString("media-title","Відео")))' in text
     assert 'lastGoodPlayer.optString("poster_landscape",lastGoodPlayer.optString("poster",""))' in text
-    assert 'val videoId=lastGoodPlayer.optString("video_id","")' in text
-    assert 'val serverPos=lastGoodPlayer.optDouble("time-pos",0.0).toFloat()' in text
-    assert 'val rawDuration=lastGoodPlayer.optDouble("duration",0.0).toFloat()' in text
-    assert 'val paused=lastGoodPlayer.optBoolean("pause",false)' in text
+    assert 'val remoteState=liveRemote.optInt("state",-99)' in text
+    assert 'val remoteDuration=liveRemote.optDouble("duration",0.0).toFloat()' in text
+    assert 'val videoId=liveRemote.optString("video_id","").ifBlank{lastGoodPlayer.optString("video_id","")}' in text
+    assert 'val serverPos=(if(liveRemote.has("time"))liveRemote.optDouble("time",fallbackPos) else fallbackPos).toFloat()' in text
+    assert 'val rawDuration=if(remoteDuration>1f)remoteDuration else lastGoodPlayer.optDouble("duration",0.0).toFloat()' in text
+    assert 'val paused=when(remoteState){1->false;2,3->true;else->lastGoodPlayer.optBoolean("pause",false)}' in text
+    assert 'remoteState in setOf(1,2,3)' in text
     assert 'runCatching{api.get(endpointPath(endpoint.endpointId,"/remote/status"))}' in text
     assert 'runCatching{api.get(endpointPath(endpointId,"/remote/status"))}' not in text
     assert "delay(if(endpoint.adapterKind!=\"samsung\"&&mode==\"kiosk\")850 else 2500)" in text
-    assert "delay(4000)" in text
+    assert "delay(4000)" not in text
+    assert 'runCatching{api.get(endpointPath(endpoint.endpointId,"/remote/status"))}.onSuccess{youtubeRemoteStatus=it}\n                delay(850)' in text
     assert "val youtubeControls=remote.optJSONObject" in text
     assert "LaunchedEffect(videoId,running,canSeek,paused,rawDuration)" in text
     card = text.split("@Composable private fun YoutubeRemoteCard", 1)[1].split("@Composable private fun VideoRemoteCard", 1)[0]
