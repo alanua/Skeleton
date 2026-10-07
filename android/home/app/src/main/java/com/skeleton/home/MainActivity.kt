@@ -278,7 +278,8 @@ private fun defaultMediaEndpoints()=listOf(
     MediaEndpointUi("samsung_tv","Samsung","samsung",setOf("mode","player_status","remote_control","seek","volume","history","play","handoff"),"devices"),
 )
 private fun parseMediaEndpoints(j:JSONObject):List<MediaEndpointUi>{
-    val rows=j.optJSONArray("endpoints")?.objects().orEmpty().mapNotNull{item->
+    val source=j.optJSONArray("targets") ?: j.optJSONArray("endpoints")
+    val rows=source?.objects().orEmpty().mapNotNull{item->
         val id=item.cleanText("endpoint_id")
         if(id.isBlank())null else MediaEndpointUi(
             endpointId=id,
@@ -290,6 +291,17 @@ private fun parseMediaEndpoints(j:JSONObject):List<MediaEndpointUi>{
     }
     return if(rows.isEmpty())defaultMediaEndpoints() else rows
 }
+private data class MediaTargetState(val endpointId:String,val endpoints:List<MediaEndpointUi>,val charged:Boolean)
+private fun mediaTargetEndpointId(j:JSONObject,currentEndpointId:String):String{
+    val target=j.opt("target")
+    val targetId=(target as? JSONObject)?.cleanText("endpoint_id") ?: target?.toString()?.trim().orEmpty()
+    return j.cleanText("endpoint_id",targetId).ifBlank{currentEndpointId}
+}
+private fun parseMediaTarget(j:JSONObject,currentEndpointId:String,currentEndpoints:List<MediaEndpointUi>)=MediaTargetState(
+    endpointId=mediaTargetEndpointId(j,currentEndpointId),
+    endpoints=parseMediaEndpoints(j).takeUnless{it==defaultMediaEndpoints()&&j.optJSONArray("targets")==null&&j.optJSONArray("endpoints")==null} ?: currentEndpoints,
+    charged=j.optBoolean("charged",false),
+)
 private fun endpointById(endpoints:List<MediaEndpointUi>,endpointId:String)=
     endpoints.firstOrNull{it.endpointId==endpointId} ?: endpoints.firstOrNull() ?: defaultMediaEndpoints().first()
 private fun endpointMutation(endpointId:String,vararg pairs:Pair<String,Any?>):JSONObject{
@@ -361,6 +373,8 @@ private fun mdi(name: String): Int = when(name) {
     "television" -> R.drawable.television
     "gamepad-variant" -> R.drawable.gamepad_variant
     "television-play" -> R.drawable.television_play
+    "hand-open" -> R.drawable.hand_open
+    "hand-fist" -> R.drawable.hand_fist
     "keyboard-return" -> R.drawable.keyboard_return
     "chevron-up" -> R.drawable.chevron_up
     "chevron-left" -> R.drawable.chevron_left
@@ -767,6 +781,7 @@ private fun HomeComposeApp(sharedUrl:String?, consumeShare:()->Unit) {
     var hyperion by remember { mutableStateOf(false) }
     var mediaEndpoints by remember { mutableStateOf(defaultMediaEndpoints()) }
     var endpointId by rememberSaveable { mutableStateOf("home_edge_tv") }
+    var mediaCharged by remember { mutableStateOf(false) }
     var menu by remember { mutableStateOf(false) }
     var info by remember { mutableStateOf(false) }
     var historyEditor by remember { mutableStateOf(false) }
@@ -780,6 +795,25 @@ private fun HomeComposeApp(sharedUrl:String?, consumeShare:()->Unit) {
     var discovered by remember { mutableStateOf(false) }
     var profile by remember { mutableStateOf<HomeClientProfile?>(null) }
     var videoSelectionRevision by rememberSaveable { mutableIntStateOf(0) }
+    suspend fun refreshMediaTarget():Boolean{
+        if(api.server==null)return false
+        return runCatching{parseMediaTarget(api.get("/api/media/target"),endpointId,mediaEndpoints)}.fold(
+            onSuccess{latest->
+                mediaEndpoints=latest.endpoints
+                if(latest.endpointId.isNotBlank()&&latest.endpoints.any{it.endpointId==latest.endpointId}) endpointId=latest.endpointId
+                else if(latest.endpoints.none{it.endpointId==endpointId}) endpointId=latest.endpoints.first().endpointId
+                mediaCharged=latest.charged
+                true
+            },
+            onFailure{false}
+        )
+    }
+    fun selectMediaEndpoint(selected:String){
+        endpointId=selected
+        scope.launch{
+            if(api.server!=null)runCatching{api.post("/api/media/target",JSONObject().put("target",selected).put("endpoint_id",selected))}
+        }
+    }
     LaunchedEffect(Unit) {
         var lastUpdateCheckAt=0L
         var lastOfferedVersionCode=0
@@ -793,7 +827,7 @@ private fun HomeComposeApp(sharedUrl:String?, consumeShare:()->Unit) {
                     runCatching{api.get("/api/preferences/language")}.onSuccess{lp->contentLanguage=lp.optString("content_language","uk").ifBlank{"uk"}}
                 }
                 runCatching { hyperion=api.get("/api/hyperion").optBoolean("enabled") }
-                runCatching { parseMediaEndpoints(api.get("/api/media/endpoints")) }.onSuccess{latest->
+                if(!refreshMediaTarget())runCatching { parseMediaEndpoints(api.get("/api/media/endpoints")) }.onSuccess{latest->
                     mediaEndpoints=latest
                     if(latest.none{it.endpointId==endpointId}) endpointId=latest.first().endpointId
                 }
@@ -829,13 +863,13 @@ private fun HomeComposeApp(sharedUrl:String?, consumeShare:()->Unit) {
             Box(Modifier.weight(1f)) {
                 val p=profile
                 if(discovered && p!=null){
-                    PersistentTabSlot(tab==0) { HomeScreen(api, tab==0, hyperion, { on -> hyperion=on; scope.launch { runCatching { api.post("/api/hyperion",JSONObject().put("enabled",on)) }.onFailure { hyperion=!on } } }, endpointId, mediaEndpoints, {selected->endpointId=selected}, {menu=true}) }
-                    PersistentTabSlot(tab==1) { VideoScreen(api, tab==1, videoSelectionRevision, endpointId, mediaEndpoints, {selected->endpointId=selected}, {menu=true}, {tab=0}) }
+                    PersistentTabSlot(tab==0) { HomeScreen(api, tab==0, hyperion, { on -> hyperion=on; scope.launch { runCatching { api.post("/api/hyperion",JSONObject().put("enabled",on)) }.onFailure { hyperion=!on } } }, endpointId, mediaEndpoints, ::selectMediaEndpoint, {menu=true}, mediaCharged, {mediaCharged=it}, ::refreshMediaTarget) }
+                    PersistentTabSlot(tab==1) { VideoScreen(api, tab==1, videoSelectionRevision, endpointId, mediaEndpoints, ::selectMediaEndpoint, {menu=true}, {tab=0}) }
                     PersistentTabSlot(tab==2) {
-                        if(p.hasSk) DevicesScreen(api, tab==2, endpointId, mediaEndpoints, {selected->endpointId=selected}, {menu=true})
-                        else FamilyScannerScreen(api, tab==2, endpointId, mediaEndpoints, {selected->endpointId=selected}, {menu=true})
+                        if(p.hasSk) DevicesScreen(api, tab==2, endpointId, mediaEndpoints, ::selectMediaEndpoint, {menu=true})
+                        else FamilyScannerScreen(api, tab==2, endpointId, mediaEndpoints, ::selectMediaEndpoint, {menu=true})
                     }
-                    if(p.hasSk) PersistentTabSlot(tab==3) { SkeletonScreen(api, tab==3, endpointId, mediaEndpoints, {selected->endpointId=selected}, {menu=true}) }
+                    if(p.hasSk) PersistentTabSlot(tab==3) { SkeletonScreen(api, tab==3, endpointId, mediaEndpoints, ::selectMediaEndpoint, {menu=true}) }
                 } else Box(Modifier.fillMaxSize(), contentAlignment=Alignment.Center) { CircularProgressIndicator(color=Accent,strokeWidth=2.dp,modifier=Modifier.size(28.dp)) }
             }
             profile?.let { BottomNav(tab,navFor(it)) { tab=it } }
@@ -1231,7 +1265,7 @@ private fun SaverTypeRow(api:HomeApi,x:SaverType,active:Boolean,onSelect:()->Uni
 }
 
 @Composable
-private fun Header(title:String, connected:Boolean, endpointId:String, endpoints:List<MediaEndpointUi>, onEndpoint:(String)->Unit, onMenu:()->Unit, subtitle:String="Home Edge", ambientColor:Color?=null, captureCharged:Boolean=false, onCapture:(()->Unit)?=null, hyperion:Boolean?=null, onHyperion:(()->Unit)?=null) {
+private fun Header(title:String, connected:Boolean, endpointId:String, endpoints:List<MediaEndpointUi>, onEndpoint:(String)->Unit, onMenu:()->Unit, subtitle:String="Home Edge", ambientColor:Color?=null, captureCharged:Boolean=false, captureEnabled:Boolean=false, onCapture:(()->Unit)?=null, hyperion:Boolean?=null, onHyperion:(()->Unit)?=null) {
     // Top controls must remain readable regardless of the poster palette.
     val headerColor=Color(0xFFF3F6F8)
     Row(Modifier.fillMaxWidth().height(74.dp).background(Color(0x8A070A0D)).padding(start=16.dp,end=10.dp,top=8.dp,bottom=6.dp),verticalAlignment=Alignment.CenterVertically) {
@@ -1245,13 +1279,13 @@ private fun Header(title:String, connected:Boolean, endpointId:String, endpoints
         OutputTargetSelector(endpointId,endpoints,onEndpoint)
         Spacer(Modifier.width(7.dp))
         if(onCapture!=null){
-            IconButton(onClick=onCapture,enabled=captureCharged,modifier=Modifier.size(40.dp)){
-                Mdi("keyboard-return",22.dp,if(captureCharged)Accent else Muted)
+            IconButton(onClick=onCapture,enabled=captureEnabled,modifier=Modifier.size(40.dp)){
+                Mdi(if(captureCharged)"hand-fist" else "hand-open",22.dp,if(captureCharged)Accent else Color.White)
             }
         }
         if(hyperion!=null&&onHyperion!=null){
             IconButton(onClick=onHyperion,modifier=Modifier.size(40.dp)){
-                Mdi(if(hyperion)"lightbulb-on-outline" else "lightbulb-outline",22.dp,if(hyperion)Color(0xFFFF8B38) else Color(0xFFE4E9ED))
+                Mdi(if(hyperion)"lightbulb-on-outline" else "lightbulb-outline",22.dp,if(hyperion)Accent else Color.White)
             }
         }
         IconButton(onClick=onMenu,modifier=Modifier.size(40.dp)){Mdi("dots-vertical",23.dp,Color(0xFFF3F6F8))}
@@ -1319,7 +1353,7 @@ private fun Header(title:String, connected:Boolean, endpointId:String, endpoints
 }
 
 
-@Composable private fun HomeScreen(api:HomeApi,active:Boolean,hyperion:Boolean,onHyperion:(Boolean)->Unit,endpointId:String,endpoints:List<MediaEndpointUi>,onEndpoint:(String)->Unit,onMenu:()->Unit) {
+@Composable private fun HomeScreen(api:HomeApi,active:Boolean,hyperion:Boolean,onHyperion:(Boolean)->Unit,endpointId:String,endpoints:List<MediaEndpointUi>,onEndpoint:(String)->Unit,onMenu:()->Unit,captureCharged:Boolean,onCaptureCharged:(Boolean)->Unit,refreshMediaTarget:suspend ()->Boolean) {
     val scope=rememberCoroutineScope()
     val endpoint=endpointById(endpoints,endpointId)
     var mode by remember{mutableStateOf("unknown")}
@@ -1365,11 +1399,29 @@ private fun Header(title:String, connected:Boolean, endpointId:String, endpoints
     val ambientPoster=when(mode){"kiosk"->youtubePlayer.optString("poster_landscape",youtubePlayer.optString("poster",""));"tv"->"";else->videoPlayer.optString("poster",videoPlayer.optString("poster_landscape",""))}
     val ambientBitmap=remoteBitmap(if(ambientPoster.isNotBlank()&&api.server!=null)api.server+ambientPoster else null,720,1080)
     val ambientUiColor=remember(ambientBitmap){ambientComplement(ambientBitmap)}
-    val captureCharged=api.server!=null&&"handoff" in endpoint.capabilities
+    val captureEnabled=api.server!=null&&("handoff" in endpoint.capabilities||"capture" in endpoint.capabilities)
+    fun capturePress(){
+        if(!captureEnabled)return
+        scope.launch{
+            if(captureCharged){
+                runCatching{api.post("/api/media/handoff",JSONObject().put("target",endpoint.endpointId))}
+                    .onSuccess{out->
+                        if(out.has("charged"))onCaptureCharged(out.optBoolean("charged"))
+                        refreshMediaTarget()
+                    }
+            }else{
+                runCatching{api.post("/api/media/handoff",JSONObject().put("action","capture").put("source",endpoint.endpointId))}
+                    .onSuccess{out->
+                        if(out.has("charged"))onCaptureCharged(out.optBoolean("charged"))
+                        refreshMediaTarget()
+                    }
+            }
+        }
+    }
     Box(Modifier.fillMaxSize()){
         AmbientPosterBackground(ambientBitmap,Modifier.fillMaxSize())
         Column(Modifier.fillMaxSize()) {
-        Header(ui("Головна"),api.server!=null,endpoint.endpointId,endpoints,onEndpoint,onMenu,ambientColor=ambientUiColor.takeIf{ambientBitmap!=null},captureCharged=captureCharged,onCapture={scope.launch{runCatching{api.post(endpointPath(endpoint.endpointId,"/handoff/capture"),endpointMutation(endpoint.endpointId))};refresh()}},hyperion=hyperion,onHyperion={onHyperion(!hyperion)})
+        Header(ui("Головна"),api.server!=null,endpoint.endpointId,endpoints,onEndpoint,onMenu,ambientColor=ambientUiColor.takeIf{ambientBitmap!=null},captureCharged=captureCharged,captureEnabled=captureEnabled,onCapture={capturePress()},hyperion=hyperion,onHyperion={onHyperion(!hyperion)})
         Column(Modifier.weight(1f).padding(horizontal=13.dp)) {
             ModeRow(mode,ambientUiColor.takeIf{ambientBitmap!=null},includeGames=endpoint.adapterKind!="samsung"){target->if(target!=mode){mode=target;scope.launch{val sm=when(target){"kiosk"->"youtube";"tv"->"tv";else->"video"};runCatching{api.post(endpointPath(endpoint.endpointId,"/mode"),endpointMutation(endpoint.endpointId,"mode" to sm))};refresh()}}}
             Spacer(Modifier.height(6.dp))
