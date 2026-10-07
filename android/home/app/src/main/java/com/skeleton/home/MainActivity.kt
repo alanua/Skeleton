@@ -798,14 +798,14 @@ private fun HomeComposeApp(sharedUrl:String?, consumeShare:()->Unit) {
     suspend fun refreshMediaTarget():Boolean{
         if(api.server==null)return false
         return runCatching{parseMediaTarget(api.get("/api/media/target"),endpointId,mediaEndpoints)}.fold(
-            onSuccess{latest->
+            onSuccess = { latest ->
                 mediaEndpoints=latest.endpoints
                 if(latest.endpointId.isNotBlank()&&latest.endpoints.any{it.endpointId==latest.endpointId}) endpointId=latest.endpointId
                 else if(latest.endpoints.none{it.endpointId==endpointId}) endpointId=latest.endpoints.first().endpointId
                 mediaCharged=latest.charged
                 true
             },
-            onFailure{false}
+            onFailure = { false }
         )
     }
     fun selectMediaEndpoint(selected:String){

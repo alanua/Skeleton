@@ -244,7 +244,7 @@ def test_capture_handoff_state_is_backend_authoritative() -> None:
     assert "var mediaCharged by remember { mutableStateOf(false) }" in main
     assert "suspend fun refreshMediaTarget():Boolean" in main
     assert "mediaCharged=latest.charged" in main
-    assert "onFailure{false}" in main
+    assert "onFailure = { false }" in main
     assert 'if(api.server!=null)runCatching{api.post("/api/media/target",JSONObject().put("target",selected).put("endpoint_id",selected))}' in main
 
     selector_change = re.search(
