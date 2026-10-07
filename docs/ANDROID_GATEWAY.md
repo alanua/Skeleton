@@ -6,7 +6,7 @@
 
 - Observation schema: `skeleton.android.observation.v1`
 - Snapshot schema: `skeleton.android.snapshot.v1`
-- Contract version: `1.0.0`
+- Contract version: `1.1.0`
 
 Each observation is a typed `AndroidObservation` with:
 
@@ -65,6 +65,20 @@ Payload and provenance are recursively validated and fail closed. The gateway re
 Accepted JSON must be bounded, finite, deterministic, and canonicalizable. Network collection may inspect local Termux network data internally, but SSID/BSSID/IP/MAC fields are discarded and must not appear in emitted payload or provenance.
 
 The gateway does not perform SSH, HTTP, uploads, remote execution, clipboard reads, notification reads, app-private scraping, MemoryGate writes, or network persistence.
+
+## Samsung USB ADB Watchdog
+
+`SamsungAdbWatchdog` is the canonical repository-backed Samsung tablet ADB control path. It manages one ADB server only: `adb -L tcp:127.0.0.1:5037 nodaemon server`. Client commands are pinned to `ADB_SERVER_SOCKET=tcp:127.0.0.1:5037`, `ADB_MDNS_AUTO_CONNECT=0`, and `-P 5037`.
+
+The watchdog fails closed when another process already owns localhost port `5037`, and it does not run `adb start-server`, `adb kill-server`, or any competing fork-server path. It also rejects network/TCP ADB transports, including stale `host:5555` devices, before recovery.
+
+Bounded Samsung USB recovery is limited to:
+
+- `adb reconnect offline`
+- `adb reconnect device`
+- `adb -s SERIAL usb` for an observed Samsung USB serial
+
+The watchdog state file records recent recovery attempts and blocks repeated recovery once the bounded budget is exhausted. It never performs reboot, factory reset, data clear, deploy, APK install, shell mutation, TCP ADB enablement, or media-mode changes.
 
 ## Adapter Direction
 

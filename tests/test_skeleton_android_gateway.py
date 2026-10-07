@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from core import skeleton_android_gateway as gateway
 from core.skeleton_android_gateway import (
     ANDROID_OBSERVATION_SCHEMA,
     ANDROID_SNAPSHOT_SCHEMA,
@@ -19,6 +20,8 @@ from core.skeleton_android_gateway import (
     AndroidObservationStore,
     AndroidObservationQuality,
     RemoteDesktopState,
+    SamsungAdbWatchdog,
+    parse_adb_devices,
     snapshot_from_observations,
 )
 
@@ -76,6 +79,30 @@ def _observation(**overrides: object) -> AndroidObservation:
     }
     values.update(overrides)
     return AndroidObservation(**values)
+
+
+class _FakeAdb:
+    def __init__(self, devices_output: str) -> None:
+        self.devices_output = devices_output
+        self.commands: list[tuple[str, ...]] = []
+        self.launches: list[tuple[str, ...]] = []
+
+    def run(
+        self, command: list[str] | tuple[str, ...], timeout: float, env: dict[str, str] | object
+    ) -> subprocess.CompletedProcess[str]:
+        self.commands.append(tuple(command))
+        assert timeout <= 10.0
+        assert getattr(env, "get")("ADB_SERVER_SOCKET") == "tcp:127.0.0.1:5037"
+        assert getattr(env, "get")("ADB_MDNS_AUTO_CONNECT") == "0"
+        if tuple(command[-2:]) == ("devices", "-l"):
+            return subprocess.CompletedProcess(command, 0, stdout=self.devices_output, stderr="")
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    def launch(self, command: list[str] | tuple[str, ...], env: dict[str, str] | object) -> object:
+        self.launches.append(tuple(command))
+        assert tuple(command) == ("adb", "-L", "tcp:127.0.0.1:5037", "nodaemon", "server")
+        assert "start-server" not in command
+        return object()
 
 
 def test_exact_observation_and_snapshot_schemas() -> None:
@@ -511,6 +538,149 @@ def test_recursive_privacy_rejection_for_payload_and_provenance(bad_payload: dic
 def test_malformed_payload_fails_closed(bad_payload: dict[object, object]) -> None:
     with pytest.raises(AndroidGatewayError):
         _observation(payload=bad_payload)
+
+
+def test_parse_adb_devices_identifies_samsung_usb_and_network_transports() -> None:
+    devices = parse_adb_devices(
+        """
+        List of devices attached
+        RF8T9000ABC device usb:1-1 product:gta4xlwifi model:SM_X200 device:gta4xlwifi transport_id:1
+        192.0.2.10:5555 device product:gta model:SM_X200 device:gta transport_id:2
+        """
+    )
+
+    assert devices[0].is_samsung_usb is True
+    assert devices[0].is_network_transport is False
+    assert devices[1].is_network_transport is True
+    assert devices[1].is_samsung_usb is False
+
+
+def test_samsung_adb_watchdog_starts_one_managed_localhost_server(tmp_path: Path) -> None:
+    adb = _FakeAdb(
+        "List of devices attached\n"
+        "RF8T9000ABC device usb:1-1 product:gta4xlwifi model:SM_X200 device:gta4xlwifi transport_id:1\n"
+    )
+    watchdog = SamsungAdbWatchdog(
+        state_root=tmp_path,
+        run_command=adb.run,
+        server_launcher=adb.launch,
+        port_owner=lambda host, port: "none",
+    )
+
+    receipt = watchdog.check_and_recover()
+
+    assert receipt.status == "DONE"
+    assert receipt.reason == "SAMSUNG_USB_ADB_HEALTHY"
+    assert receipt.actions == ("managed_server_started",)
+    assert len(adb.launches) == 1
+    assert adb.launches[0] == ("adb", "-L", "tcp:127.0.0.1:5037", "nodaemon", "server")
+    assert all("start-server" not in command and "kill-server" not in command for command in adb.commands)
+
+
+def test_samsung_adb_watchdog_rejects_unmanaged_adb_server_without_killing_it(tmp_path: Path) -> None:
+    adb = _FakeAdb("List of devices attached\n")
+    watchdog = SamsungAdbWatchdog(
+        state_root=tmp_path,
+        run_command=adb.run,
+        server_launcher=adb.launch,
+        port_owner=lambda host, port: "unmanaged",
+    )
+
+    receipt = watchdog.check_and_recover()
+
+    assert receipt.status == "BLOCKED"
+    assert receipt.reason == "UNMANAGED_ADB_SERVER_ON_5037"
+    assert adb.launches == []
+    assert adb.commands == []
+
+
+def test_samsung_adb_watchdog_default_port_probe_blocks_unknown_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adb = _FakeAdb("List of devices attached\n")
+    monkeypatch.setattr(gateway, "_localhost_port_open", lambda host, port: True)
+    watchdog = SamsungAdbWatchdog(
+        state_root=tmp_path,
+        run_command=adb.run,
+        server_launcher=adb.launch,
+    )
+
+    receipt = watchdog.check_and_recover()
+
+    assert receipt.status == "BLOCKED"
+    assert receipt.reason == "UNMANAGED_ADB_SERVER_ON_5037"
+    assert adb.launches == []
+    assert adb.commands == []
+
+
+def test_samsung_adb_watchdog_fails_closed_on_stale_network_adb(tmp_path: Path) -> None:
+    adb = _FakeAdb("List of devices attached\n192.0.2.10:5555 device product:gta model:SM_X200 transport_id:2\n")
+    watchdog = SamsungAdbWatchdog(
+        state_root=tmp_path,
+        run_command=adb.run,
+        server_launcher=adb.launch,
+        port_owner=lambda host, port: "managed",
+    )
+
+    receipt = watchdog.check_and_recover()
+
+    assert receipt.status == "BLOCKED"
+    assert receipt.reason == "STALE_NETWORK_ADB_FAIL_CLOSED"
+    assert receipt.device_state == "network_transport_present"
+    assert adb.launches == []
+    assert adb.commands == [("adb", "-P", "5037", "devices", "-l")]
+
+
+def test_samsung_adb_watchdog_recovery_escalates_without_destructive_actions(tmp_path: Path) -> None:
+    adb = _FakeAdb(
+        "List of devices attached\n"
+        "RF8T9000ABC offline usb:1-1 product:gta4xlwifi model:SM_X200 device:gta4xlwifi transport_id:1\n"
+    )
+    watchdog = SamsungAdbWatchdog(
+        state_root=tmp_path,
+        clock=lambda: 1000.0,
+        run_command=adb.run,
+        server_launcher=adb.launch,
+        port_owner=lambda host, port: "managed",
+    )
+
+    receipt = watchdog.check_and_recover()
+
+    assert receipt.status == "RECOVERING"
+    assert receipt.actions == ("reconnect_offline", "reconnect_device", "usb_reset")
+    assert adb.commands == [
+        ("adb", "-P", "5037", "devices", "-l"),
+        ("adb", "-P", "5037", "reconnect", "offline"),
+        ("adb", "-P", "5037", "reconnect", "device"),
+        ("adb", "-P", "5037", "-s", "RF8T9000ABC", "usb"),
+    ]
+    encoded = " ".join(" ".join(command) for command in adb.commands)
+    assert "reboot" not in encoded
+    assert "install" not in encoded
+    assert "shell" not in encoded
+    assert "setFunctions" not in encoded
+
+
+def test_samsung_adb_watchdog_crash_loop_budget_blocks_repeated_recovery(tmp_path: Path) -> None:
+    state_file = tmp_path / "samsung-adb-watchdog.json"
+    state_file.write_text('{"attempts":[900.0,950.0,999.0],"managed_server_started":true}\n', encoding="utf-8")
+    adb = _FakeAdb(
+        "List of devices attached\n"
+        "RF8T9000ABC offline usb:1-1 product:gta4xlwifi model:SM_X200 device:gta4xlwifi transport_id:1\n"
+    )
+    watchdog = SamsungAdbWatchdog(
+        state_root=tmp_path,
+        clock=lambda: 1000.0,
+        run_command=adb.run,
+        server_launcher=adb.launch,
+        port_owner=lambda host, port: "managed",
+    )
+
+    receipt = watchdog.check_and_recover()
+
+    assert receipt.status == "BLOCKED"
+    assert receipt.reason == "RECOVERY_BUDGET_EXHAUSTED"
+    assert adb.commands == [("adb", "-P", "5037", "devices", "-l")]
 
 
 def test_snapshot_cli_writes_output_and_emits_snapshot(tmp_path: Path) -> None:
