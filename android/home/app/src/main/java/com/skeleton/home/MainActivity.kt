@@ -317,6 +317,8 @@ private fun canonicalHistoryItems(items:List<JSONObject>):List<JSONObject>{
     val seen=mutableSetOf<String>()
     return items.filter{val k=historyKey(it);k.isBlank()||seen.add(k)}
 }
+private fun videoSelectionIdentity(selection:JSONObject):String=
+    listOf("job_id","source_id","season","episode","voice").joinToString("|"){Uri.encode(selection.optString(it).trim())}
 private fun historyEpisodeLabel(item:JSONObject):String{
     val episodeKey=item.cleanText("episode_key").lowercase(Locale.ROOT)
     val m=Regex("""s(\d+)e(\d+)""").find(episodeKey)
@@ -1842,7 +1844,7 @@ private fun VideoScreen(api:HomeApi,active:Boolean,selectionRevision:Int,endpoin
     val scope=rememberCoroutineScope(); val context=LocalContext.current
     val endpoint=endpointById(endpoints,endpointId)
     var history by remember{mutableStateOf(emptyList<JSONObject>())}; var historyOpen by remember{mutableStateOf(false)}; var seasonOpen by remember{mutableStateOf(false)}; var detailOpen by remember{mutableStateOf(false)}; var loadingSeason by remember{mutableStateOf("")}
-    var selection by remember{mutableStateOf(JSONObject())}; var job by remember{mutableStateOf<JSONObject?>(null)}; var sources by remember{mutableStateOf(emptyList<JSONObject>())}; var jobId by remember{mutableStateOf("")}; var loading by remember{mutableStateOf(false)}
+    var selection by remember{mutableStateOf(JSONObject())}; var selectionIdentity by remember{mutableStateOf("")}; var job by remember{mutableStateOf<JSONObject?>(null)}; var sources by remember{mutableStateOf(emptyList<JSONObject>())}; var jobId by remember{mutableStateOf("")}; var loading by remember{mutableStateOf(false)}
     var season by remember{mutableStateOf("")}; var episode by remember{mutableStateOf("")}; var quality by remember{mutableStateOf("")}; var voice by remember{mutableStateOf("")}; var autoplay by remember{mutableStateOf(false)}; var monitor by remember{mutableStateOf(false)}; var monitorReady by remember{mutableStateOf(false)}; var external by remember{mutableStateOf(JSONObject())}; var message by remember{mutableStateOf("")}; var currentPlayer by remember{mutableStateOf(JSONObject())}; var audioSel by remember{mutableStateOf("")}; var subSel by remember{mutableStateOf("")}
     suspend fun loadJob(id:String){
         if(id.isBlank())return; loading=true
@@ -1863,12 +1865,17 @@ private fun VideoScreen(api:HomeApi,active:Boolean,selectionRevision:Int,endpoin
         monitorReady=false
         runCatching{api.get("/api/video/monitor?job_id=${Uri.encode(jobId)}")}.onSuccess{monitor=it.optBoolean("enabled");monitorReady=true}.onFailure{monitor=false;monitorReady=false}
     }
+    suspend fun applyEndpointSelection(latest:JSONObject,reloadWork:Boolean){
+        selection=latest
+        selectionIdentity=videoSelectionIdentity(latest)
+        jobId=latest.optString("job_id")
+        if(reloadWork&&jobId.isNotBlank()){loadJob(jobId);loadMonitor()}
+    }
     suspend fun loadAll():Boolean{
         if(api.server==null)return false
         // Fast path first: render the selected work immediately. History is the expensive call.
-        val sel=runCatching{endpointVideoSelection(api,endpoint.endpointId)};sel.onSuccess{selection=it;jobId=it.optString("job_id")}
+        val sel=runCatching{endpointVideoSelection(api,endpoint.endpointId)};sel.onSuccess{applyEndpointSelection(it,true)}
         runCatching{api.get(endpointPath(endpoint.endpointId,"/player"))}.onSuccess{currentPlayer=it}
-        if(sel.isSuccess&&jobId.isNotBlank()){loadJob(jobId);loadMonitor()}
         val h=runCatching{api.get(mediaHistoryPath(endpoint.endpointId))};h.onSuccess{history=canonicalHistoryItems(it.optJSONArray("items")?.objects().orEmpty())}
         runCatching{api.get("/api/video/autoplay")}.onSuccess{autoplay=it.optBoolean("enabled")}
         return h.isSuccess&&sel.isSuccess
@@ -1878,11 +1885,20 @@ private fun VideoScreen(api:HomeApi,active:Boolean,selectionRevision:Int,endpoin
             while(true){if(loadAll())break;delay(1500)}
         }
     }
+    LaunchedEffect(api.server,active,endpoint.endpointId){
+        if(api.server!=null&&active)while(true){
+            delay(2500)
+            runCatching{endpointVideoSelection(api,endpoint.endpointId)}.onSuccess{latest->
+                val latestIdentity=videoSelectionIdentity(latest)
+                if(latestIdentity!=selectionIdentity)applyEndpointSelection(latest,true)
+            }
+        }
+    }
     LaunchedEffect(api.server,jobId,active,endpoint.endpointId){if(api.server!=null){runCatching{api.get(endpointPath(endpoint.endpointId,"/player"))}.onSuccess{currentPlayer=it};if(active)while(true){delay(2500);runCatching{api.get(endpointPath(endpoint.endpointId,"/player"))}.onSuccess{currentPlayer=it}}}}
     LaunchedEffect(api.server,jobId){if(jobId.isNotBlank())loadMonitor() else {monitor=false;monitorReady=false}}
     val cat=job?.optJSONObject("catalog")?:JSONObject()
     val isSeries=cat.optString("media_type",job?.optString("history_media_type","")?:"").lowercase(Locale.ROOT)=="tv"
-    LaunchedEffect(job,sources,isSeries){
+    LaunchedEffect(selectionIdentity,job,sources,isSeries){
         val ss=selection; season=if(isSeries)ss.optString("season") else ""; episode=if(isSeries)ss.optString("episode") else ""; voice=ss.optString("voice")
         val sid=ss.optString("source_id")
         if(sid.isNotBlank())sources.firstOrNull{it.optString("source_id")==sid}?.let{quality=it.optString("quality");if(isSeries&&season.isBlank())season=it.optString("season");if(isSeries&&episode.isBlank())episode=it.optString("episode");if(voice.isBlank())voice=sourceVoice(it)}
@@ -2000,7 +2016,7 @@ private fun VideoScreen(api:HomeApi,active:Boolean,selectionRevision:Int,endpoin
             }
         }
     }
-    if(historyOpen)HistoryPickerDialog(api,history,{item->historyOpen=false;scope.launch{selection=historyPreferredSelection(endpoint.endpointId,item);jobId=selection.optString("job_id");loadJob(jobId)}},{historyOpen=false})
+    if(historyOpen)HistoryPickerDialog(api,history,{item->historyOpen=false;scope.launch{selection=historyPreferredSelection(endpoint.endpointId,item);jobId=selection.optString("job_id");loadJob(jobId);selectionIdentity=videoSelectionIdentity(selection);loadMonitor()}},{historyOpen=false})
     if(seasonOpen)SeasonPickerDialog(api,cat,seasonItems,loadedSeasons,season,loadingSeason,{snum,load->
         season=snum
         if(load){
