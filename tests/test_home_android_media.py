@@ -141,11 +141,12 @@ def test_youtube_fast_start_window_is_subsecond() -> None:
     assert 'videoId.isNotBlank()->"https://i.ytimg.com/vi/$videoId/hqdefault.jpg"' in text
 
 
-def test_home_and_video_header_hide_connection_status() -> None:
+
+def test_home_and_video_header_keep_connection_status() -> None:
     text = _source()
-    assert "showStatus:Boolean=true" in text
     home_line = next(line for line in text.splitlines() if 'Header(ui("Головна")' in line)
     video_line = next(line for line in text.splitlines() if 'Header(ui("Відео")' in line)
-    assert "showStatus=false" in home_line
-    assert "showStatus=false" in video_line
-    assert "height(if(showStatus)74.dp else 60.dp)" in text
+    assert "showStatus=false" not in home_line
+    assert "showStatus=false" not in video_line
+    assert 'Text(if(connected) "Підключено" else "Недоступно"' in text
+    assert 'background(if(connected)Green else Muted)' in text

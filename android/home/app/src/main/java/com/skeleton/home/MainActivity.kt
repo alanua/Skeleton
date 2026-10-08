@@ -1507,7 +1507,7 @@ private fun Header(title:String, connected:Boolean, endpointId:String, endpoints
     Box(Modifier.fillMaxSize()){
         AmbientPosterBackground(ambientBitmap,Modifier.fillMaxSize())
         Column(Modifier.fillMaxSize()) {
-        Header(ui("Головна"),api.server!=null,endpoint.endpointId,endpoints,onEndpoint,onMenu,ambientColor=ambientUiColor.takeIf{ambientBitmap!=null},captureCharged=captureCharged,captureEnabled=captureEnabled,onCapture={capturePress()},hyperion=hyperion,onHyperion={onHyperion(!hyperion)},showStatus=false)
+        Header(ui("Головна"),api.server!=null,endpoint.endpointId,endpoints,onEndpoint,onMenu,ambientColor=ambientUiColor.takeIf{ambientBitmap!=null},captureCharged=captureCharged,captureEnabled=captureEnabled,onCapture={capturePress()},hyperion=hyperion,onHyperion={onHyperion(!hyperion)})
         Column(Modifier.weight(1f).padding(horizontal=13.dp)) {
             ModeRow(mode,ambientUiColor.takeIf{ambientBitmap!=null},includeGames=endpoint.adapterKind!="samsung"){target->if(target!=mode){mode=target;scope.launch{val sm=when(target){"kiosk"->"youtube";"tv"->"tv";else->"video"};runCatching{api.post(endpointPath(endpoint.endpointId,"/mode"),endpointMutation(endpoint.endpointId,"mode" to sm))};refresh()}}}
             Spacer(Modifier.height(6.dp))
@@ -1992,7 +1992,7 @@ private fun VideoScreen(api:HomeApi,active:Boolean,selectionRevision:Int,endpoin
     Box(Modifier.fillMaxSize()){
         AmbientPosterBackground(bm,Modifier.fillMaxSize())
         Column(Modifier.fillMaxSize()){
-        Header(ui("Відео"),api.server!=null,endpoint.endpointId,endpoints,onEndpoint,onMenu,ambientColor=remember(bm){ambientComplement(bm)}.takeIf{bm!=null},captureCharged=captureCharged,captureEnabled=captureEnabled,onCapture={capturePress()},hyperion=hyperion,onHyperion={onHyperion(!hyperion)},showStatus=false)
+        Header(ui("Відео"),api.server!=null,endpoint.endpointId,endpoints,onEndpoint,onMenu,ambientColor=remember(bm){ambientComplement(bm)}.takeIf{bm!=null},captureCharged=captureCharged,captureEnabled=captureEnabled,onCapture={capturePress()},hyperion=hyperion,onHyperion={onHyperion(!hyperion)})
         LazyColumn(Modifier.weight(1f).padding(horizontal=13.dp),contentPadding=PaddingValues(top=4.dp,bottom=18.dp)){
             item{
                 Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(Card).border(1.dp,Line,RoundedCornerShape(16.dp)).padding(start=12.dp,end=12.dp,top=14.dp,bottom=12.dp)){
