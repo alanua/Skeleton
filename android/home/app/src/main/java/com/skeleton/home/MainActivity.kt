@@ -2016,7 +2016,21 @@ private fun VideoScreen(api:HomeApi,active:Boolean,selectionRevision:Int,endpoin
             }
         }
     }
-    if(historyOpen)HistoryPickerDialog(api,history,{item->historyOpen=false;scope.launch{selection=historyPreferredSelection(endpoint.endpointId,item);jobId=selection.optString("job_id");loadJob(jobId);selectionIdentity=videoSelectionIdentity(selection);loadMonitor()}},{historyOpen=false})
+    if(historyOpen)HistoryPickerDialog(api,history,{item->
+        historyOpen=false
+        scope.launch{
+            val preferred=historyPreferredSelection(endpoint.endpointId,item)
+            runCatching{api.put(endpointPath(endpoint.endpointId,"/video/selection"),preferred)}
+                .onSuccess{
+                    selection=preferred
+                    jobId=selection.optString("job_id")
+                    loadJob(jobId)
+                    selectionIdentity=videoSelectionIdentity(selection)
+                    loadMonitor()
+                }
+                .onFailure{message=it.message?:"Не вдалося вибрати запис історії"}
+        }
+    },{historyOpen=false})
     if(seasonOpen)SeasonPickerDialog(api,cat,seasonItems,loadedSeasons,season,loadingSeason,{snum,load->
         season=snum
         if(load){
@@ -2656,6 +2670,7 @@ private fun shareMfpPdf(context:Context,api:HomeApi,doc:JSONObject){
     var telegramSourceHandle by remember{mutableStateOf("")}
     var telegramSourcePrivate by remember{mutableStateOf(false)}
     var telegramSources by remember{mutableStateOf<List<String>>(emptyList())}
+    var telegramSourcesExpanded by rememberSaveable{mutableStateOf(false)}
     var telegramStatus by remember{mutableStateOf("")}
     fun refresh(){scope.launch{
         runCatching{api.get("/api/native/home-edge/secrets/status")}.onSuccess{
@@ -2868,7 +2883,13 @@ private fun shareMfpPdf(context:Context,api:HomeApi,doc:JSONObject){
                             .onFailure{telegramStatus=it.message?:"Не вдалося додати канал"}
                         busy=false
                     }},enabled=!busy&&telegramSourceHandle.startsWith("@")&&telegramSourceHandle.length>=6,shape=RoundedCornerShape(12.dp),colors=ButtonDefaults.buttonColors(containerColor=Action),modifier=Modifier.fillMaxWidth().height(46.dp).padding(top=7.dp)){Text("Додати канал",fontWeight=FontWeight.SemiBold,color=Text)}
-                    if(telegramSources.isNotEmpty())Text("Allowlist: "+telegramSources.joinToString(" · "),fontSize=10.sp,lineHeight=15.sp,color=Muted,modifier=Modifier.padding(top=8.dp))
+                    if(telegramSources.isNotEmpty()){
+                        Row(Modifier.fillMaxWidth().padding(top=8.dp).clip(RoundedCornerShape(8.dp)).clickable{telegramSourcesExpanded=!telegramSourcesExpanded}.padding(vertical=4.dp),verticalAlignment=Alignment.CenterVertically){
+                            Text("Allowlist · ${telegramSources.size}",fontSize=10.sp,fontWeight=FontWeight.SemiBold,color=Muted,modifier=Modifier.weight(1f))
+                            Mdi(if(telegramSourcesExpanded)"chevron-up" else "chevron-down",16.dp,Muted)
+                        }
+                        if(telegramSourcesExpanded)Text(telegramSources.joinToString(" · "),fontSize=10.sp,lineHeight=15.sp,color=Muted,modifier=Modifier.padding(top=3.dp))
+                    }
                     Button(onClick={scope.launch{
                         busy=true;telegramStatus="Синхронізую Telegram…"
                         runCatching{api.post("/api/native/home-edge/telegram/sync",JSONObject())}

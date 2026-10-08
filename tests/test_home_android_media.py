@@ -76,7 +76,10 @@ def test_home_video_selection_and_history_are_canonical_endpoint_scoped() -> Non
     assert 'api.get(mediaHistoryPath(endpointId))' in text
     assert 'api.get(mediaHistoryPath(endpoint.endpointId))' in text
     assert 'api.delete(mediaHistoryDeletePath(endpointId,item))' in text
-    assert 'selection=historyPreferredSelection(endpoint.endpointId,item);jobId=selection.optString("job_id");loadJob(jobId)' in text
+    assert 'val preferred=historyPreferredSelection(endpoint.endpointId,item)' in text
+    assert 'runCatching{api.put(endpointPath(endpoint.endpointId,"/video/selection"),preferred)}' in text
+    assert 'selection=preferred' in text
+    assert 'onFailure{message=it.message?:"Не вдалося вибрати запис історії"}' in text
     assert '"/api/media/history/delete"' not in text
     assert '"/api/media/history/open"' not in text
     assert '"/history/delete"' not in text
@@ -85,3 +88,11 @@ def test_home_video_selection_and_history_are_canonical_endpoint_scoped() -> Non
     assert 'endpointPath(endpointId,"/video/history")' not in text
     assert 'endpointPath(endpoint.endpointId,"/video/history")' not in text
     assert "LaunchedEffect(api.server,endpointId){reload()}" in text
+
+
+def test_home_nonyoutube_regressions_restore_history_and_telegram_only() -> None:
+    text = _source()
+    assert 'var telegramSourcesExpanded by rememberSaveable{mutableStateOf(false)}' in text
+    assert 'Mdi(if(telegramSourcesExpanded)"chevron-up" else "chevron-down",16.dp,Muted)' in text
+    assert 'val preferred=historyPreferredSelection(endpoint.endpointId,item)' in text
+    assert 'runCatching{api.put(endpointPath(endpoint.endpointId,"/video/selection"),preferred)}' in text
