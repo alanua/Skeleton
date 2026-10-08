@@ -9,8 +9,8 @@ android {
         applicationId = "com.skeleton.home"
         minSdk = 26
         targetSdk = 34
-        versionCode = 148
-        versionName = "1.4.32"
+        versionCode = 149
+        versionName = "1.4.33"
         buildConfigField("String", "HOME_EDGE_BASE_URLS", "\"$escapedHomeEdgeBaseUrls\"")
     }
     buildFeatures { compose = true; buildConfig = true }
