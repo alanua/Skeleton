@@ -15,8 +15,8 @@ def _source() -> str:
 def test_home_release_metadata_is_1_4_34_150() -> None:
     text = BUILD_GRADLE.read_text(encoding="utf-8")
 
-    assert "versionCode = 150" in text
-    assert 'versionName = "1.4.34"' in text
+    assert "versionCode = 151" in text
+    assert 'versionName = "1.4.35"' in text
 
 
 def test_home_media_volume_and_mute_are_endpoint_isolated() -> None:
@@ -44,11 +44,15 @@ def test_home_tv_youtube_uses_endpoint_player_without_snapshot_polling() -> None
     assert 'api.get(endpointPath(endpoint.endpointId,"/player"))' in text
     assert "parseMediaEndpointPlayerState" in text
     assert "val player=j" in text
-    assert 'lastGoodPlayer.optString("display-title",lastGoodPlayer.optString("title",lastGoodPlayer.optString("media-title","Відео")))' in text
-    assert 'lastGoodPlayer.optString("poster_landscape",lastGoodPlayer.optString("poster",""))' in text
+    assert 'val remotePlayer=remote.optJSONObject("player") ?: JSONObject()' in text
+    assert 'val remoteTitle=remotePlayer.optString("display-title",remotePlayer.optString("title",remotePlayer.optString("media-title",""))).trim()' in text
+    assert 'val canonicalTitle=lastGoodPlayer.optString("display-title",lastGoodPlayer.optString("title",lastGoodPlayer.optString("media-title",""))).trim()' in text
+    assert 'val remotePoster=remotePlayer.optString("poster_landscape",remotePlayer.optString("poster",""))' in text
+    assert 'val canonicalPoster=lastGoodPlayer.optString("poster_landscape",lastGoodPlayer.optString("poster",""))' in text
     assert 'val remoteState=liveRemote.optInt("state",-99)' in text
     assert 'val remoteDuration=liveRemote.optDouble("duration",0.0).toFloat()' in text
-    assert 'val videoId=liveRemote.optString("video_id","").ifBlank{lastGoodPlayer.optString("video_id","")}' in text
+    assert 'val remoteVideoId=liveRemote.optString("video_id","")' in text
+    assert 'val videoId=remoteVideoId.ifBlank{canonicalVideoId}' in text
     assert 'val serverPos=(if(liveRemote.has("time"))liveRemote.optDouble("time",fallbackPos) else fallbackPos).toFloat()' in text
     assert 'val rawDuration=if(remoteDuration>1f)remoteDuration else lastGoodPlayer.optDouble("duration",0.0).toFloat()' in text
     assert 'val paused=when(remoteState){1->false;2,3->true;else->lastGoodPlayer.optBoolean("pause",false)}' in text
@@ -57,7 +61,8 @@ def test_home_tv_youtube_uses_endpoint_player_without_snapshot_polling() -> None
     assert 'runCatching{api.get(endpointPath(endpointId,"/remote/status"))}' not in text
     assert "delay(if(endpoint.adapterKind!=\"samsung\"&&mode==\"kiosk\")850 else 2500)" in text
     assert "delay(4000)" not in text
-    assert 'runCatching{api.get(endpointPath(endpoint.endpointId,"/remote/status"))}.onSuccess{youtubeRemoteStatus=it}\n                delay(850)' in text
+    assert 'runCatching{api.get(endpointPath(endpoint.endpointId,"/remote/status"))}.onSuccess{status->' in text
+    assert 'delay(if(System.currentTimeMillis()<fastUntil)250 else 850)' in text
     assert "val youtubeControls=remote.optJSONObject" in text
     assert "LaunchedEffect(videoId,running,canSeek,paused,rawDuration)" in text
     card = text.split("@Composable private fun YoutubeRemoteCard", 1)[1].split("@Composable private fun VideoRemoteCard", 1)[0]
@@ -110,7 +115,37 @@ def test_history_selection_payload_excludes_resume_position():
 
 def test_youtube_fast_status_drives_progress_and_poster():
     src = MAIN_ACTIVITY.read_text(encoding="utf-8")
-    assert 'delay(850)' in src
+    assert 'delay(if(System.currentTimeMillis()<fastUntil)250 else 850)' in src
     assert 'liveRemote.optDouble("time",fallbackPos)' in src
     assert 'val remoteDuration=liveRemote.optDouble("duration",0.0).toFloat()' in src
     assert '"https://i.ytimg.com/vi/$videoId/hqdefault.jpg"' in src
+
+
+def test_home_header_layout_video_only_beyond_home() -> None:
+    text = _source()
+    assert 'Header(ui("Головна")' in text
+    assert 'Header(ui("Відео")' in text
+    assert 'captureCharged=captureCharged,captureEnabled=captureEnabled,onCapture={capturePress()},hyperion=hyperion,onHyperion={onHyperion(!hyperion)}' in text
+    devices = text.split("@Composable private fun DevicesScreen", 1)[1].split("private data class SkItem", 1)[0]
+    skeleton = text.split("@Composable private fun SkeletonScreen", 1)[1]
+    assert 'Header(ui("Пристрої")' not in devices
+    assert 'Header(ui("СК")' not in skeleton
+
+
+def test_youtube_fast_start_window_is_subsecond() -> None:
+    text = _source()
+    assert "fastUntil=System.currentTimeMillis()+12000L" in text
+    assert "delay(if(System.currentTimeMillis()<fastUntil)250 else 850)" in text
+    assert 'val running=lastGoodPlayer.optBoolean("running") || (videoId.isNotBlank()&&remoteState in setOf(1,2,3))' in text
+    assert 'val remotePlayer=remote.optJSONObject("player") ?: JSONObject()' in text
+    assert 'videoId.isNotBlank()->"https://i.ytimg.com/vi/$videoId/hqdefault.jpg"' in text
+
+
+def test_home_and_video_header_hide_connection_status() -> None:
+    text = _source()
+    assert "showStatus:Boolean=true" in text
+    home_line = next(line for line in text.splitlines() if 'Header(ui("Головна")' in line)
+    video_line = next(line for line in text.splitlines() if 'Header(ui("Відео")' in line)
+    assert "showStatus=false" in home_line
+    assert "showStatus=false" in video_line
+    assert "height(if(showStatus)74.dp else 60.dp)" in text
