@@ -10214,6 +10214,7 @@ def _issue_publish_inspection_body(
 
 def _publish_existing_issue_worktree_body(
     *,
+    target_project: str | None = None,
     target_repository: str = runner.REPO,
     source_issue: int | str = 123,
     base_branch: str = "main",
@@ -10224,6 +10225,7 @@ def _publish_existing_issue_worktree_body(
     publish_override: object | None = None,
 ) -> str:
     metadata = [
+        *([f"Target Project: {target_project}"] if target_project is not None else []),
         f"Target Repository: {target_repository}",
         f"Source Issue: {source_issue}",
         f"Base Branch: {base_branch}",
@@ -14677,6 +14679,101 @@ def test_publish_existing_issue_worktree_is_allowlisted_and_creates_draft_pr(
     assert not any(".codex/session.json" in command for command in commands)
     assert commands[-1][-1] == "--draft"
     assert all(command[:3] != ["git", "ls-remote", "--heads"] for command in commands)
+
+
+def test_publish_existing_issue_worktree_accepts_registered_external_target_repository(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_root = tmp_path / "skeleton"
+    target_root = tmp_path / "lumenflow"
+    worktree_path = _prepare_issue_publish_worktree(source_root)
+    monkeypatch.setenv("RUNNER_APPROVED_WORKSPACE_ROOT", str(tmp_path))
+
+    with mock.patch.object(
+        runner, "load_runner_project_tree", return_value=_target_project_tree(target_root)
+    ), mock.patch.object(
+        runner, "worktree_root", return_value=source_root
+    ), mock.patch.object(
+        runner,
+        "run_command",
+        side_effect=_issue_publish_commands(
+            worktree_path=worktree_path,
+            repository="alanua/LumenFlow",
+            remote_url="https://github.com/alanua/LumenFlow.git",
+            changed_files=("README.md",),
+            pr_create_url="https://github.com/alanua/LumenFlow/pull/123",
+        ),
+    ) as run:
+        report = runner.publish_existing_issue_worktree(
+            _publish_existing_issue_worktree_body(
+                target_project="lumenflow",
+                target_repository="alanua/LumenFlow",
+                allowed_files=("README.md",),
+            )
+        )
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert report.startswith("DONE:")
+    assert "target_project=lumenflow" in report
+    assert "repository=alanua/LumenFlow" in report
+    assert "issue_worktree_id=issue-123" in report
+    assert "draft_pr_url=https://github.com/alanua/LumenFlow/pull/123" in report
+    assert ["git", "add", "--", "README.md"] in commands
+    assert [
+        "gh",
+        "pr",
+        "create",
+        "--repo",
+        "alanua/LumenFlow",
+        "--base",
+        "main",
+        "--head",
+        "runner/issue-123",
+        "--title",
+        "Runner task #123",
+        "--body",
+        "Automated Runner publish task from issue #123.",
+        "--draft",
+    ] in commands
+
+
+def test_publish_existing_issue_worktree_rejects_unknown_target_repository(
+    tmp_path: Path,
+) -> None:
+    with mock.patch.object(
+        runner, "worktree_root", return_value=tmp_path
+    ), mock.patch.object(runner, "run_command") as run:
+        report = runner.publish_existing_issue_worktree(
+            _publish_existing_issue_worktree_body(target_repository="alanua/Unknown")
+        )
+
+    assert report.startswith("NEEDS_OPERATOR:")
+    assert "reason=unsupported_repository" in report
+    run.assert_not_called()
+
+
+def test_publish_existing_issue_worktree_rejects_mismatched_target_project_repository(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target_root = tmp_path / "lumenflow"
+    monkeypatch.setenv("RUNNER_APPROVED_WORKSPACE_ROOT", str(tmp_path))
+
+    with mock.patch.object(
+        runner, "load_runner_project_tree", return_value=_target_project_tree(target_root)
+    ), mock.patch.object(runner, "run_command") as run:
+        report = runner.publish_existing_issue_worktree(
+            _publish_existing_issue_worktree_body(
+                target_project="skeleton",
+                target_repository="alanua/LumenFlow",
+                allowed_files=("README.md",),
+            )
+        )
+
+    assert report.startswith("NEEDS_OPERATOR:")
+    assert "reason=unsupported_repository" in report
+    run.assert_not_called()
 
 
 def test_publish_existing_issue_worktree_reuses_existing_pr_when_lookup_succeeds(

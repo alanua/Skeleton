@@ -14289,6 +14289,45 @@ def _issue_publish_bool_field(
     return None, f"invalid_{field.lower().replace(' ', '_')}"
 
 
+def _registered_publish_existing_target_repository(
+    repository: str | None,
+    target_project: str | None = None,
+) -> tuple[str | None, str | None, Path | None, str | None]:
+    if repository == REPO:
+        if target_project not in (None, "skeleton"):
+            return None, None, None, "unsupported_repository"
+        return "skeleton", REPO, None, None
+    if repository is None:
+        return None, None, None, "missing_target_repository"
+    project_tree = load_runner_project_tree()
+    try:
+        project = get_project_by_repo(project_tree, repository)
+    except (KeyError, ValueError):
+        return None, None, None, "unsupported_repository"
+    if target_project is not None:
+        try:
+            project_from_target = get_project(project_tree, target_project)
+        except (KeyError, ValueError):
+            return None, None, None, "unsupported_repository"
+        if project_from_target != project:
+            return None, None, None, "unsupported_repository"
+    if project.get("public") is not True or project.get("runner_enabled") is not True:
+        return None, None, None, "unsupported_repository"
+    canonical_repository = project.get("repo")
+    if canonical_repository != repository:
+        return None, None, None, "unsupported_repository"
+    projects = project_tree.get("projects")
+    project_id = None
+    if isinstance(projects, dict):
+        for candidate_project_id, candidate in projects.items():
+            if candidate == project:
+                project_id = candidate_project_id
+                break
+    if not isinstance(project_id, str) or not project_id:
+        return None, None, None, "unsupported_repository"
+    return project_id, repository, Path(project["worktree_root"]), None
+
+
 def _issue_worktree_publish_inspection_metadata(
     body: str,
     *,
@@ -14338,6 +14377,17 @@ def _issue_worktree_publish_inspection_metadata(
             if explicit_recovery_route
             else _body_field(metadata, "Repository")
         )
+        if explicit_recovery_route:
+            (
+                target_project,
+                repository,
+                target_worktree_root,
+                target_repository_reason,
+            ) = _registered_publish_existing_target_repository(
+                repository, _body_field(metadata, "Target Project")
+            )
+            if target_repository_reason is not None:
+                return None, target_repository_reason
     source_issue = _body_field(metadata, "Source Issue")
     source_repository = (
         _body_field(metadata, "Source Repository")
@@ -14361,9 +14411,19 @@ def _issue_worktree_publish_inspection_metadata(
     )
     allowed_files, allowed_files_reason = _issue_publish_allowed_files(metadata)
 
-    if not target_project_route and require_repository and repository != REPO:
+    if (
+        not explicit_recovery_route
+        and not target_project_route
+        and require_repository
+        and repository != REPO
+    ):
         return None, "unsupported_repository"
-    if not target_project_route and repository is not None and repository != REPO:
+    if (
+        not explicit_recovery_route
+        and not target_project_route
+        and repository is not None
+        and repository != REPO
+    ):
         return None, "unsupported_repository"
     if (explicit_recovery_route or target_project_route) and repository is None:
         return None, "missing_target_repository"
