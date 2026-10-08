@@ -1414,6 +1414,8 @@ private fun Header(title:String, connected:Boolean, endpointId:String, endpoints
     var volume by remember(endpoint.endpointId){mutableIntStateOf(endpointVolumes[endpoint.endpointId] ?: 25)}
     var lastNonzero by remember(endpoint.endpointId){mutableIntStateOf(endpointLastNonzero[endpoint.endpointId] ?: endpointVolumes[endpoint.endpointId]?.takeIf{it>0} ?: 25)}
     var volumeReady by remember(endpoint.endpointId){mutableStateOf(endpointVolumeReady[endpoint.endpointId] == true)}
+    var requestedMode by remember(endpoint.endpointId){mutableStateOf<String?>(null)}
+    var requestedModeAt by remember(endpoint.endpointId){mutableStateOf(0L)}
     fun setEndpointVolume(v:Int){
         val clamped=v.coerceIn(0,100)
         volume=clamped
@@ -1425,11 +1427,22 @@ private fun Header(title:String, connected:Boolean, endpointId:String, endpoints
             endpointLastNonzero[endpoint.endpointId]=clamped
         }
     }
+    fun resolveObservedMode(observed:String):String{
+        val pending=requestedMode ?: return observed
+        val expired=System.currentTimeMillis()-requestedModeAt>=5000L
+        if(observed==pending||expired){
+            requestedMode=null
+            requestedModeAt=0L
+            return observed
+        }
+        return pending
+    }
     suspend fun refresh(){
         if(api.server==null)return
         if(endpoint.adapterKind=="samsung"){
             runCatching{api.get(endpointPath(endpoint.endpointId,"/status"))}.onSuccess{ss->
-                mode=when(ss.optString("mode","video")){"youtube"->"kiosk";"tv"->"tv";else->"mpv"}
+                val observedMode=when(ss.optString("mode","video")){"youtube"->"kiosk";"tv"->"tv";else->"mpv"}
+                mode=resolveObservedMode(observedMode)
                 setEndpointVolume(ss.optInt("volume",volume))
                 val samsungTitle=ss.optString("display_title","").ifBlank{"Samsung · "+when(mode){"kiosk"->"YouTube";"tv"->"TV";else->"Відео"}}
                 val samsungRunning=if(mode=="kiosk")ss.optBoolean("active",false) else ss.optBoolean("online",false)
@@ -1451,7 +1464,8 @@ private fun Header(title:String, connected:Boolean, endpointId:String, endpoints
         }else{
             val newMode=runCatching{api.get(endpointPath(endpoint.endpointId,"/mode"))}.getOrNull()?.let{mediaUiMode(it.optString("mode",it.optString("tv_mode","unknown")),mode)}?:mode
             val playerState=runCatching{parseMediaEndpointPlayerState(api.get(endpointPath(endpoint.endpointId,"/player")),newMode,volume)}.getOrNull()
-            mode=playerState?.mode ?: newMode
+            val observedMode=playerState?.mode ?: newMode
+            mode=resolveObservedMode(observedMode)
             playerState?.player?.let{p->when(mode){"kiosk"->youtubePlayer=p;"tv"->tvPlayer=p;else->videoPlayer=p}}
             if(mode=="kiosk")playerState?.remoteStatus?.let{youtubeRemoteStatus=it}
             playerState?.volume?.let{setEndpointVolume(it)}
@@ -1462,12 +1476,26 @@ private fun Header(title:String, connected:Boolean, endpointId:String, endpoints
     LaunchedEffect(api.server,active,endpoint.endpointId,mode){
         if(api.server!=null&&active&&endpoint.adapterKind!="samsung"&&mode=="kiosk"){
             while(true){
-                delay(4000)
                 runCatching{api.get(endpointPath(endpoint.endpointId,"/remote/status"))}.onSuccess{youtubeRemoteStatus=it}
+                delay(850)
             }
         }
     }
-    val ambientPoster=when(mode){"kiosk"->youtubePlayer.optString("poster_landscape",youtubePlayer.optString("poster",""));"tv"->"";else->videoPlayer.optString("poster",videoPlayer.optString("poster_landscape",""))}
+    val ambientRemoteYoutube=youtubeRemoteStatus.optJSONObject("youtube_player")?:JSONObject()
+    val ambientRemotePlayer=youtubeRemoteStatus.optJSONObject("player")?:JSONObject()
+    val ambientCanonicalId=youtubePlayer.optString("video_id","")
+    val ambientRemoteId=ambientRemoteYoutube.optString("video_id",ambientRemotePlayer.optString("video_id",""))
+    val ambientRemotePlayerId=ambientRemotePlayer.optString("video_id","")
+    val ambientRemoteUsable=ambientRemoteId.isNotBlank()&&(ambientRemotePlayerId.isBlank()||ambientRemotePlayerId==ambientRemoteId)
+    val ambientCanonicalPoster=youtubePlayer.optString("poster_landscape",youtubePlayer.optString("poster",""))
+    val ambientFastPoster=ambientRemotePlayer.optString("poster_landscape",ambientRemotePlayer.optString("poster",""))
+    val ambientYoutubePoster=when{
+        ambientRemoteUsable&&(ambientCanonicalId.isBlank()||ambientCanonicalId!=ambientRemoteId)&&ambientFastPoster.isNotBlank()->ambientFastPoster
+        ambientCanonicalPoster.isNotBlank()->ambientCanonicalPoster
+        ambientRemoteUsable&&(ambientCanonicalId.isBlank()||ambientCanonicalId==ambientRemoteId)->ambientFastPoster
+        else->""
+    }
+    val ambientPoster=when(mode){"kiosk"->ambientYoutubePoster;"tv"->"";else->videoPlayer.optString("poster",videoPlayer.optString("poster_landscape",""))}
     val ambientBitmap=remoteBitmap(if(ambientPoster.isNotBlank()&&api.server!=null)api.server+ambientPoster else null,720,1080)
     val ambientUiColor=remember(ambientBitmap){ambientComplement(ambientBitmap)}
     val captureEnabled=api.server!=null&&("handoff" in endpoint.capabilities||"capture" in endpoint.capabilities)
@@ -1494,7 +1522,19 @@ private fun Header(title:String, connected:Boolean, endpointId:String, endpoints
         Column(Modifier.fillMaxSize()) {
         Header(ui("Головна"),api.server!=null,endpoint.endpointId,endpoints,onEndpoint,onMenu,ambientColor=ambientUiColor.takeIf{ambientBitmap!=null},captureCharged=captureCharged,captureEnabled=captureEnabled,onCapture={capturePress()},hyperion=hyperion,onHyperion={onHyperion(!hyperion)})
         Column(Modifier.weight(1f).padding(horizontal=13.dp)) {
-            ModeRow(mode,ambientUiColor.takeIf{ambientBitmap!=null},includeGames=endpoint.adapterKind!="samsung"){target->if(target!=mode){mode=target;scope.launch{val sm=when(target){"kiosk"->"youtube";"tv"->"tv";else->"video"};runCatching{api.post(endpointPath(endpoint.endpointId,"/mode"),endpointMutation(endpoint.endpointId,"mode" to sm))};refresh()}}}
+            ModeRow(requestedMode ?: mode,ambientUiColor.takeIf{ambientBitmap!=null},includeGames=endpoint.adapterKind!="samsung"){target->
+                if(target!=(requestedMode ?: mode)){
+                    requestedMode=target
+                    requestedModeAt=System.currentTimeMillis()
+                    mode=target
+                    scope.launch{
+                        val sm=when(target){"kiosk"->"youtube";"tv"->"tv";else->"video"}
+                        val applied=runCatching{api.post(endpointPath(endpoint.endpointId,"/mode"),endpointMutation(endpoint.endpointId,"mode" to sm))}.isSuccess
+                        if(!applied){requestedMode=null;requestedModeAt=0L}
+                        refresh()
+                    }
+                }
+            }
             Spacer(Modifier.height(6.dp))
             PersistentHomeRemotes(
                 api=api,
@@ -1531,34 +1571,44 @@ private fun Header(title:String, connected:Boolean, endpointId:String, endpoints
 }
 
 @Composable private fun YoutubeRemoteCard(api:HomeApi,endpointId:String,p:JSONObject,remote:JSONObject,volume:Int,onVolume:(Int)->Unit,onRemote:(String)->Unit,onSeek:(Int)->Unit,onMute:()->Unit){
-    var liveRemote by remember(endpointId){mutableStateOf(JSONObject())}
     var lastGoodPlayer by remember(endpointId){mutableStateOf(JSONObject())}
-    LaunchedEffect(p,remote){
-        if(p.length()>0) lastGoodPlayer=p
-        val yp=remote.optJSONObject("youtube_player") ?: remote
-        if(yp.length()>0) liveRemote=yp
-    }
+    LaunchedEffect(p){if(p.length()>0)lastGoodPlayer=p}
+    val remoteYoutube=remote.optJSONObject("youtube_player") ?: remote
+    val remotePlayer=remote.optJSONObject("player") ?: JSONObject()
     val youtubeControls=remote.optJSONObject("youtube_context")?.optJSONObject("controls")
         ?: remote.optJSONObject("controls")
         ?: JSONObject()
-    val running=lastGoodPlayer.optBoolean("running")
-    val title=if(running)lastGoodPlayer.optString("display-title",lastGoodPlayer.optString("title",lastGoodPlayer.optString("media-title","Відео"))) else "Нічого не відтворюється"
-    val se=if(running&&p.has("season")&&!p.isNull("season")){val s=p.optString("season","").takeUnless{it.equals("null",true)}.orEmpty();val e=if(p.has("episode")&&!p.isNull("episode"))p.optString("episode","").filter{it.isDigit()} else "";if(s.isNotBlank())"S$s"+(if(e.isNotBlank())" · E$e" else "") else ""}else ""
-    // YouTube card is always 16:9. A portrait fallback contains an intentionally blurred
-    // background and appears as a smear while the new landscape thumbnail is still loading.
-    // Show the YouTube logo until the correct landscape poster exists instead.
-    val poster=lastGoodPlayer.optString("poster_landscape",lastGoodPlayer.optString("poster",""))
+    val canonicalId=lastGoodPlayer.optString("video_id","")
+    val remoteId=remoteYoutube.optString("video_id",remotePlayer.optString("video_id",""))
+    val remotePlayerId=remotePlayer.optString("video_id","")
+    val remoteCoherent=remoteId.isNotBlank()&&(remotePlayerId.isBlank()||remotePlayerId==remoteId)
+    val sameVideo=canonicalId.isNotBlank()&&canonicalId==remoteId
+    val useRemoteBootstrap=remoteCoherent&&(canonicalId.isBlank()||canonicalId!=remoteId)
+    val remoteState=if(remoteCoherent)remoteYoutube.optInt("state",-99) else -99
+    val running=if(useRemoteBootstrap)remoteState in setOf(1,2,3) else lastGoodPlayer.optBoolean("running")
+    val canonicalTitle=lastGoodPlayer.optString("display-title",lastGoodPlayer.optString("title",lastGoodPlayer.optString("media-title","")))
+    val fastTitle=remotePlayer.optString("display-title",remotePlayer.optString("title",remotePlayer.optString("media-title","")))
+    val title=if(running)(if(useRemoteBootstrap)fastTitle.ifBlank{canonicalTitle} else canonicalTitle.ifBlank{if(sameVideo)fastTitle else ""}).ifBlank{"Відео"} else "Нічого не відтворюється"
+    val se=if(running&&!useRemoteBootstrap&&lastGoodPlayer.has("season")&&!lastGoodPlayer.isNull("season")){val ss=lastGoodPlayer.optString("season","").takeUnless{it.equals("null",true)}.orEmpty();val e=if(lastGoodPlayer.has("episode")&&!lastGoodPlayer.isNull("episode"))lastGoodPlayer.optString("episode","").filter{it.isDigit()} else "";if(ss.isNotBlank())"S$ss"+(if(e.isNotBlank())" · E$e" else "") else ""}else ""
+    // /player remains same-video authority; fresh remote/status only fills the initial blank/old gap.
+    val canonicalPoster=lastGoodPlayer.optString("poster_landscape",lastGoodPlayer.optString("poster",""))
+    val fastPoster=remotePlayer.optString("poster_landscape",remotePlayer.optString("poster",""))
+    val poster=if(useRemoteBootstrap)fastPoster.ifBlank{canonicalPoster} else canonicalPoster.ifBlank{if(sameVideo)fastPoster else ""}
     val posterUrl=if(poster.isBlank())null else if(poster.startsWith("http://")||poster.startsWith("https://"))poster else if(api.server!=null)api.server+poster else null
     val bitmap=remoteBitmap(posterUrl,960,540)
     var seek by remember{mutableFloatStateOf(0f)}
-    val videoId=lastGoodPlayer.optString("video_id","")
-    val isLive=liveRemote.optBoolean("is_live",false)
-    val serverPos=lastGoodPlayer.optDouble("time-pos",0.0).toFloat()
-    val rawDuration=lastGoodPlayer.optDouble("duration",0.0).toFloat()
-    val canSeek=liveRemote.optBoolean("is_seekable",!isLive&&rawDuration>1.0)
+    val videoId=if(useRemoteBootstrap)remoteId else canonicalId
+    val canonicalDuration=lastGoodPlayer.optDouble("duration",0.0).toFloat()
+    val canonicalPos=lastGoodPlayer.optDouble("time-pos",0.0).toFloat()
+    val remoteDuration=if(remoteCoherent)remoteYoutube.optDouble("duration",0.0).toFloat() else 0f
+    val remotePos=if(remoteCoherent)remoteYoutube.optDouble("time",0.0).toFloat() else 0f
+    val isLive=if(remoteCoherent&&(useRemoteBootstrap||sameVideo))remoteYoutube.optBoolean("is_live",lastGoodPlayer.optBoolean("is_live",false)) else lastGoodPlayer.optBoolean("is_live",false)
+    val rawDuration=when{useRemoteBootstrap&&remoteDuration>1f->remoteDuration;canonicalDuration>1f->canonicalDuration;sameVideo&&remoteDuration>1f->remoteDuration;else->canonicalDuration}
+    val serverPos=when{useRemoteBootstrap->remotePos;canonicalDuration>1f->canonicalPos;sameVideo->remotePos;else->canonicalPos}
+    val canSeek=if(remoteCoherent&&(useRemoteBootstrap||sameVideo))remoteYoutube.optBoolean("is_seekable",!isLive&&rawDuration>1.0) else !isLive&&rawDuration>1.0
     val duration=rawDuration.coerceAtLeast(1f)
     LaunchedEffect(videoId,serverPos,rawDuration){seek=serverPos.coerceIn(0f,duration)}
-    val paused=lastGoodPlayer.optBoolean("pause",false)
+    val paused=if(useRemoteBootstrap&&remoteState>=0)remoteState!=1 else if(lastGoodPlayer.has("pause"))lastGoodPlayer.optBoolean("pause",false) else sameVideo&&remoteState!=1
     LaunchedEffect(videoId,running,canSeek,paused,rawDuration){
         if(running&&canSeek&&!paused&&rawDuration>1f)while(true){
             delay(1000)
@@ -2016,7 +2066,21 @@ private fun VideoScreen(api:HomeApi,active:Boolean,selectionRevision:Int,endpoin
             }
         }
     }
-    if(historyOpen)HistoryPickerDialog(api,history,{item->historyOpen=false;scope.launch{selection=historyPreferredSelection(endpoint.endpointId,item);jobId=selection.optString("job_id");loadJob(jobId);selectionIdentity=videoSelectionIdentity(selection);loadMonitor()}},{historyOpen=false})
+    if(historyOpen)HistoryPickerDialog(api,history,{item->
+        historyOpen=false
+        scope.launch{
+            val preferred=historyPreferredSelection(endpoint.endpointId,item)
+            runCatching{api.put(endpointPath(endpoint.endpointId,"/video/selection"),preferred)}
+                .onSuccess{
+                    selection=preferred
+                    jobId=selection.optString("job_id")
+                    loadJob(jobId)
+                    selectionIdentity=videoSelectionIdentity(selection)
+                    loadMonitor()
+                }
+                .onFailure{message=it.message?:"Не вдалося вибрати запис історії"}
+        }
+    },{historyOpen=false})
     if(seasonOpen)SeasonPickerDialog(api,cat,seasonItems,loadedSeasons,season,loadingSeason,{snum,load->
         season=snum
         if(load){
@@ -2124,6 +2188,7 @@ private fun openCatalogUrl(context:Context,url:String){if(url.isBlank())return;r
     fun arr(name:String)=details.optJSONArray(name)?.strings().orEmpty()
     val tmdbId=cat.optInt("tmdb_id",external.optInt("tmdb_id",0));val imdbId=cat.optString("imdb_id",external.optString("imdb_id")).trim();val mediaType=cat.optString("media_type","movie")
     val tmdbUrl=if(tmdbId>0)"https://www.themoviedb.org/${if(mediaType=="tv")"tv" else "movie"}/$tmdbId" else "";val imdbUrl=if(imdbId.startsWith("tt"))"https://www.imdb.com/title/$imdbId/" else "";val mdblistUrl=if(imdbId.startsWith("tt"))"https://mdblist.com/${if(mediaType=="tv")"show" else "movie"}/$imdbId" else "";val traktUrl=external.optString("trakt_url").trim();val moviebaseUrl=if(tmdbId>0)"https://moviebase.app/${if(mediaType=="tv")"show" else "movie"}/$tmdbId" else external.optString("moviebase_url").trim()
+    val amazonUrl=external.optString("amazon_url").trim();val amazonLabel=external.optString("amazon_label","Prime / BritBox").trim().ifBlank{"Prime / BritBox"};val appleTvUrl=external.optString("apple_tv_url").trim();val appleTvLabel=external.optString("apple_tv_label","Apple TV").trim().ifBlank{"Apple TV"}
     val tmdbRating=cat.optDouble("tmdb_rating_percent",0.0).takeIf{it>0};val imdbRating=cat.optDouble("imdb_rating",0.0).takeIf{it>0};val mdblistRating=cat.optDouble("mdblist_rating",0.0).takeIf{it>0};val traktRating=cat.optDouble("trakt_rating",0.0).takeIf{it>0};val moviebaseRating=cat.optDouble("moviebase_rating",0.0).takeIf{it>0}
     fun pct(v:Double?)=v?.let{"${"%.0f".format(Locale.US,if(it<=10)it*10 else it)}%"}?:"—"
     fun imdb(v:Double?)=v?.let{"%.1f".format(Locale.US,it)}?:"—"
@@ -2137,6 +2202,12 @@ private fun openCatalogUrl(context:Context,url:String){if(url.isBlank())return;r
             val status=detailValueUa("Статус",details.optString("status"));val type=detailValueUa("Тип",details.optString("type",contentTypeLabel(cat.optString("content_type"),mediaType)));val topMeta=buildList{cat.optString("year").takeIf{it.isNotBlank()}?.let(::add);status.takeIf{it.isNotBlank()}?.let(::add);type.takeIf{it.isNotBlank()}?.let(::add)}.joinToString(" · ")
             if(topMeta.isNotBlank())Text(topMeta,fontSize=16.sp,lineHeight=22.sp,color=Muted,textAlign=TextAlign.Center,modifier=Modifier.fillMaxWidth().padding(top=8.dp,bottom=12.dp))
             Row(Modifier.fillMaxWidth()){CatalogMetric(R.drawable.tmdb_brand,"TMDB",pct(tmdbRating),tmdbUrl.isNotBlank(),Modifier.weight(1f)){openCatalogUrl(context,tmdbUrl)};CatalogMetric(R.drawable.imdb_brand,"IMDb",imdb(imdbRating),imdbUrl.isNotBlank(),Modifier.weight(1f)){openCatalogUrl(context,imdbUrl)};CatalogMetric(R.drawable.mdblist_brand,"MDbList",pct(mdblistRating),mdblistUrl.isNotBlank(),Modifier.weight(1f)){openCatalogUrl(context,mdblistUrl)};CatalogMetric(R.drawable.trakt_brand,"Trakt",pct(traktRating),traktUrl.isNotBlank(),Modifier.weight(1f)){openCatalogUrl(context,traktUrl)};CatalogMetric(R.drawable.moviebase_brand,"Moviebase",pct(moviebaseRating),moviebaseUrl.isNotBlank(),Modifier.weight(1f)){openCatalogUrl(context,moviebaseUrl)}}
+            if(amazonUrl.isNotBlank()||appleTvUrl.isNotBlank()){
+                Row(Modifier.fillMaxWidth().padding(top=14.dp),horizontalArrangement=Arrangement.spacedBy(10.dp)){
+                    if(amazonUrl.isNotBlank())Button(onClick={openCatalogUrl(context,amazonUrl)},shape=RoundedCornerShape(12.dp),colors=ButtonDefaults.buttonColors(containerColor=Action),modifier=Modifier.weight(1f).height(44.dp)){Text(amazonLabel,fontWeight=FontWeight.SemiBold,color=Text,maxLines=1,overflow=TextOverflow.Ellipsis)}
+                    if(appleTvUrl.isNotBlank())Button(onClick={openCatalogUrl(context,appleTvUrl)},shape=RoundedCornerShape(12.dp),colors=ButtonDefaults.buttonColors(containerColor=Action),modifier=Modifier.weight(1f).height(44.dp)){Text(appleTvLabel,fontWeight=FontWeight.SemiBold,color=Text,maxLines=1,overflow=TextOverflow.Ellipsis)}
+                }
+            }
             val overview=cat.optString("overview");if(overview.isNotBlank()){Text(overview,fontSize=16.sp,lineHeight=24.sp,color=Color(0xFFD7DCE1),textAlign=TextAlign.Justify,modifier=Modifier.fillMaxWidth().padding(top=24.dp,bottom=26.dp))}
             Text(ui("Детальна інформація"),fontSize=18.sp,fontWeight=FontWeight.Bold,color=Text,modifier=Modifier.padding(bottom=18.dp))
             val genres=arr("genres").map(::detailGenreUa);if(genres.isNotEmpty())DetailLine("Жанри",genres.joinToString(" · "))
@@ -2656,6 +2727,7 @@ private fun shareMfpPdf(context:Context,api:HomeApi,doc:JSONObject){
     var telegramSourceHandle by remember{mutableStateOf("")}
     var telegramSourcePrivate by remember{mutableStateOf(false)}
     var telegramSources by remember{mutableStateOf<List<String>>(emptyList())}
+    var telegramSourcesExpanded by rememberSaveable{mutableStateOf(false)}
     var telegramStatus by remember{mutableStateOf("")}
     fun refresh(){scope.launch{
         runCatching{api.get("/api/native/home-edge/secrets/status")}.onSuccess{
@@ -2868,7 +2940,13 @@ private fun shareMfpPdf(context:Context,api:HomeApi,doc:JSONObject){
                             .onFailure{telegramStatus=it.message?:"Не вдалося додати канал"}
                         busy=false
                     }},enabled=!busy&&telegramSourceHandle.startsWith("@")&&telegramSourceHandle.length>=6,shape=RoundedCornerShape(12.dp),colors=ButtonDefaults.buttonColors(containerColor=Action),modifier=Modifier.fillMaxWidth().height(46.dp).padding(top=7.dp)){Text("Додати канал",fontWeight=FontWeight.SemiBold,color=Text)}
-                    if(telegramSources.isNotEmpty())Text("Allowlist: "+telegramSources.joinToString(" · "),fontSize=10.sp,lineHeight=15.sp,color=Muted,modifier=Modifier.padding(top=8.dp))
+                    if(telegramSources.isNotEmpty()){
+                        Row(Modifier.fillMaxWidth().padding(top=8.dp).clip(RoundedCornerShape(8.dp)).clickable{telegramSourcesExpanded=!telegramSourcesExpanded}.padding(vertical=4.dp),verticalAlignment=Alignment.CenterVertically){
+                            Text("Allowlist · ${telegramSources.size}",fontSize=10.sp,fontWeight=FontWeight.SemiBold,color=Muted,modifier=Modifier.weight(1f))
+                            Mdi(if(telegramSourcesExpanded)"chevron-up" else "chevron-down",16.dp,Muted)
+                        }
+                        if(telegramSourcesExpanded)Text(telegramSources.joinToString(" · "),fontSize=10.sp,lineHeight=15.sp,color=Muted,modifier=Modifier.padding(top=3.dp))
+                    }
                     Button(onClick={scope.launch{
                         busy=true;telegramStatus="Синхронізую Telegram…"
                         runCatching{api.post("/api/native/home-edge/telegram/sync",JSONObject())}
