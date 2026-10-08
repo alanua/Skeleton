@@ -563,22 +563,27 @@ private data class FamilySecurityDevice(
     val providers:List<String>,
     val recoveryActions:List<FamilyRecoveryAction>,
 )
-private fun parseFamilySecurityDevice(j:JSONObject)=FamilySecurityDevice(
-    id=j.cleanText("device_id"),
-    name=j.cleanText("name",j.cleanText("device_id")),
-    role=j.cleanText("role"),
-    platform=j.cleanText("platform"),
-    status=j.cleanText("status","normal"),
-    lostAt=j.optLong("lost_at",0L),
-    providers=j.optJSONArray("recovery_providers")?.strings().orEmpty(),
-    recoveryActions=j.optJSONArray("recovery_actions")?.objects().orEmpty().map{
+private fun parseFamilySecurityDevice(j:JSONObject):FamilySecurityDevice{
+    val providers=j.optJSONArray("recovery_providers")?.strings().orEmpty()
+    val backendActions=j.optJSONArray("recovery_actions")?.objects().orEmpty().map{
         FamilyRecoveryAction(
             id=it.cleanText("id"),
             label=it.cleanText("label"),
             url=it.cleanText("url"),
         )
     }.filter{it.label.isNotBlank()&&it.url.startsWith("https://")},
-)
+    val actions=(backendActions+defaultRecoveryActions(providers)).distinctBy{it.id.ifBlank{it.url}}
+    return FamilySecurityDevice(
+        id=j.cleanText("device_id"),
+        name=j.cleanText("name",j.cleanText("device_id")),
+        role=j.cleanText("role"),
+        platform=j.cleanText("platform"),
+        status=j.cleanText("status","normal"),
+        lostAt=j.optLong("lost_at",0L),
+        providers=providers,
+        recoveryActions=actions,
+    )
+}
 private fun familySecurityRoleLabel(role:String)=when(role){
     "android_phone","ios_phone"->"Телефон"
     "tablet_kiosk"->"Планшет"
@@ -588,8 +593,17 @@ private fun recoveryProviderLabel(id:String)=when(id){
     "google_find_hub"->"Google Find Hub"
     "xiaomi_find_device"->"Xiaomi Find Device"
     "apple_find_my"->"Apple Find My"
+    "apple_tv"->"Apple TV"
+    "amazon_devices","amazon_fire_tv"->"Amazon"
     "samsung_find"->"Samsung Find"
     else->id
+}
+private fun defaultRecoveryActions(providers:List<String>):List<FamilyRecoveryAction>{
+    val actions=mutableListOf<FamilyRecoveryAction>()
+    if(providers.any{it=="apple_find_my"})actions.add(FamilyRecoveryAction("apple_find_my","Відкрити Apple Find My","https://www.icloud.com/find"))
+    if(providers.any{it=="apple_tv"})actions.add(FamilyRecoveryAction("apple_tv","Відкрити Apple TV","https://tv.apple.com/"))
+    if(providers.any{it=="amazon_devices"||it=="amazon_fire_tv"})actions.add(FamilyRecoveryAction("amazon_devices","Відкрити Amazon Devices","https://www.amazon.com/hz/mycd/digital-console/alldevices"))
+    return actions
 }
 
 @Composable
@@ -1414,6 +1428,7 @@ private fun Header(title:String, connected:Boolean, endpointId:String, endpoints
     var volume by remember(endpoint.endpointId){mutableIntStateOf(endpointVolumes[endpoint.endpointId] ?: 25)}
     var lastNonzero by remember(endpoint.endpointId){mutableIntStateOf(endpointLastNonzero[endpoint.endpointId] ?: endpointVolumes[endpoint.endpointId]?.takeIf{it>0} ?: 25)}
     var volumeReady by remember(endpoint.endpointId){mutableStateOf(endpointVolumeReady[endpoint.endpointId] == true)}
+    var requestedMode by remember(endpoint.endpointId){mutableStateOf<String?>(null)}
     fun setEndpointVolume(v:Int){
         val clamped=v.coerceIn(0,100)
         volume=clamped
@@ -1429,7 +1444,9 @@ private fun Header(title:String, connected:Boolean, endpointId:String, endpoints
         if(api.server==null)return
         if(endpoint.adapterKind=="samsung"){
             runCatching{api.get(endpointPath(endpoint.endpointId,"/status"))}.onSuccess{ss->
-                mode=when(ss.optString("mode","video")){"youtube"->"kiosk";"tv"->"tv";else->"mpv"}
+                val observedMode=when(ss.optString("mode","video")){"youtube"->"kiosk";"tv"->"tv";else->"mpv"}
+                if(requestedMode==observedMode)requestedMode=null
+                mode=requestedMode ?: observedMode
                 setEndpointVolume(ss.optInt("volume",volume))
                 val samsungTitle=ss.optString("display_title","").ifBlank{"Samsung · "+when(mode){"kiosk"->"YouTube";"tv"->"TV";else->"Відео"}}
                 val samsungRunning=if(mode=="kiosk")ss.optBoolean("active",false) else ss.optBoolean("online",false)
@@ -1451,7 +1468,9 @@ private fun Header(title:String, connected:Boolean, endpointId:String, endpoints
         }else{
             val newMode=runCatching{api.get(endpointPath(endpoint.endpointId,"/mode"))}.getOrNull()?.let{mediaUiMode(it.optString("mode",it.optString("tv_mode","unknown")),mode)}?:mode
             val playerState=runCatching{parseMediaEndpointPlayerState(api.get(endpointPath(endpoint.endpointId,"/player")),newMode,volume)}.getOrNull()
-            mode=playerState?.mode ?: newMode
+            val observedMode=playerState?.mode ?: newMode
+            if(requestedMode==observedMode)requestedMode=null
+            mode=requestedMode ?: observedMode
             playerState?.player?.let{p->when(mode){"kiosk"->youtubePlayer=p;"tv"->tvPlayer=p;else->videoPlayer=p}}
             if(mode=="kiosk")playerState?.remoteStatus?.let{youtubeRemoteStatus=it}
             playerState?.volume?.let{setEndpointVolume(it)}
@@ -1494,7 +1513,7 @@ private fun Header(title:String, connected:Boolean, endpointId:String, endpoints
         Column(Modifier.fillMaxSize()) {
         Header(ui("Головна"),api.server!=null,endpoint.endpointId,endpoints,onEndpoint,onMenu,ambientColor=ambientUiColor.takeIf{ambientBitmap!=null},captureCharged=captureCharged,captureEnabled=captureEnabled,onCapture={capturePress()},hyperion=hyperion,onHyperion={onHyperion(!hyperion)})
         Column(Modifier.weight(1f).padding(horizontal=13.dp)) {
-            ModeRow(mode,ambientUiColor.takeIf{ambientBitmap!=null},includeGames=endpoint.adapterKind!="samsung"){target->if(target!=mode){mode=target;scope.launch{val sm=when(target){"kiosk"->"youtube";"tv"->"tv";else->"video"};runCatching{api.post(endpointPath(endpoint.endpointId,"/mode"),endpointMutation(endpoint.endpointId,"mode" to sm))};refresh()}}}
+            ModeRow(requestedMode ?: mode,ambientUiColor.takeIf{ambientBitmap!=null},includeGames=endpoint.adapterKind!="samsung"){target->if(target!=mode||requestedMode!=null){requestedMode=target;mode=target;scope.launch{val sm=when(target){"kiosk"->"youtube";"tv"->"tv";else->"video"};runCatching{api.post(endpointPath(endpoint.endpointId,"/mode"),endpointMutation(endpoint.endpointId,"mode" to sm))};refresh()}}}
             Spacer(Modifier.height(6.dp))
             PersistentHomeRemotes(
                 api=api,
@@ -2016,7 +2035,7 @@ private fun VideoScreen(api:HomeApi,active:Boolean,selectionRevision:Int,endpoin
             }
         }
     }
-    if(historyOpen)HistoryPickerDialog(api,history,{item->historyOpen=false;scope.launch{selection=historyPreferredSelection(endpoint.endpointId,item);jobId=selection.optString("job_id");loadJob(jobId);selectionIdentity=videoSelectionIdentity(selection);loadMonitor()}},{historyOpen=false})
+    if(historyOpen)HistoryPickerDialog(api,history,{item->historyOpen=false;scope.launch{val preferred=historyPreferredSelection(endpoint.endpointId,item);runCatching{api.put(endpointPath(endpoint.endpointId,"/video/selection"),preferred)};selection=preferred;jobId=selection.optString("job_id");loadJob(jobId);selectionIdentity=videoSelectionIdentity(selection);loadMonitor()}},{historyOpen=false})
     if(seasonOpen)SeasonPickerDialog(api,cat,seasonItems,loadedSeasons,season,loadingSeason,{snum,load->
         season=snum
         if(load){
@@ -2656,6 +2675,7 @@ private fun shareMfpPdf(context:Context,api:HomeApi,doc:JSONObject){
     var telegramSourceHandle by remember{mutableStateOf("")}
     var telegramSourcePrivate by remember{mutableStateOf(false)}
     var telegramSources by remember{mutableStateOf<List<String>>(emptyList())}
+    var telegramAllowlistOpen by rememberSaveable{mutableStateOf(false)}
     var telegramStatus by remember{mutableStateOf("")}
     fun refresh(){scope.launch{
         runCatching{api.get("/api/native/home-edge/secrets/status")}.onSuccess{
@@ -2868,7 +2888,13 @@ private fun shareMfpPdf(context:Context,api:HomeApi,doc:JSONObject){
                             .onFailure{telegramStatus=it.message?:"Не вдалося додати канал"}
                         busy=false
                     }},enabled=!busy&&telegramSourceHandle.startsWith("@")&&telegramSourceHandle.length>=6,shape=RoundedCornerShape(12.dp),colors=ButtonDefaults.buttonColors(containerColor=Action),modifier=Modifier.fillMaxWidth().height(46.dp).padding(top=7.dp)){Text("Додати канал",fontWeight=FontWeight.SemiBold,color=Text)}
-                    if(telegramSources.isNotEmpty())Text("Allowlist: "+telegramSources.joinToString(" · "),fontSize=10.sp,lineHeight=15.sp,color=Muted,modifier=Modifier.padding(top=8.dp))
+                    if(telegramSources.isNotEmpty()){
+                        Row(Modifier.fillMaxWidth().padding(top=8.dp).clip(RoundedCornerShape(8.dp)).clickable{telegramAllowlistOpen=!telegramAllowlistOpen}.padding(vertical=4.dp),verticalAlignment=Alignment.CenterVertically){
+                            Text("Allowlist · ${telegramSources.size}",fontSize=10.sp,fontWeight=FontWeight.SemiBold,color=Muted,modifier=Modifier.weight(1f))
+                            Mdi(if(telegramAllowlistOpen)"chevron-up" else "chevron-down",16.dp,Muted)
+                        }
+                        if(telegramAllowlistOpen)Text(telegramSources.joinToString(" · "),fontSize=10.sp,lineHeight=15.sp,color=Muted,modifier=Modifier.padding(top=3.dp))
+                    }
                     Button(onClick={scope.launch{
                         busy=true;telegramStatus="Синхронізую Telegram…"
                         runCatching{api.post("/api/native/home-edge/telegram/sync",JSONObject())}

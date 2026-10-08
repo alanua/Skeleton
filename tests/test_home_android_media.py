@@ -76,7 +76,7 @@ def test_home_video_selection_and_history_are_canonical_endpoint_scoped() -> Non
     assert 'api.get(mediaHistoryPath(endpointId))' in text
     assert 'api.get(mediaHistoryPath(endpoint.endpointId))' in text
     assert 'api.delete(mediaHistoryDeletePath(endpointId,item))' in text
-    assert 'selection=historyPreferredSelection(endpoint.endpointId,item);jobId=selection.optString("job_id");loadJob(jobId)' in text
+    assert 'val preferred=historyPreferredSelection(endpoint.endpointId,item);runCatching{api.put(endpointPath(endpoint.endpointId,"/video/selection"),preferred)};selection=preferred;jobId=selection.optString("job_id");loadJob(jobId)' in text
     assert '"/api/media/history/delete"' not in text
     assert '"/api/media/history/open"' not in text
     assert '"/history/delete"' not in text
@@ -85,3 +85,17 @@ def test_home_video_selection_and_history_are_canonical_endpoint_scoped() -> Non
     assert 'endpointPath(endpointId,"/video/history")' not in text
     assert 'endpointPath(endpoint.endpointId,"/video/history")' not in text
     assert "LaunchedEffect(api.server,endpointId){reload()}" in text
+
+
+def test_home_media_requested_mode_and_telegram_provider_regressions() -> None:
+    text = _source()
+
+    assert 'var requestedMode by remember(endpoint.endpointId){mutableStateOf<String?>(null)}' in text
+    assert 'if(requestedMode==observedMode)requestedMode=null' in text
+    assert 'ModeRow(requestedMode ?: mode' in text
+    assert 'requestedMode=target;mode=target' in text
+    assert 'var telegramAllowlistOpen by rememberSaveable{mutableStateOf(false)}' in text
+    assert 'Mdi(if(telegramAllowlistOpen)"chevron-up" else "chevron-down",16.dp,Muted)' in text
+    assert '"apple_tv"->"Apple TV"' in text
+    assert '"amazon_devices","amazon_fire_tv"->"Amazon"' in text
+    assert 'defaultRecoveryActions(providers)' in text
