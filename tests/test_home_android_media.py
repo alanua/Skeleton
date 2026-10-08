@@ -36,29 +36,30 @@ def test_home_media_volume_and_mute_are_endpoint_isolated() -> None:
     assert 'api.post(endpointPath(endpoint.endpointId,"/volume"),endpointMutation(endpoint.endpointId,"level" to v))' in text
 
 
-def test_home_tv_youtube_uses_endpoint_player_without_snapshot_polling() -> None:
+def test_home_tv_youtube_uses_fast_remote_bootstrap_without_losing_player_authority() -> None:
     text = _source()
 
     assert 'api.get(endpointPath(endpoint.endpointId,"/snapshot"))' not in text
     assert '"/snapshot"' not in text
     assert 'api.get(endpointPath(endpoint.endpointId,"/player"))' in text
     assert "parseMediaEndpointPlayerState" in text
-    assert "val player=j" in text
-    assert 'lastGoodPlayer.optString("display-title",lastGoodPlayer.optString("title",lastGoodPlayer.optString("media-title","Відео")))' in text
-    assert 'lastGoodPlayer.optString("poster_landscape",lastGoodPlayer.optString("poster",""))' in text
-    assert 'val videoId=lastGoodPlayer.optString("video_id","")' in text
-    assert 'val serverPos=lastGoodPlayer.optDouble("time-pos",0.0).toFloat()' in text
-    assert 'val rawDuration=lastGoodPlayer.optDouble("duration",0.0).toFloat()' in text
-    assert 'val paused=lastGoodPlayer.optBoolean("pause",false)' in text
-    assert 'runCatching{api.get(endpointPath(endpoint.endpointId,"/remote/status"))}' in text
-    assert 'runCatching{api.get(endpointPath(endpointId,"/remote/status"))}' not in text
-    assert "delay(if(endpoint.adapterKind!=\"samsung\"&&mode==\"kiosk\")850 else 2500)" in text
-    assert "delay(4000)" in text
-    assert "val youtubeControls=remote.optJSONObject" in text
+    assert 'runCatching{api.get(endpointPath(endpoint.endpointId,"/remote/status"))}.onSuccess{youtubeRemoteStatus=it}' in text
+    assert "delay(4000)" not in text
+    assert "delay(850)" in text
+    assert 'val remotePlayer=remote.optJSONObject("player") ?: JSONObject()' in text
+    assert 'val remoteYoutube=remote.optJSONObject("youtube_player") ?: remote' in text
+    assert "val remoteCoherent=" in text
+    assert "val sameVideo=" in text
+    assert "val useRemoteBootstrap=" in text
+    assert 'remoteState in setOf(1,2,3)' in text
+    assert 'val canonicalPoster=lastGoodPlayer.optString("poster_landscape",lastGoodPlayer.optString("poster",""))' in text
+    assert 'val fastPoster=remotePlayer.optString("poster_landscape",remotePlayer.optString("poster",""))' in text
+    assert "canonicalDuration>1f" in text
+    assert "sameVideo&&remoteDuration>1f" in text
+    assert "remoteState!=1" in text
     assert "LaunchedEffect(videoId,running,canSeek,paused,rawDuration)" in text
     card = text.split("@Composable private fun YoutubeRemoteCard", 1)[1].split("@Composable private fun VideoRemoteCard", 1)[0]
     assert "api.get(" not in card
-
 
 def test_home_video_selection_and_history_are_canonical_endpoint_scoped() -> None:
     text = _source()
@@ -76,7 +77,10 @@ def test_home_video_selection_and_history_are_canonical_endpoint_scoped() -> Non
     assert 'api.get(mediaHistoryPath(endpointId))' in text
     assert 'api.get(mediaHistoryPath(endpoint.endpointId))' in text
     assert 'api.delete(mediaHistoryDeletePath(endpointId,item))' in text
-    assert 'selection=historyPreferredSelection(endpoint.endpointId,item);jobId=selection.optString("job_id");loadJob(jobId)' in text
+    assert 'val preferred=historyPreferredSelection(endpoint.endpointId,item)' in text
+    assert 'runCatching{api.put(endpointPath(endpoint.endpointId,"/video/selection"),preferred)}' in text
+    assert 'selection=preferred' in text
+    assert 'onFailure{message=it.message?:"Не вдалося вибрати запис історії"}' in text
     assert '"/api/media/history/delete"' not in text
     assert '"/api/media/history/open"' not in text
     assert '"/history/delete"' not in text
@@ -85,3 +89,40 @@ def test_home_video_selection_and_history_are_canonical_endpoint_scoped() -> Non
     assert 'endpointPath(endpointId,"/video/history")' not in text
     assert 'endpointPath(endpoint.endpointId,"/video/history")' not in text
     assert "LaunchedEffect(api.server,endpointId){reload()}" in text
+
+
+def test_home_regression_repair_restores_only_confirmed_lost_behaviors() -> None:
+    text = _source()
+
+    assert 'var requestedMode by remember(endpoint.endpointId){mutableStateOf<String?>(null)}' in text
+    assert 'var requestedModeAt by remember(endpoint.endpointId){mutableStateOf(0L)}' in text
+    assert 'System.currentTimeMillis()-requestedModeAt>=5000L' in text
+    assert 'if(!applied){requestedMode=null;requestedModeAt=0L}' in text
+    assert 'var telegramSourcesExpanded by rememberSaveable{mutableStateOf(false)}' in text
+    assert 'Mdi(if(telegramSourcesExpanded)"chevron-up" else "chevron-down",16.dp,Muted)' in text
+    assert 'val amazonUrl=external.optString("amazon_url").trim()' in text
+    assert 'external.optString("amazon_label","Prime / BritBox")' in text
+    assert 'val appleTvUrl=external.optString("apple_tv_url").trim()' in text
+    assert 'external.optString("apple_tv_label","Apple TV")' in text
+    assert 'openCatalogUrl(context,amazonUrl)' in text
+    assert 'openCatalogUrl(context,appleTvUrl)' in text
+    assert "defaultRecoveryActions" not in text
+    assert '"apple_tv"->"Apple TV"' not in text
+    assert '"amazon_devices","amazon_fire_tv"->"Amazon"' not in text
+
+
+def test_home_regression_repair_preserves_approved_newer_contracts() -> None:
+    text = _source()
+
+    assert 'val endpoint=endpointById(endpoints,endpointId)' in text
+    assert 'endpointVolumes[endpoint.endpointId]=clamped' in text
+    assert 'endpointVolumeReady[endpoint.endpointId]=true' in text
+    assert 'api.post("/api/media/handoff",JSONObject().put("action","capture").put("source",endpoint.endpointId))' in text
+    assert 'api.post("/api/media/handoff",JSONObject().put("target",endpoint.endpointId))' in text
+    assert 'private fun mediaHistoryPath(endpointId:String):String="/api/media/history?endpoint=${Uri.encode(endpointId)}"' in text
+    assert 'runCatching{endpointVideoSelection(api,endpoint.endpointId)}.onSuccess{latest->' in text
+    assert 'if(latestIdentity!=selectionIdentity)applyEndpointSelection(latest,true)' in text
+    assert 'fetchHomeUpdate' in text
+    assert '"/api/native/app-update"' in text
+    assert 'api.put("/api/media/target"' not in text
+    assert '"/api/samsung/media/' not in text
