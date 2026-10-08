@@ -2016,7 +2016,21 @@ private fun VideoScreen(api:HomeApi,active:Boolean,selectionRevision:Int,endpoin
             }
         }
     }
-    if(historyOpen)HistoryPickerDialog(api,history,{item->historyOpen=false;scope.launch{selection=historyPreferredSelection(endpoint.endpointId,item);jobId=selection.optString("job_id");loadJob(jobId);selectionIdentity=videoSelectionIdentity(selection);loadMonitor()}},{historyOpen=false})
+    if(historyOpen)HistoryPickerDialog(api,history,{item->
+        historyOpen=false
+        scope.launch{
+            val preferred=historyPreferredSelection(endpoint.endpointId,item)
+            runCatching{api.put(endpointPath(endpoint.endpointId,"/video/selection"),preferred)}
+                .onSuccess{
+                    selection=preferred
+                    jobId=selection.optString("job_id")
+                    loadJob(jobId)
+                    selectionIdentity=videoSelectionIdentity(selection)
+                    loadMonitor()
+                }
+                .onFailure{message=it.message?:"Не вдалося вибрати запис історії"}
+        }
+    },{historyOpen=false})
     if(seasonOpen)SeasonPickerDialog(api,cat,seasonItems,loadedSeasons,season,loadingSeason,{snum,load->
         season=snum
         if(load){
@@ -2124,6 +2138,7 @@ private fun openCatalogUrl(context:Context,url:String){if(url.isBlank())return;r
     fun arr(name:String)=details.optJSONArray(name)?.strings().orEmpty()
     val tmdbId=cat.optInt("tmdb_id",external.optInt("tmdb_id",0));val imdbId=cat.optString("imdb_id",external.optString("imdb_id")).trim();val mediaType=cat.optString("media_type","movie")
     val tmdbUrl=if(tmdbId>0)"https://www.themoviedb.org/${if(mediaType=="tv")"tv" else "movie"}/$tmdbId" else "";val imdbUrl=if(imdbId.startsWith("tt"))"https://www.imdb.com/title/$imdbId/" else "";val mdblistUrl=if(imdbId.startsWith("tt"))"https://mdblist.com/${if(mediaType=="tv")"show" else "movie"}/$imdbId" else "";val traktUrl=external.optString("trakt_url").trim();val moviebaseUrl=if(tmdbId>0)"https://moviebase.app/${if(mediaType=="tv")"show" else "movie"}/$tmdbId" else external.optString("moviebase_url").trim()
+    val amazonUrl=external.optString("amazon_url").trim();val amazonLabel=external.optString("amazon_label","Prime / BritBox").trim().ifBlank{"Prime / BritBox"};val appleTvUrl=external.optString("apple_tv_url").trim();val appleTvLabel=external.optString("apple_tv_label","Apple TV").trim().ifBlank{"Apple TV"}
     val tmdbRating=cat.optDouble("tmdb_rating_percent",0.0).takeIf{it>0};val imdbRating=cat.optDouble("imdb_rating",0.0).takeIf{it>0};val mdblistRating=cat.optDouble("mdblist_rating",0.0).takeIf{it>0};val traktRating=cat.optDouble("trakt_rating",0.0).takeIf{it>0};val moviebaseRating=cat.optDouble("moviebase_rating",0.0).takeIf{it>0}
     fun pct(v:Double?)=v?.let{"${"%.0f".format(Locale.US,if(it<=10)it*10 else it)}%"}?:"—"
     fun imdb(v:Double?)=v?.let{"%.1f".format(Locale.US,it)}?:"—"
@@ -2137,6 +2152,12 @@ private fun openCatalogUrl(context:Context,url:String){if(url.isBlank())return;r
             val status=detailValueUa("Статус",details.optString("status"));val type=detailValueUa("Тип",details.optString("type",contentTypeLabel(cat.optString("content_type"),mediaType)));val topMeta=buildList{cat.optString("year").takeIf{it.isNotBlank()}?.let(::add);status.takeIf{it.isNotBlank()}?.let(::add);type.takeIf{it.isNotBlank()}?.let(::add)}.joinToString(" · ")
             if(topMeta.isNotBlank())Text(topMeta,fontSize=16.sp,lineHeight=22.sp,color=Muted,textAlign=TextAlign.Center,modifier=Modifier.fillMaxWidth().padding(top=8.dp,bottom=12.dp))
             Row(Modifier.fillMaxWidth()){CatalogMetric(R.drawable.tmdb_brand,"TMDB",pct(tmdbRating),tmdbUrl.isNotBlank(),Modifier.weight(1f)){openCatalogUrl(context,tmdbUrl)};CatalogMetric(R.drawable.imdb_brand,"IMDb",imdb(imdbRating),imdbUrl.isNotBlank(),Modifier.weight(1f)){openCatalogUrl(context,imdbUrl)};CatalogMetric(R.drawable.mdblist_brand,"MDbList",pct(mdblistRating),mdblistUrl.isNotBlank(),Modifier.weight(1f)){openCatalogUrl(context,mdblistUrl)};CatalogMetric(R.drawable.trakt_brand,"Trakt",pct(traktRating),traktUrl.isNotBlank(),Modifier.weight(1f)){openCatalogUrl(context,traktUrl)};CatalogMetric(R.drawable.moviebase_brand,"Moviebase",pct(moviebaseRating),moviebaseUrl.isNotBlank(),Modifier.weight(1f)){openCatalogUrl(context,moviebaseUrl)}}
+            if(amazonUrl.isNotBlank()||appleTvUrl.isNotBlank()){
+                Row(Modifier.fillMaxWidth().padding(top=14.dp),horizontalArrangement=Arrangement.spacedBy(10.dp)){
+                    if(amazonUrl.isNotBlank())Button(onClick={openCatalogUrl(context,amazonUrl)},shape=RoundedCornerShape(12.dp),colors=ButtonDefaults.buttonColors(containerColor=Action),modifier=Modifier.weight(1f).height(44.dp)){Text(amazonLabel,fontWeight=FontWeight.SemiBold,color=Text,maxLines=1,overflow=TextOverflow.Ellipsis)}
+                    if(appleTvUrl.isNotBlank())Button(onClick={openCatalogUrl(context,appleTvUrl)},shape=RoundedCornerShape(12.dp),colors=ButtonDefaults.buttonColors(containerColor=Action),modifier=Modifier.weight(1f).height(44.dp)){Text(appleTvLabel,fontWeight=FontWeight.SemiBold,color=Text,maxLines=1,overflow=TextOverflow.Ellipsis)}
+                }
+            }
             val overview=cat.optString("overview");if(overview.isNotBlank()){Text(overview,fontSize=16.sp,lineHeight=24.sp,color=Color(0xFFD7DCE1),textAlign=TextAlign.Justify,modifier=Modifier.fillMaxWidth().padding(top=24.dp,bottom=26.dp))}
             Text(ui("Детальна інформація"),fontSize=18.sp,fontWeight=FontWeight.Bold,color=Text,modifier=Modifier.padding(bottom=18.dp))
             val genres=arr("genres").map(::detailGenreUa);if(genres.isNotEmpty())DetailLine("Жанри",genres.joinToString(" · "))
@@ -2656,6 +2677,7 @@ private fun shareMfpPdf(context:Context,api:HomeApi,doc:JSONObject){
     var telegramSourceHandle by remember{mutableStateOf("")}
     var telegramSourcePrivate by remember{mutableStateOf(false)}
     var telegramSources by remember{mutableStateOf<List<String>>(emptyList())}
+    var telegramSourcesExpanded by rememberSaveable{mutableStateOf(false)}
     var telegramStatus by remember{mutableStateOf("")}
     fun refresh(){scope.launch{
         runCatching{api.get("/api/native/home-edge/secrets/status")}.onSuccess{
@@ -2868,7 +2890,13 @@ private fun shareMfpPdf(context:Context,api:HomeApi,doc:JSONObject){
                             .onFailure{telegramStatus=it.message?:"Не вдалося додати канал"}
                         busy=false
                     }},enabled=!busy&&telegramSourceHandle.startsWith("@")&&telegramSourceHandle.length>=6,shape=RoundedCornerShape(12.dp),colors=ButtonDefaults.buttonColors(containerColor=Action),modifier=Modifier.fillMaxWidth().height(46.dp).padding(top=7.dp)){Text("Додати канал",fontWeight=FontWeight.SemiBold,color=Text)}
-                    if(telegramSources.isNotEmpty())Text("Allowlist: "+telegramSources.joinToString(" · "),fontSize=10.sp,lineHeight=15.sp,color=Muted,modifier=Modifier.padding(top=8.dp))
+                    if(telegramSources.isNotEmpty()){
+                        Row(Modifier.fillMaxWidth().padding(top=8.dp).clip(RoundedCornerShape(8.dp)).clickable{telegramSourcesExpanded=!telegramSourcesExpanded}.padding(vertical=4.dp),verticalAlignment=Alignment.CenterVertically){
+                            Text("Allowlist · ${telegramSources.size}",fontSize=10.sp,fontWeight=FontWeight.SemiBold,color=Muted,modifier=Modifier.weight(1f))
+                            Mdi(if(telegramSourcesExpanded)"chevron-up" else "chevron-down",16.dp,Muted)
+                        }
+                        if(telegramSourcesExpanded)Text(telegramSources.joinToString(" · "),fontSize=10.sp,lineHeight=15.sp,color=Muted,modifier=Modifier.padding(top=3.dp))
+                    }
                     Button(onClick={scope.launch{
                         busy=true;telegramStatus="Синхронізую Telegram…"
                         runCatching{api.post("/api/native/home-edge/telegram/sync",JSONObject())}
