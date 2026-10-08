@@ -34,8 +34,8 @@ def test_package_identity_label_compose_and_main_entry_are_current() -> None:
 
     assert 'namespace = "com.skeleton.home"' in gradle
     assert 'applicationId = "com.skeleton.home"' in gradle
-    assert re.search(r"versionCode\s*=\s*150\b", gradle)
-    assert 'versionName = "1.4.34"' in gradle
+    assert re.search(r"versionCode\s*=\s*151\b", gradle)
+    assert 'versionName = "1.4.35"' in gradle
     assert "buildFeatures { compose = true; buildConfig = true }" in gradle
     assert "androidx.activity:activity-compose" in gradle
 
@@ -186,7 +186,7 @@ def test_home_media_control_uses_explicit_endpoint_routing() -> None:
     assert 'api.post("/api/tv/play"' not in main
 
 
-def test_home_header_keeps_capture_and_hyperion_home_only() -> None:
+def test_home_header_keeps_capture_and_hyperion_on_home_and_video() -> None:
     main = read("app/src/main/java/com/skeleton/home/MainActivity.kt")
     hand_open = read("app/src/main/res/drawable/hand_open.xml")
     hand_fist = read("app/src/main/res/drawable/hand_fist.xml")
@@ -205,7 +205,9 @@ def test_home_header_keeps_capture_and_hyperion_home_only() -> None:
     assert "IconButton(onClick=onHyperion" in main
     assert 'Mdi(if(hyperion)"lightbulb-on-outline" else "lightbulb-outline",22.dp,if(hyperion)Accent else Color.White)' in main
     assert "Header(ui(\"Головна\"),api.server!=null,endpoint.endpointId,endpoints,onEndpoint,onMenu" in main
-    assert "hyperion=hyperion,onHyperion={onHyperion(!hyperion)}" in main
+    assert "Header(ui(\"Відео\"),api.server!=null,endpoint.endpointId,endpoints,onEndpoint,onMenu" in main
+    assert main.count("captureCharged=captureCharged,captureEnabled=captureEnabled,onCapture={capturePress()}") == 2
+    assert main.count("hyperion=hyperion,onHyperion={onHyperion(!hyperion)}") == 2
     assert main.count('api.post("/api/hyperion"') == 1
     assert "<vector" in hand_open and "<path" in hand_open
     assert "<vector" in hand_fist and "<path" in hand_fist
@@ -231,11 +233,12 @@ def test_home_header_keeps_capture_and_hyperion_home_only() -> None:
     ]:
         assert signature in main
 
-    for screen_title in ['ui("Відео")', 'ui("Сканувати")', '"Home Edge"', 'ui("Пристрої")', 'ui("СК")']:
-        match = re.search(rf"Header\({re.escape(screen_title)}.*?\)", main)
-        assert match is not None
-        assert "onCapture" not in match.group(0)
-        assert "onHyperion" not in match.group(0)
+    assert 'Header(ui("Відео"),api.server!=null,endpoint.endpointId,endpoints,onEndpoint,onMenu' in main
+    assert 'captureCharged=captureCharged,captureEnabled=captureEnabled,onCapture={capturePress()},hyperion=hyperion,onHyperion={onHyperion(!hyperion)}' in main
+    assert 'Header(ui("Сканувати")' in main
+    assert 'Header("Home Edge"' in main
+    assert 'Header(ui("Пристрої")' not in main
+    assert 'Header(ui("СК")' not in main
 
 
 def test_capture_handoff_state_is_backend_authoritative() -> None:
