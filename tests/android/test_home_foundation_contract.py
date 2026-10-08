@@ -35,7 +35,7 @@ def test_package_identity_label_compose_and_main_entry_are_current() -> None:
     assert 'namespace = "com.skeleton.home"' in gradle
     assert 'applicationId = "com.skeleton.home"' in gradle
     assert re.search(r"versionCode\s*=\s*148\b", gradle)
-    assert 'versionName = "1.4.32"' in gradle
+    assert 'versionName = "1.4.33"' in gradle
     assert "buildFeatures { compose = true; buildConfig = true }" in gradle
     assert "androidx.activity:activity-compose" in gradle
 
