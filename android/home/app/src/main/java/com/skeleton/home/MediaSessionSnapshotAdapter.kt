@@ -46,7 +46,7 @@ class MediaSessionSnapshotAdapter(
             val expected = ComponentName(context, MediaSessionObservationListener::class.java)
             val enabledListeners = Settings.Secure.getString(
                 context.contentResolver,
-                Settings.Secure.ENABLED_NOTIFICATION_LISTENERS,
+                "enabled_notification_listeners",
             ) ?: return false
 
             return enabledListeners
