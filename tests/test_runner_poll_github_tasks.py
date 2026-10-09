@@ -1995,6 +1995,74 @@ def test_ready_queue_priority_markers_sort_deterministically_without_unknown_aut
     assert [issue["number"] for issue in ordered] == [5, 10, 11, 20, 30]
 
 
+def test_registered_queue_p0_run_now_orders_before_priority_one_across_sources(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    skeleton_source = runner.RunnerVNextQueueSource("skeleton", runner.REPO)
+    lavalamp_source = runner.RunnerVNextQueueSource("lavalamp", "alanua/Lavalamp")
+    issues_by_repo = {
+        runner.REPO: [
+            {
+                "number": 9,
+                "labels": [
+                    {"name": runner.LABEL_READY},
+                    {"name": runner.LABEL_PRIORITY_1},
+                ],
+            }
+        ],
+        "alanua/Lavalamp": [
+            {
+                "number": 8,
+                "labels": [
+                    {"name": runner.LABEL_READY},
+                    {"name": runner.LABEL_RUN_NOW},
+                ],
+            }
+        ],
+    }
+
+    monkeypatch.setattr(runner, "load_runner_project_tree", lambda: {"projects": {}})
+    monkeypatch.setattr(
+        runner,
+        "registered_runner_queue_sources",
+        lambda _project_tree: (skeleton_source, lavalamp_source),
+    )
+    monkeypatch.setattr(
+        runner,
+        "_ready_issues_for_registered_source",
+        lambda source: issues_by_repo[source.repository],
+    )
+
+    items = runner.get_ready_issue_items()
+
+    assert [(item.source_repository, item.issue_number) for item in items] == [
+        ("alanua/Lavalamp", 8),
+        (runner.REPO, 9),
+    ]
+
+
+def test_ready_rest_fallback_malformed_labels_fail_closed_before_selection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    malformed_issue = {
+        "number": 51,
+        "title": "Malformed labels",
+        "body": "```task\nDo it.\n```",
+        "state": "open",
+        "html_url": "https://github.com/alanua/Skeleton/issues/51",
+        "labels": "runner:ready",
+    }
+
+    monkeypatch.setattr(
+        runner,
+        "run_command",
+        lambda _command, **_kwargs: (0, json.dumps([malformed_issue])),
+    )
+
+    with pytest.raises(RuntimeError, match="malformed labels"):
+        runner._ready_issues_via_rest(runner.REPO)
+
+
 def _queue_candidate_issue(
     number: int,
     *,
