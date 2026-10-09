@@ -1,16 +1,17 @@
 package com.skeleton.home
 
+import android.content.ComponentName
 import android.content.Context
-import android.content.pm.PackageManager
 import android.media.MediaMetadata
 import android.media.session.MediaController
 import android.media.session.MediaSessionManager
 import android.media.session.PlaybackState
+import android.provider.Settings
 import org.json.JSONObject
 
 enum class MediaSessionSnapshotAvailability {
     AVAILABLE,
-    PERMISSION_DENIED,
+    LISTENER_DISABLED,
     UNAVAILABLE,
 }
 
@@ -39,11 +40,20 @@ class MediaSessionSnapshotAdapter(
     private val nowMillis: () -> Long = { System.currentTimeMillis() },
 ) {
     companion object {
-        private const val MEDIA_CONTENT_CONTROL_PERMISSION = "android.permission.MEDIA_CONTENT_CONTROL"
         private const val MAX_TITLE_LENGTH = 120
 
-        fun hasMediaSessionPermission(context: Context): Boolean =
-            context.checkSelfPermission(MEDIA_CONTENT_CONTROL_PERMISSION) == PackageManager.PERMISSION_GRANTED
+        fun isObservationListenerEnabled(context: Context): Boolean {
+            val expected = ComponentName(context, MediaSessionObservationListener::class.java)
+            val enabledListeners = Settings.Secure.getString(
+                context.contentResolver,
+                Settings.Secure.ENABLED_NOTIFICATION_LISTENERS,
+            ) ?: return false
+
+            return enabledListeners
+                .split(':')
+                .mapNotNull { ComponentName.unflattenFromString(it) }
+                .any { it.packageName == expected.packageName && it.className == expected.className }
+        }
     }
 
     fun readSnapshot(): MediaSessionSnapshotResult {
@@ -53,9 +63,9 @@ class MediaSessionSnapshotAdapter(
                 snapshot = null,
             )
         }
-        if (!hasMediaSessionPermission(context)) {
+        if (!isObservationListenerEnabled(context)) {
             return MediaSessionSnapshotResult(
-                availability = MediaSessionSnapshotAvailability.PERMISSION_DENIED,
+                availability = MediaSessionSnapshotAvailability.LISTENER_DISABLED,
                 snapshot = null,
             )
         }
@@ -67,10 +77,10 @@ class MediaSessionSnapshotAdapter(
             )
 
         val controllers = try {
-            manager.getActiveSessions(null)
+            manager.getActiveSessions(ComponentName(context, MediaSessionObservationListener::class.java))
         } catch (_: SecurityException) {
             return MediaSessionSnapshotResult(
-                availability = MediaSessionSnapshotAvailability.PERMISSION_DENIED,
+                availability = MediaSessionSnapshotAvailability.LISTENER_DISABLED,
                 snapshot = null,
             )
         }
