@@ -92,11 +92,18 @@ class WorkIdentity:
     def to_public_mapping(self) -> dict[str, Any]:
         return {
             "schema": WORK_IDENTITY_SCHEMA,
+            "identity_state": self.identity_state,
+            "private_identifiers_included": False,
+        }
+
+    def to_private_mapping(self) -> dict[str, Any]:
+        return {
+            "schema": WORK_IDENTITY_SCHEMA,
             "work_ref": self.work_ref,
             "source_namespace": self.source_namespace,
             "identity_state": self.identity_state,
             "source_work_hash": self.source_work_hash,
-            "private_identifiers_included": False,
+            "storage_semantics": "PRIVATE_LOCAL_ONLY",
         }
 
 
@@ -168,12 +175,20 @@ class Edition:
     def to_public_mapping(self) -> dict[str, Any]:
         return {
             "schema": EDITION_SCHEMA,
+            "reading_format": self.reading_format.value,
+            "edition_state": self.edition_state,
+            "private_identifiers_included": False,
+        }
+
+    def to_private_mapping(self) -> dict[str, Any]:
+        return {
+            "schema": EDITION_SCHEMA,
             "edition_ref": self.edition_ref,
             "work_ref": self.work_ref,
             "reading_format": self.reading_format.value,
             "edition_hash": self.edition_hash,
             "edition_state": self.edition_state,
-            "private_identifiers_included": False,
+            "storage_semantics": "PRIVATE_LOCAL_ONLY",
         }
 
 
@@ -214,11 +229,19 @@ class ReadingSession:
     def to_public_mapping(self) -> dict[str, Any]:
         return {
             "schema": READING_SESSION_SCHEMA,
+            "frontend": self.frontend,
+            "status": self.status,
+        }
+
+    def to_private_mapping(self) -> dict[str, Any]:
+        return {
+            "schema": READING_SESSION_SCHEMA,
             "session_ref": self.session_ref,
             "edition_ref": self.edition_ref,
             "frontend": self.frontend,
             "started_at": self.started_at,
             "status": self.status,
+            "storage_semantics": "PRIVATE_LOCAL_ONLY",
         }
 
 
@@ -335,6 +358,14 @@ class ProgressCheckpoint:
     def to_public_mapping(self) -> dict[str, Any]:
         return {
             "schema": PROGRESS_CHECKPOINT_SCHEMA,
+            "reading_format": self.reading_format.value,
+            "progress_kind": self.progress_kind,
+            "private_identifiers_included": False,
+        }
+
+    def to_private_mapping(self) -> dict[str, Any]:
+        return {
+            "schema": PROGRESS_CHECKPOINT_SCHEMA,
             "checkpoint_ref": self.checkpoint_ref,
             "session_ref": self.session_ref,
             "edition_ref": self.edition_ref,
@@ -347,11 +378,11 @@ class ProgressCheckpoint:
             "time_position_seconds": self.time_position_seconds,
             "duration_seconds": self.duration_seconds,
             "chapter_ref": self.chapter_ref,
-            "private_identifiers_included": False,
+            "storage_semantics": "PRIVATE_LOCAL_ONLY",
         }
 
     def deterministic_hash(self) -> str:
-        return _sha256_text(self.to_public_mapping())
+        return _sha256_text(self.to_private_mapping())
 
     def _validate_ebook_progress(self) -> None:
         if self.reading_format.value not in EBOOK_FORMATS:
@@ -460,25 +491,51 @@ class ReadingReceipt:
         )
 
     def to_public_mapping(self) -> dict[str, Any]:
-        latest = self.checkpoints[-1].to_public_mapping() if self.checkpoints else None
+        checkpoint_kind_counts = _counts(checkpoint.progress_kind for checkpoint in self.checkpoints)
+        reading_format_counts = _counts([self.edition.reading_format.value])
+        frontend_counts = _counts([self.session.frontend])
+        session_status_counts = _counts([self.session.status])
+        identity_state_counts = _counts([self.work_identity.identity_state])
+        edition_state_counts = _counts([self.edition.edition_state])
         return {
             "schema": READING_GATEWAY_SCHEMA,
             "contract_version": READING_GATEWAY_VERSION,
-            "receipt_ref": self.receipt_ref,
-            "privacy_boundary": "PRIVATE_READING_STATE_LOCAL_PUBLIC_SAFE_SYNTHETIC_TESTS",
-            "work_identity": self.work_identity.to_public_mapping(),
-            "edition": self.edition.to_public_mapping(),
-            "session": self.session.to_public_mapping(),
+            "privacy_boundary": "PRIVATE_READING_STATE_LOCAL_PUBLIC_AGGREGATES_ONLY",
+            "work_count": 1,
+            "edition_count": 1,
+            "session_count": 1,
             "checkpoint_count": len(self.checkpoints),
-            "latest_checkpoint": latest,
-            "checkpoints": [checkpoint.to_public_mapping() for checkpoint in self.checkpoints],
+            "checkpoint_kind_counts": checkpoint_kind_counts,
+            "reading_format_counts": reading_format_counts,
+            "frontend_counts": frontend_counts,
+            "session_status_counts": session_status_counts,
+            "identity_state_counts": identity_state_counts,
+            "edition_state_counts": edition_state_counts,
+            "has_progress": bool(self.checkpoints),
             "private_identifiers_included": False,
             "android_storage_paths_included": False,
             "live_device_interactions_included": False,
         }
 
+    def to_private_mapping(self) -> dict[str, Any]:
+        return {
+            "schema": READING_GATEWAY_SCHEMA,
+            "contract_version": READING_GATEWAY_VERSION,
+            "receipt_ref": self.receipt_ref,
+            "privacy_boundary": "PRIVATE_READING_STATE_LOCAL_PUBLIC_AGGREGATES_ONLY",
+            "work_identity": self.work_identity.to_private_mapping(),
+            "edition": self.edition.to_private_mapping(),
+            "session": self.session.to_private_mapping(),
+            "checkpoint_count": len(self.checkpoints),
+            "latest_checkpoint": self.checkpoints[-1].to_private_mapping() if self.checkpoints else None,
+            "checkpoints": [checkpoint.to_private_mapping() for checkpoint in self.checkpoints],
+            "storage_semantics": "PRIVATE_LOCAL_ONLY",
+            "android_storage_paths_included": False,
+            "live_device_interactions_included": False,
+        }
+
     def deterministic_hash(self) -> str:
-        return _sha256_text(self.to_public_mapping())
+        return _sha256_text(self.to_private_mapping())
 
 
 Receipt = ReadingReceipt
@@ -518,6 +575,13 @@ def stable_reading_ref(prefix: str, *parts: object) -> str:
     if not _REF_PREFIX_RE.match(prefix):
         raise ReadingContractError("INVALID_REF_PREFIX", "reference prefix is invalid")
     return f"{prefix}_{_sha256_text(parts)[:32]}"
+
+
+def _counts(values: Iterable[str]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for value in values:
+        counts[value] = counts.get(value, 0) + 1
+    return dict(sorted(counts.items()))
 
 
 def private_identifier_hash(value: str) -> str:

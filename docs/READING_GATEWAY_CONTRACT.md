@@ -26,6 +26,11 @@ synthetic keys. They do not carry real book titles, reading history, private
 Android paths, or raw adapter identifiers. Unknown and unavailable states are
 explicit and must not be represented as empty strings or invented values.
 
+Stable references and unsalted SHA256 values derived from `source_work_key` or
+`edition_key` are private local state. They are useful for idempotent local
+reconciliation, but they are reusable deterministic links to a person's book
+list and must not appear in public projections.
+
 ## Progress Shapes
 
 Ebook and audiobook progress are separate:
@@ -49,14 +54,26 @@ observed before their session start.
 
 Public receipt serialization includes:
 
-- stable work, edition, session, and checkpoint references
-- reading format and frontend enum values
-- synthetic progress values
+- aggregate counts for works, editions, sessions, and reconciled checkpoints
+- coarse enum count buckets for reading format, frontend, session status,
+  identity state, edition state, and progress kind
 - explicit privacy flags showing that private identifiers, Android storage
   paths, and live device interactions are absent
 
 Public serialization must never include real titles, reading history, user
-library paths, package-private paths, credentials, or device-derived live state.
+library paths, package-private paths, credentials, device-derived live state,
+work references, edition references, session references, checkpoint references,
+exact timestamps, page numbers, percentages, time positions, duration values, or
+chapter identifiers. Public serialization also must not include a private value
+simply because it is hashed. Unsalted SHA256 values for source work keys or
+edition keys remain private identifiers.
+
+Private/local projection is explicit: `to_private_mapping()` may include stable
+work, edition, session, and checkpoint references; source and edition hashes;
+timestamps; and exact progress values. Its storage semantics are
+`PRIVATE_LOCAL_ONLY`, and downstream consumers must keep that projection inside
+the private reading-state boundary. `to_public_mapping()` is aggregate-only and
+must not be used as a transport for local reconciliation identifiers.
 
 ## Future Adapter Boundary
 

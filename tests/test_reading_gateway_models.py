@@ -16,6 +16,28 @@ from core.reading.models import (
 )
 
 
+def assert_no_public_private_fields(value: object) -> None:
+    rendered = json.dumps(value, sort_keys=True)
+    forbidden_keys = (
+        "work_ref",
+        "edition_ref",
+        "session_ref",
+        "checkpoint_ref",
+        "source_work_hash",
+        "edition_hash",
+        "started_at",
+        "observed_at",
+        "page_current",
+        "page_total",
+        "percent",
+        "time_position_seconds",
+        "duration_seconds",
+        "chapter_ref",
+    )
+    for key in forbidden_keys:
+        assert key not in rendered
+
+
 def synthetic_ebook() -> tuple[WorkIdentity, Edition, ReadingSession]:
     work = WorkIdentity.new(
         source_namespace="synthetic",
@@ -68,9 +90,50 @@ def test_work_and_edition_references_are_stable_without_private_titles() -> None
 
     assert work_a.work_ref == work_b.work_ref
     assert edition_a.edition_ref == edition_b.edition_ref
-    rendered = json.dumps(edition_a.to_public_mapping())
+    public = edition_a.to_public_mapping()
+    rendered = json.dumps(public)
     assert "private-book-key" not in rendered
     assert "private-edition-key" not in rendered
+    assert work_a.source_work_hash not in rendered
+    assert edition_a.edition_hash not in rendered
+    assert work_a.work_ref not in rendered
+    assert edition_a.edition_ref not in rendered
+    assert_no_public_private_fields(public)
+
+
+def test_private_projection_keeps_local_refs_under_private_storage_semantics() -> None:
+    work, edition, session = synthetic_ebook()
+    checkpoint = ProgressCheckpoint.ebook(
+        session=session,
+        edition=edition,
+        observed_at=120,
+        page_current=10,
+        page_total=100,
+        percent=10.0,
+    )
+    receipt = ReadingReceipt(
+        work_identity=work,
+        edition=edition,
+        session=session,
+        checkpoints=(checkpoint,),
+    )
+
+    private = receipt.to_private_mapping()
+    rendered = json.dumps(private)
+
+    assert private["storage_semantics"] == "PRIVATE_LOCAL_ONLY"
+    assert private["work_identity"]["storage_semantics"] == "PRIVATE_LOCAL_ONLY"
+    assert private["edition"]["storage_semantics"] == "PRIVATE_LOCAL_ONLY"
+    assert private["session"]["storage_semantics"] == "PRIVATE_LOCAL_ONLY"
+    assert private["checkpoints"][0]["storage_semantics"] == "PRIVATE_LOCAL_ONLY"
+    assert work.work_ref in rendered
+    assert work.source_work_hash in rendered
+    assert edition.edition_ref in rendered
+    assert edition.edition_hash in rendered
+    assert session.session_ref in rendered
+    assert checkpoint.checkpoint_ref in rendered
+    assert '"observed_at": 120' in rendered
+    assert '"page_current": 10' in rendered
 
 
 def test_ebook_progress_uses_page_percent_shape_only() -> None:
@@ -216,12 +279,33 @@ def test_receipt_is_public_safe_and_monotonic() -> None:
     rendered = json.dumps(public)
 
     assert public["schema"] == "skeleton.reading_gateway.receipt.v1"
+    assert public["privacy_boundary"] == "PRIVATE_READING_STATE_LOCAL_PUBLIC_AGGREGATES_ONLY"
+    assert public["work_count"] == 1
+    assert public["edition_count"] == 1
+    assert public["session_count"] == 1
     assert public["checkpoint_count"] == 1
+    assert public["checkpoint_kind_counts"] == {"AUDIO_TIME_CHAPTER": 1}
+    assert public["reading_format_counts"] == {"AUDIOBOOK": 1}
+    assert public["frontend_counts"] == {"SMART_AUDIOBOOK_PLAYER": 1}
+    assert public["session_status_counts"] == {"ACTIVE": 1}
+    assert public["identity_state_counts"] == {"KNOWN": 1}
+    assert public["edition_state_counts"] == {"KNOWN": 1}
+    assert public["has_progress"] is True
     assert public["private_identifiers_included"] is False
     assert public["android_storage_paths_included"] is False
     assert public["live_device_interactions_included"] is False
     assert "synthetic-audio-work" not in rendered
+    assert work.source_work_hash not in rendered
+    assert edition.edition_hash not in rendered
+    assert work.work_ref not in rendered
+    assert edition.edition_ref not in rendered
+    assert session.session_ref not in rendered
+    assert checkpoint.checkpoint_ref not in rendered
+    assert "chapter:01" not in rendered
+    assert "time_position_seconds" not in rendered
+    assert "observed_at" not in rendered
     assert "Android/data" not in rendered
+    assert_no_public_private_fields(public)
 
     before_session = ProgressCheckpoint.audiobook(
         session=session,
