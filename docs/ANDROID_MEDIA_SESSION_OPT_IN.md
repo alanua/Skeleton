@@ -2,7 +2,7 @@
 
 Home's media-session snapshot path is source-only and inert unless the user explicitly enables the app's notification-listener component in Android system settings.
 
-The Android app does not request `android.permission.MEDIA_CONTENT_CONTROL`. Instead, `MediaSessionSnapshotAdapter` first requires a non-empty local allowlist of media package names, then verifies that `.MediaSessionObservationListener` is present in `Settings.Secure.ENABLED_NOTIFICATION_LISTENERS`, and only then calls `MediaSessionManager.getActiveSessions(ComponentName(...))`.
+The Android app does not request `android.permission.MEDIA_CONTENT_CONTROL`. Instead, `MediaSessionSnapshotAdapter` first requires a non-empty local allowlist of media package names, then verifies that `.MediaSessionObservationListener` is present in the public Android secure setting key `"enabled_notification_listeners"`, and only then calls `MediaSessionManager.getActiveSessions(ComponentName(...))`.
 
 `.MediaSessionObservationListener` exists only so Android can authorize the `ComponentName` used for media-session observation. It does not implement notification callbacks, inspect notification extras, read notification payloads, launch settings, mutate playback, or install/enable itself.
 
