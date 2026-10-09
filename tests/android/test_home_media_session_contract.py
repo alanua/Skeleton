@@ -60,7 +60,9 @@ def test_media_session_snapshot_requires_enabled_listener_before_observation() -
     assert "android.permission.MEDIA_CONTENT_CONTROL" not in source
     assert "PackageManager.PERMISSION_GRANTED" not in source
     assert "fun isObservationListenerEnabled(context: Context): Boolean" in source
-    assert "Settings.Secure.ENABLED_NOTIFICATION_LISTENERS" in source
+    assert 'Settings.Secure.getString(' in source
+    assert '"enabled_notification_listeners"' in source
+    assert "Settings.Secure.ENABLED_NOTIFICATION_LISTENERS" not in source
     assert "ComponentName(context, MediaSessionObservationListener::class.java)" in source
     assert "if (!isObservationListenerEnabled(context))" in source
     assert "MediaSessionSnapshotAvailability.LISTENER_DISABLED" in source
