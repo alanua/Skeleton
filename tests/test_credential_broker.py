@@ -259,6 +259,71 @@ def test_revoked_secret_fails_closed_with_bounded_reason() -> None:
     assert "raw-provider-detail" not in repr(receipt)
 
 
+def test_public_status_exposes_only_opaque_reference_not_secret_values() -> None:
+    store = FakeStore({"opaque-secret-ref-a": SYNTHETIC_SECRET_A})
+    broker = _broker(
+        store,
+        [_binding("service-a", "opaque-secret-ref-a")],
+        {"service-a": lambda _material, _binding: None},
+    )
+
+    receipt = broker.probe(service_id="service-a", alias="api")
+    public = receipt.to_public_mapping()
+    serialized = json.dumps(public, sort_keys=True)
+
+    assert receipt.status == "AVAILABLE"
+    assert public["provider"] == "bitwarden"
+    assert public["reference_id"] == "opaque-secret-ref-a"
+    assert "value" not in serialized.lower()
+    assert "secret_value" not in serialized
+    assert SYNTHETIC_SECRET_A not in serialized
+
+
+def test_provider_error_metadata_does_not_leak_tokens_or_secret_values() -> None:
+    leaked_token = "synthetic-provider-token-must-not-leak"
+    provider_detail = f"metadata token={leaked_token} value={SYNTHETIC_SECRET_A}"
+    store = FakeStore({"ref-a": SYNTHETIC_SECRET_A})
+    store.failures["ref-a"] = SecretRevoked(provider_detail)
+    broker = _broker(
+        store,
+        [_binding("service-a", "ref-a")],
+        {"service-a": lambda _material, _binding: None},
+    )
+
+    receipt = broker.probe(service_id="service-a", alias="api")
+    public = receipt.to_public_mapping()
+    serialized = json.dumps(public, sort_keys=True)
+
+    assert receipt.status == "BLOCKED"
+    assert receipt.reason_class == "SECRET_REVOKED"
+    assert leaked_token not in serialized
+    assert provider_detail not in serialized
+    assert SYNTHETIC_SECRET_A not in serialized
+    assert leaked_token not in repr(receipt)
+
+
+def test_cross_domain_runtime_context_reuse_is_denied_before_provider() -> None:
+    store = FakeStore({"ref-a": SYNTHETIC_SECRET_A})
+    binding = _binding("service-a", "ref-a")
+    broker = _broker(
+        store,
+        [binding],
+        {"service-a": lambda _material, _binding: None},
+        runtime_contexts={
+            "service-a": _runtime_context(
+                "service-b",
+                audience="service:service-b",
+            )
+        },
+    )
+
+    receipt = broker.probe(service_id="service-a", alias="api")
+
+    assert receipt.status == "BLOCKED"
+    assert receipt.reason_class == "SECRET_OUT_OF_SCOPE"
+    assert store.calls == []
+
+
 def test_malicious_consumer_return_value_is_blocked_and_not_exposed() -> None:
     store = FakeStore({"ref-a": SYNTHETIC_SECRET_A})
 
