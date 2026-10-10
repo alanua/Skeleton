@@ -34,6 +34,32 @@ def test_register_is_idempotent_and_versions_changes(tmp_path) -> None:
     assert (changed.version, changed_created) == (2, True)
 
 
+def test_disable_schedule_preserves_existing_occurrence_history(tmp_path) -> None:
+    store = SchedulerStore(tmp_path / "scheduler.sqlite3")
+    store.initialize()
+    schedule, _ = store.register(_spec(), now=50)
+    occurrence_id = stable_occurrence_id(schedule.spec.schedule_id, schedule.version, 100)
+    proposal = build_execution_proposal(schedule, occurrence_id=occurrence_id, scheduled_for=100)
+    store.create_occurrence(
+        occurrence_id=occurrence_id,
+        schedule=schedule,
+        scheduled_for=100,
+        state="done",
+        reason="NOTIFY_ONLY_PROPOSAL",
+        proposal=proposal,
+        now=100,
+    )
+
+    disabled = store.set_enabled(schedule.spec.schedule_id, False)
+
+    assert disabled.enabled is False
+    assert store.list_enabled() == ()
+    history = store.list_occurrences(schedule.spec.schedule_id)
+    assert len(history) == 1
+    assert history[0].occurrence_id == occurrence_id
+    assert history[0].state == "done"
+
+
 def test_occurrence_unique_and_payload_not_in_public_receipt(tmp_path) -> None:
     store = SchedulerStore(tmp_path / "scheduler.sqlite3")
     store.initialize()
@@ -119,6 +145,48 @@ def test_atomic_claim_sets_attempt_and_prevents_duplicate_worker(tmp_path) -> No
     assert claimed.attempt == 1
     assert claimed.idempotency_key == f"{occurrence_id}:attempt:1"
     assert duplicate is None
+
+
+def test_stale_or_foreign_run_lease_renewal_is_rejected(tmp_path) -> None:
+    store = SchedulerStore(tmp_path / "scheduler.sqlite3")
+    store.initialize()
+    schedule, _ = store.register(_spec(), now=1)
+    occurrence_id = stable_occurrence_id(schedule.spec.schedule_id, schedule.version, 100)
+    proposal = build_execution_proposal(schedule, occurrence_id=occurrence_id, scheduled_for=100)
+    store.create_occurrence(
+        occurrence_id=occurrence_id,
+        schedule=schedule,
+        scheduled_for=100,
+        state="pending",
+        reason="DISPATCH_REQUIRED",
+        proposal=proposal,
+        now=100,
+    )
+    claimed = store.claim_next_pending(now=100, owner="worker-a", lease_seconds=5)
+
+    assert claimed is not None
+    assert (
+        store.renew_running_claim(
+            occurrence_id, owner="worker-b", lease_seconds=5, now=101
+        )
+        is False
+    )
+    assert (
+        store.renew_running_claim(
+            occurrence_id, owner="worker-a", lease_seconds=5, now=105
+        )
+        is True
+    )
+    assert (
+        store.renew_running_claim(
+            occurrence_id, owner="worker-a", lease_seconds=5, now=111
+        )
+        is False
+    )
+    assert store.recover_stale_running(
+        now=111, stale_after_seconds=5, max_attempts=2
+    ) == {"retried": 1, "needs_operator": 0}
+    assert store.get_occurrence(occurrence_id).state == "pending"  # type: ignore[union-attr]
 
 
 def test_transition_conflict_fails_closed(tmp_path) -> None:
