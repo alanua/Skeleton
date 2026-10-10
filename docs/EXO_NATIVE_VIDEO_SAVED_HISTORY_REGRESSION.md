@@ -4,7 +4,7 @@ This regression covers the native Kotlin Compose video picker after the saved-li
 
 ## Fixed behavior
 
-- The TV target loads the complete saved work library and merges it with endpoint watched history, keyed by stable `history_id`, then `history_key`, then `content_key`.
+- The TV target loads the complete saved work library from `GET /api/video/history` and merges it with endpoint watched history, keyed by stable `history_id`, then `history_key`, then `content_key`.
 - Saved TV works open through `POST /api/video/history/open`, then apply the returned job and preference through `PUT /api/media/endpoints/home_edge_tv/video/selection`.
 - TV saved-work selection does not call playback, mode, or handoff APIs.
 - Samsung keeps endpoint-scoped watched-history semantics and does not receive TV saved-library selection.

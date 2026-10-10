@@ -102,6 +102,17 @@ class NativeVideoHistoryTest {
         assertEquals(listOf("Perry Mason"), samsung.map { it.getString("title") })
     }
 
+    @Test
+    fun canonicalSavedHistoryEndpointAndReadFallbacksAreStable() {
+        val previous = listOf(history("bb", "Babylon Berlin"))
+        val watched = listOf(history("pm", "Perry Mason", season = "1", episode = "3"))
+        val saved = listOf(history("bb", "Babylon Berlin"), history("future", "Future Saved Work"))
+
+        assertEquals("/api/video/history", savedVideoHistoryPath())
+        assertEquals(listOf("Perry Mason"), historyItemsAfterRead(previous, null, watched, homeEdgeTv = true).map { it.getString("title") })
+        assertEquals(listOf("Babylon Berlin", "Future Saved Work"), historyItemsAfterRead(previous, saved, null, homeEdgeTv = true).map { it.getString("title") })
+    }
+
     private fun history(id:String, title:String, poster:String = "", overview:String = "", season:String = "", episode:String = ""):JSONObject =
         JSONObject().put("history_id", id).put("title", title).put("poster", poster).put("overview", overview).put("season", season).put("episode", episode)
 

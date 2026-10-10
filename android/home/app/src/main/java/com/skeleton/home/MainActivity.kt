@@ -310,6 +310,7 @@ private fun endpointMutation(endpointId:String,vararg pairs:Pair<String,Any?>):J
     return o
 }
 private fun endpointPath(endpointId:String,suffix:String):String="/api/media/endpoints/${Uri.encode(endpointId)}$suffix"
+internal fun savedVideoHistoryPath():String="/api/video/history"
 private fun mediaHistoryPath(endpointId:String):String="/api/media/history?endpoint=${Uri.encode(endpointId)}"
 internal fun historyKey(item:JSONObject):String=item.cleanText("history_id",item.cleanText("history_key",item.cleanText("content_key")))
 private fun mediaHistoryDeletePath(endpointId:String,item:JSONObject):String="/api/media/history/${Uri.encode(historyKey(item))}?endpoint=${Uri.encode(endpointId)}"
@@ -2005,9 +2006,7 @@ private fun VideoScreen(api:HomeApi,active:Boolean,selectionRevision:Int,endpoin
     suspend fun loadHistoryForEndpoint(){
         val watched=runCatching{api.get(mediaHistoryPath(endpoint.endpointId)).optJSONArray("items")?.objects().orEmpty()}
         if(endpoint.adapterKind=="home_edge_tv"){
-            val saved=runCatching{api.get("/api/video/history/saved").optJSONArray("items")?.objects().orEmpty()}
-                .recoverCatching{api.get("/api/video/history/library").optJSONArray("items")?.objects().orEmpty()}
-                .recoverCatching{api.get("/api/media/library/saved").optJSONArray("items")?.objects().orEmpty()}
+            val saved=runCatching{api.get(savedVideoHistoryPath()).optJSONArray("items")?.objects().orEmpty()}
             history=historyItemsAfterRead(history,saved.getOrNull(),watched.getOrNull(),true)
         }else{
             history=historyItemsAfterRead(history,null,watched.getOrNull(),false)

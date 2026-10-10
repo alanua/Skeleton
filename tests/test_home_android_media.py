@@ -77,23 +77,27 @@ def test_home_video_selection_and_history_are_canonical_endpoint_scoped() -> Non
     assert 'api.put(endpointPath(endpoint.endpointId,"/video/selection"),selBody)' in text
     assert 'api.put("/api/video/selection",selBody)' not in text
     assert 'private fun mediaHistoryPath(endpointId:String):String="/api/media/history?endpoint=${Uri.encode(endpointId)}"' in text
-    assert 'private fun historyKey(item:JSONObject):String=item.cleanText("history_key",item.cleanText("content_key"))' in text
+    assert 'internal fun savedVideoHistoryPath():String="/api/video/history"' in text
+    assert 'internal fun historyKey(item:JSONObject):String=item.cleanText("history_id",item.cleanText("history_key",item.cleanText("content_key")))' in text
     assert 'private fun mediaHistoryDeletePath(endpointId:String,item:JSONObject):String="/api/media/history/${Uri.encode(historyKey(item))}?endpoint=${Uri.encode(endpointId)}"' in text
     assert "canonicalHistoryItems(api.get(mediaHistoryPath(endpointId)).optJSONArray" in text
-    assert "canonicalHistoryItems(it.optJSONArray" in text
+    assert "historyItemsAfterRead(history,saved.getOrNull(),watched.getOrNull(),true)" in text
     assert "historyEpisodeLabel(item)" in text
+    assert 'api.get(savedVideoHistoryPath())' in text
     assert 'api.get(mediaHistoryPath(endpointId))' in text
     assert 'api.get(mediaHistoryPath(endpoint.endpointId))' in text
     assert 'api.delete(mediaHistoryDeletePath(endpointId,item))' in text
     assert 'val preferred=historyPreferredSelection(endpoint.endpointId,item)' in text
-    assert 'runCatching{api.put(endpointPath(endpoint.endpointId,"/video/selection"),preferred)}' in text
-    assert 'selection=preferred' in text
+    assert 'confirmEndpointSelection(preferred)' in text
+    assert 'selection=JSONObject(body.toString())' in text
     assert 'onFailure{message=it.message?:"Не вдалося вибрати запис історії"}' in text
+    assert '"/api/video/history/saved"' not in text
+    assert '"/api/video/history/library"' not in text
+    assert '"/api/media/library/saved"' not in text
     assert '"/api/media/history/delete"' not in text
     assert '"/api/media/history/open"' not in text
     assert '"/history/delete"' not in text
     assert '"/history/open"' not in text
-    assert '"history_id"' not in text
     assert 'endpointPath(endpointId,"/video/history")' not in text
     assert 'endpointPath(endpoint.endpointId,"/video/history")' not in text
     assert "LaunchedEffect(api.server,endpointId){reload()}" in text
@@ -104,7 +108,7 @@ def test_home_nonyoutube_regressions_restore_history_and_telegram_only() -> None
     assert 'var telegramSourcesExpanded by rememberSaveable{mutableStateOf(false)}' in text
     assert 'Mdi(if(telegramSourcesExpanded)"chevron-up" else "chevron-down",16.dp,Muted)' in text
     assert 'val preferred=historyPreferredSelection(endpoint.endpointId,item)' in text
-    assert 'runCatching{api.put(endpointPath(endpoint.endpointId,"/video/selection"),preferred)}' in text
+    assert 'confirmEndpointSelection(preferred)' in text
 
 
 def test_history_selection_payload_excludes_resume_position():
