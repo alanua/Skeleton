@@ -138,8 +138,9 @@ def test_runner_privileged_tool_delegates_exact_request_to_gateway_transport() -
 
 def test_awareness_tool_delegates_to_read_only_provider_and_returns_private_packet() -> None:
     provider = CapturingAwarenessProvider()
+    gateway = CapturingPrivilegedGateway()
     active = HetznerControlMcpDispatcher(
-        privileged_gateway=CapturingPrivilegedGateway(),
+        privileged_gateway=gateway,
         awareness_provider=provider,
     )
 
@@ -159,6 +160,7 @@ def test_awareness_tool_delegates_to_read_only_provider_and_returns_private_pack
     assert len(provider.requests) == 1
     assert provider.requests[0].project_id == "skeleton"
     assert provider.requests[0].requested_capabilities == ("memory",)
+    assert gateway.requests == []
 
 
 def test_awareness_provider_failure_is_public_safe() -> None:
@@ -245,6 +247,38 @@ def test_unsupported_tools_fail_closed_before_gateway() -> None:
 
     assert result["result"]["status"] == "blocked"
     assert result["result"]["reason"] == "UNSUPPORTED_TOOL"
+    assert gateway.requests == []
+
+
+def test_jsonrpc_unknown_tool_status_is_public_safe_and_does_not_call_gateway() -> None:
+    gateway = CapturingPrivilegedGateway()
+    active = HetznerControlMcpDispatcher(privileged_gateway=gateway)
+
+    response = handle_jsonrpc_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 44,
+            "method": "tools/call",
+            "params": {
+                "name": "runner_controller_privileged_gateway_submit_and_exec",
+                "arguments": {"request": {"argv": ["/bin/sh", "-c", "id"]}},
+            },
+        },
+        dispatcher=active,
+    )
+
+    assert response is not None
+    assert response["result"]["isError"] is True
+    payload = json.loads(response["result"]["content"][0]["text"])
+    assert payload == {
+        "schema": "skeleton.hetzner_control_mcp.v1",
+        "tool": "",
+        "result": {
+            "status": "blocked",
+            "reason": "UNSUPPORTED_TOOL",
+        },
+    }
+    assert "synthetic-private" not in json.dumps(response, sort_keys=True)
     assert gateway.requests == []
 
 
