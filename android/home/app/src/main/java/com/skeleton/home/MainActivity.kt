@@ -311,14 +311,90 @@ private fun endpointMutation(endpointId:String,vararg pairs:Pair<String,Any?>):J
 }
 private fun endpointPath(endpointId:String,suffix:String):String="/api/media/endpoints/${Uri.encode(endpointId)}$suffix"
 private fun mediaHistoryPath(endpointId:String):String="/api/media/history?endpoint=${Uri.encode(endpointId)}"
-private fun historyKey(item:JSONObject):String=item.cleanText("history_key",item.cleanText("content_key"))
+internal fun historyKey(item:JSONObject):String=item.cleanText("history_id",item.cleanText("history_key",item.cleanText("content_key")))
 private fun mediaHistoryDeletePath(endpointId:String,item:JSONObject):String="/api/media/history/${Uri.encode(historyKey(item))}?endpoint=${Uri.encode(endpointId)}"
-private fun canonicalHistoryItems(items:List<JSONObject>):List<JSONObject>{
+internal fun canonicalHistoryItems(items:List<JSONObject>):List<JSONObject>{
     val seen=mutableSetOf<String>()
     return items.filter{val k=historyKey(it);k.isBlank()||seen.add(k)}
 }
+internal fun mergedHistoryItems(savedLibrary:List<JSONObject>,watchedHistory:List<JSONObject>):List<JSONObject>{
+    val out=mutableListOf<JSONObject>()
+    val indexByKey=mutableMapOf<String,Int>()
+    fun add(item:JSONObject){
+        val key=historyKey(item)
+        if(key.isBlank()){
+            out.add(item)
+            return
+        }
+        val idx=indexByKey[key]
+        if(idx==null){
+            indexByKey[key]=out.size
+            out.add(item)
+            return
+        }
+        val current=out[idx]
+        val merged=JSONObject(current.toString())
+        item.keys().forEach { k ->
+            if(!merged.has(k)||merged.opt(k)==JSONObject.NULL||merged.cleanText(k).isBlank()) merged.put(k,item.opt(k))
+        }
+        out[idx]=merged
+    }
+    savedLibrary.forEach(::add)
+    watchedHistory.forEach(::add)
+    return out
+}
+internal fun historyItemsAfterRead(previous:List<JSONObject>,savedLibrary:List<JSONObject>?,watchedHistory:List<JSONObject>?,homeEdgeTv:Boolean):List<JSONObject>{
+    return if(homeEdgeTv){
+        if(savedLibrary==null&&watchedHistory==null)previous
+        else canonicalHistoryItems(mergedHistoryItems(savedLibrary.orEmpty(),watchedHistory.orEmpty()))
+    }else{
+        watchedHistory?.let(::canonicalHistoryItems) ?: previous
+    }
+}
 private fun videoSelectionIdentity(selection:JSONObject):String=
-    listOf("job_id","source_id","season","episode","voice").joinToString("|"){Uri.encode(selection.optString(it).trim())}
+    (listOf("job_id","source_id","season","episode","voice")+listOf("endpoint_id")).joinToString("|"){Uri.encode(selection.optString(it).trim())}
+internal fun videoSelectionIdentityForTest(selection:JSONObject):String=videoSelectionIdentity(selection)
+internal fun isCanonicalEndpointSelection(selection:JSONObject,endpointId:String):Boolean{
+    val selectedEndpoint=selection.cleanText("endpoint_id",endpointId)
+    return selectedEndpoint==endpointId&&selection.cleanText("job_id").isNotBlank()&&selection.cleanText("source_id").isNotBlank()
+}
+internal fun shouldApplyPolledVideoSelection(latest:JSONObject,endpointId:String,currentIdentity:String,pendingIdentity:String):Boolean{
+    val latestIdentity=videoSelectionIdentity(latest)
+    return pendingIdentity.isBlank()&&latestIdentity!=currentIdentity&&isCanonicalEndpointSelection(latest,endpointId)
+}
+internal fun savedHistoryOpenBody(endpointId:String,item:JSONObject,season:String?=null):JSONObject{
+    val out=JSONObject().put("endpoint_id",endpointId)
+    listOf("history_id","history_key","content_key","media_type","content_type","title","year").forEach { k ->
+        item.cleanText(k).takeIf { it.isNotBlank() }?.let { out.put(k,it) }
+    }
+    season?.takeIf { it.isNotBlank() }?.let { out.put("season",it) }
+    return out
+}
+internal fun endpointSelectionFromHistoryOpen(endpointId:String,item:JSONObject,result:JSONObject):JSONObject{
+    val preferred=result.optJSONObject("preferred") ?: result.optJSONObject("selection") ?: JSONObject()
+    val out=JSONObject(preferred.toString()).put("endpoint_id",endpointId)
+    result.cleanText("job_id",preferred.cleanText("job_id",item.cleanText("job_id",item.cleanText("last_job_id")))).takeIf{it.isNotBlank()}?.let{out.put("job_id",it)}
+    result.cleanText("source_id",preferred.cleanText("source_id",item.cleanText("source_id",item.cleanText("last_source_id")))).takeIf{it.isNotBlank()}?.let{out.put("source_id",it)}
+    preferred.cleanText("voice",item.cleanText("last_translation",item.cleanText("voice",item.cleanText("translation")))).takeIf{it.isNotBlank()}?.let{out.put("voice",it)}
+    preferred.cleanText("season",item.cleanText("season")).takeIf{it.isNotBlank()}?.let{out.put("season",it)}
+    preferred.cleanText("episode",item.cleanText("episode")).takeIf{it.isNotBlank()}?.let{out.put("episode",it)}
+    item.cleanText("title").takeIf{it.isNotBlank()}?.let{out.put("title",it)}
+    return out
+}
+internal fun sourceSeasons(sources:List<JSONObject>):Set<String> =
+    sources.filterNot(::isTrailerSource).mapNotNull{it.cleanText("season").takeIf(String::isNotBlank)}.toSet()
+internal fun loadedMetadataSeasons(job:JSONObject?):Set<String>{
+    val cat=job?.optJSONObject("catalog") ?: return emptySet()
+    return cat.optJSONArray("seasons")?.objects().orEmpty()
+        .filter{it.optBoolean("loaded")||it.cleanText("load_status")=="loaded"}
+        .mapNotNull{it.optInt("season_number",0).takeIf{n->n>0}?.toString()}
+        .toSet()
+}
+internal fun mergedReadyJobHasLoadedSeasonSources(job:JSONObject?):Boolean{
+    val sources=job?.optJSONArray("sources")?.objects().orEmpty()
+    val loaded=loadedMetadataSeasons(job)
+    return sources.isNotEmpty() && (loaded.isEmpty() || sourceSeasons(sources).containsAll(loaded))
+}
 private fun historyEpisodeLabel(item:JSONObject):String{
     val episodeKey=item.cleanText("episode_key").lowercase(Locale.ROOT)
     val m=Regex("""s(\d+)e(\d+)""").find(episodeKey)
@@ -541,7 +617,7 @@ private fun ambientComplement(bitmap:ImageBitmap?):Color{
 }
 
 private fun fmt(sec:Double):String { var t=sec.toInt().coerceAtLeast(0); val h=t/3600;t%=3600;val m=t/60;val s=t%60;return if(h>0)"$h:${m.toString().padStart(2,'0')}:${s.toString().padStart(2,'0')}" else "$m:${s.toString().padStart(2,'0')}" }
-private fun JSONArray.objects(): List<JSONObject> = (0 until length()).mapNotNull { optJSONObject(it) }
+internal fun JSONArray.objects(): List<JSONObject> = (0 until length()).mapNotNull { optJSONObject(it) }
 private fun JSONArray.strings(): List<String> = (0 until length()).mapNotNull { optString(it).trim().takeIf(String::isNotBlank) }
 private fun JSONObject.cleanText(key:String, fallback:String=""):String { val v=opt(key); if(v==null || v==JSONObject.NULL) return fallback; val out=v.toString().trim(); return if(out.isBlank() || out.equals("null",true)) fallback else out }
 private fun String.ellipsize(n:Int=90)=if(length<=n)this else take(n-1)+"…"
@@ -1898,7 +1974,7 @@ private fun VideoScreen(api:HomeApi,active:Boolean,selectionRevision:Int,endpoin
         }
     }
     var history by remember{mutableStateOf(emptyList<JSONObject>())}; var historyOpen by remember{mutableStateOf(false)}; var seasonOpen by remember{mutableStateOf(false)}; var detailOpen by remember{mutableStateOf(false)}; var loadingSeason by remember{mutableStateOf("")}
-    var selection by remember{mutableStateOf(JSONObject())}; var selectionIdentity by remember{mutableStateOf("")}; var job by remember{mutableStateOf<JSONObject?>(null)}; var sources by remember{mutableStateOf(emptyList<JSONObject>())}; var jobId by remember{mutableStateOf("")}; var loading by remember{mutableStateOf(false)}
+    var selection by remember{mutableStateOf(JSONObject())}; var selectionIdentity by remember{mutableStateOf("")}; var pendingSelectionIdentity by remember{mutableStateOf("")}; var selectedHistoryItem by remember{mutableStateOf<JSONObject?>(null)}; var job by remember{mutableStateOf<JSONObject?>(null)}; var sources by remember{mutableStateOf(emptyList<JSONObject>())}; var jobId by remember{mutableStateOf("")}; var loading by remember{mutableStateOf(false)}
     var season by remember{mutableStateOf("")}; var episode by remember{mutableStateOf("")}; var quality by remember{mutableStateOf("")}; var voice by remember{mutableStateOf("")}; var autoplay by remember{mutableStateOf(false)}; var monitor by remember{mutableStateOf(false)}; var monitorReady by remember{mutableStateOf(false)}; var external by remember{mutableStateOf(JSONObject())}; var message by remember{mutableStateOf("")}; var currentPlayer by remember{mutableStateOf(JSONObject())}; var audioSel by remember{mutableStateOf("")}; var subSel by remember{mutableStateOf("")}
     suspend fun loadJob(id:String){
         if(id.isBlank())return; loading=true
@@ -1907,7 +1983,7 @@ private fun VideoScreen(api:HomeApi,active:Boolean,selectionRevision:Int,endpoin
             val st=j.optString("status")
             if(st !in setOf("resolving","discovering","identified","cached_mapping_checked","searching_sources","candidates_found")){
                 job=j;sources=j.optJSONArray("sources")?.objects().orEmpty();loading=false
-                if(st=="no_verified_sources"&&sources.isEmpty())message="Перевірені джерела не знайдено" else if(message=="Перевірені джерела не знайдено")message=""
+                if(st=="no_verified_sources"&&sources.isEmpty())message="Перевірені джерела не знайдено" else if(sources.isEmpty()&&loadedMetadataSeasons(j).isNotEmpty())message="Сезон позначено доступним, але джерел у поточному завданні немає" else if(message=="Перевірені джерела не знайдено"||message=="Сезон позначено доступним, але джерел у поточному завданні немає")message=""
                 return
             }
             delay(500)
@@ -1921,16 +1997,66 @@ private fun VideoScreen(api:HomeApi,active:Boolean,selectionRevision:Int,endpoin
     }
     suspend fun applyEndpointSelection(latest:JSONObject,reloadWork:Boolean){
         selection=latest
-        selectionIdentity=videoSelectionIdentity(latest)
+        if(isCanonicalEndpointSelection(latest,endpoint.endpointId))selectionIdentity=videoSelectionIdentity(latest)
+        pendingSelectionIdentity=""
         jobId=latest.optString("job_id")
         if(reloadWork&&jobId.isNotBlank()){loadJob(jobId);loadMonitor()}
+    }
+    suspend fun loadHistoryForEndpoint(){
+        val watched=runCatching{api.get(mediaHistoryPath(endpoint.endpointId)).optJSONArray("items")?.objects().orEmpty()}
+        if(endpoint.adapterKind=="home_edge_tv"){
+            val saved=runCatching{api.get("/api/video/history/saved").optJSONArray("items")?.objects().orEmpty()}
+                .recoverCatching{api.get("/api/video/history/library").optJSONArray("items")?.objects().orEmpty()}
+                .recoverCatching{api.get("/api/media/library/saved").optJSONArray("items")?.objects().orEmpty()}
+            history=historyItemsAfterRead(history,saved.getOrNull(),watched.getOrNull(),true)
+        }else{
+            history=historyItemsAfterRead(history,null,watched.getOrNull(),false)
+        }
+    }
+    suspend fun confirmEndpointSelection(body:JSONObject):JSONObject{
+        pendingSelectionIdentity=videoSelectionIdentity(body)
+        return try{
+            val confirmed=api.put(endpointPath(endpoint.endpointId,"/video/selection"),body)
+            if(isCanonicalEndpointSelection(confirmed,endpoint.endpointId)){
+                applyEndpointSelection(confirmed,false)
+                confirmed
+            }else{
+                selection=JSONObject(body.toString())
+                jobId=body.cleanText("job_id")
+                body
+            }
+        }finally{
+            pendingSelectionIdentity=""
+        }
+    }
+    suspend fun openSavedHistoryItem(item:JSONObject,seasonHint:String?=null):Boolean{
+        val open=api.post("/api/video/history/open",savedHistoryOpenBody(endpoint.endpointId,item,seasonHint))
+        val preferred=endpointSelectionFromHistoryOpen(endpoint.endpointId,item,open)
+        val openedJobId=preferred.cleanText("job_id")
+        if(openedJobId.isBlank())throw IllegalStateException("Збережений твір не повернув завдання")
+        loadJob(openedJobId)
+        if(!mergedReadyJobHasLoadedSeasonSources(job))throw IllegalStateException("Збережений твір відкрито без підтверджених джерел")
+        val body=JSONObject(preferred.toString()).put("endpoint_id",endpoint.endpointId).put("locked",true)
+        if(body.cleanText("source_id").isBlank()){
+            val preferredSeason=body.cleanText("season",seasonHint.orEmpty())
+            val fallback=sources.firstOrNull{!isTrailerSource(it)&&(preferredSeason.isBlank()||it.cleanText("season")==preferredSeason)} ?: sources.firstOrNull{!isTrailerSource(it)}
+            fallback?.let{
+                body.put("source_id",it.cleanText("source_id"))
+                it.cleanText("season").takeIf(String::isNotBlank)?.let{v->body.put("season",v)}
+                it.cleanText("episode").takeIf(String::isNotBlank)?.let{v->body.put("episode",v)}
+                body.put("voice",sourceVoice(it))
+            }
+        }
+        confirmEndpointSelection(body)
+        selectedHistoryItem=item
+        return true
     }
     suspend fun loadAll():Boolean{
         if(api.server==null)return false
         // Fast path first: render the selected work immediately. History is the expensive call.
         val sel=runCatching{endpointVideoSelection(api,endpoint.endpointId)};sel.onSuccess{applyEndpointSelection(it,true)}
         runCatching{api.get(endpointPath(endpoint.endpointId,"/player"))}.onSuccess{currentPlayer=it}
-        val h=runCatching{api.get(mediaHistoryPath(endpoint.endpointId))};h.onSuccess{history=canonicalHistoryItems(it.optJSONArray("items")?.objects().orEmpty())}
+        val h=runCatching{loadHistoryForEndpoint()}
         runCatching{api.get("/api/video/autoplay")}.onSuccess{autoplay=it.optBoolean("enabled")}
         return h.isSuccess&&sel.isSuccess
     }
@@ -1944,7 +2070,9 @@ private fun VideoScreen(api:HomeApi,active:Boolean,selectionRevision:Int,endpoin
             delay(2500)
             runCatching{endpointVideoSelection(api,endpoint.endpointId)}.onSuccess{latest->
                 val latestIdentity=videoSelectionIdentity(latest)
-                if(latestIdentity!=selectionIdentity)applyEndpointSelection(latest,true)
+                if(shouldApplyPolledVideoSelection(latest,endpoint.endpointId,selectionIdentity,pendingSelectionIdentity)){
+                    if(latestIdentity!=selectionIdentity)applyEndpointSelection(latest,true)
+                }
             }
         }
     }
@@ -1960,7 +2088,7 @@ private fun VideoScreen(api:HomeApi,active:Boolean,selectionRevision:Int,endpoin
         if(jobId.isNotBlank())external=runCatching{api.get("/api/video/external-links?job_id=${Uri.encode(jobId)}")}.getOrElse{JSONObject()}
     }
     val seasonItems=if(isSeries)cat.optJSONArray("seasons")?.objects().orEmpty() else emptyList()
-    val loadedSeasons=if(isSeries)(sourceValues(sources,"season",excludeTrailers=true)+seasonItems.filter{it.optBoolean("loaded")||it.optString("load_status")=="loaded"}.map{it.optInt("season_number").toString()}).filter{it.isNotBlank()&&it!="0"}.distinct().sortedBy{it.toIntOrNull()?:9999} else emptyList()
+    val loadedSeasons=if(isSeries)sourceValues(sources,"season",excludeTrailers=true).filter{it.isNotBlank()&&it!="0"}.distinct().sortedBy{it.toIntOrNull()?:9999} else emptyList()
     val tmdbSeasons=seasonItems.filter{it.optBoolean("released",true)}.mapNotNull{it.optInt("season_number",0).takeIf{n->n>0}?.toString()}
     val seasons=(loadedSeasons+tmdbSeasons).distinct().sortedBy{it.toIntOrNull()?:9999}
     if(isSeries&&season.isBlank()&&loadedSeasons.isNotEmpty())season=loadedSeasons.first()
@@ -2073,15 +2201,19 @@ private fun VideoScreen(api:HomeApi,active:Boolean,selectionRevision:Int,endpoin
     if(historyOpen)HistoryPickerDialog(api,history,{item->
         historyOpen=false
         scope.launch{
-            val preferred=historyPreferredSelection(endpoint.endpointId,item)
-            runCatching{api.put(endpointPath(endpoint.endpointId,"/video/selection"),preferred)}
-                .onSuccess{
-                    selection=preferred
+            runCatching{
+                if(endpoint.adapterKind=="home_edge_tv"){
+                    openSavedHistoryItem(item)
+                }else{
+                    val preferred=historyPreferredSelection(endpoint.endpointId,item)
+                    confirmEndpointSelection(preferred)
                     jobId=selection.optString("job_id")
                     loadJob(jobId)
-                    selectionIdentity=videoSelectionIdentity(selection)
                     loadMonitor()
+                    selectedHistoryItem=item
+                    true
                 }
+            }
                 .onFailure{message=it.message?:"Не вдалося вибрати запис історії"}
         }
     },{historyOpen=false})
@@ -2092,18 +2224,29 @@ private fun VideoScreen(api:HomeApi,active:Boolean,selectionRevision:Int,endpoin
             scope.launch{
                 loading=true;message="Шукаю сезон $snum…"
                 try{
-                    val r=withTimeoutOrNull(45000){api.post("/api/video/season/load",JSONObject().put("job_id",jobId).put("season",snum))}
+                    val selectedSeason=snum
+                    val r=withTimeoutOrNull(45000){
+                        if(endpoint.adapterKind=="home_edge_tv"&&selectedHistoryItem!=null){
+                            openSavedHistoryItem(selectedHistoryItem!!,selectedSeason)
+                            JSONObject().put("status","loaded").put("job_id",jobId)
+                        }else{
+                            api.post("/api/video/season/load",JSONObject().put("job_id",jobId).put("season",selectedSeason))
+                        }
+                    }
                     if(r==null){
-                        message="Пошук сезону $snum триває надто довго. Спробуйте ще раз"
+                        message="Пошук сезону $selectedSeason триває надто довго. Спробуйте ще раз"
                     }else{
                         val status=r.optString("status")
                         if(status=="loaded"||status=="already_loaded"){
-                            val nid=r.optString("job_id",jobId);jobId=nid;selection.put("job_id",nid)
-                            withTimeoutOrNull(15000){loadJob(nid)}
-                            message="Сезон $snum додано"
+                            val nid=r.optString("job_id",jobId)
+                            if(season==selectedSeason){
+                                jobId=nid;selection.put("job_id",nid)
+                                withTimeoutOrNull(15000){loadJob(nid)}
+                                message=if(sources.any{it.cleanText("season")==selectedSeason})"Сезон $selectedSeason додано" else "Сезон $selectedSeason недоступний у поточному завданні"
+                            }
                         }else{
                             withTimeoutOrNull(15000){loadJob(jobId)}
-                            message="Сезон $snum поки не знайдено"
+                            message="Сезон $selectedSeason поки не знайдено"
                         }
                     }
                 }catch(t:Throwable){
