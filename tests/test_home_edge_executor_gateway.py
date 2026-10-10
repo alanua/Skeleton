@@ -101,7 +101,8 @@ def test_gateway_uses_injected_transport_without_github_or_runner_polling() -> N
     assert receipt.stdout.strip() == "transport"
 
 
-def test_read_only_lane_rejects_synthetic_privileged_device_mutation_before_transport() -> None:
+def test_root_read_only_requires_approval_before_any_device_command_reaches_transport() -> None:
+    # Only tests root identity approval. Desktop-user read_only is not a no-write sandbox.
     class FailingTransport:
         adapter_name = "must_not_run"
 
@@ -125,7 +126,8 @@ def test_read_only_lane_rejects_synthetic_privileged_device_mutation_before_tran
         execute_home_edge_request(request, transport=FailingTransport())
 
 
-def test_read_only_lane_rejects_synthetic_private_file_write_before_transport() -> None:
+def test_root_read_only_requires_approval_before_any_private_file_command_reaches_transport() -> None:
+    # The command body is never inspected here; it is rejected by root-approval gating.
     class FailingTransport:
         adapter_name = "must_not_run"
 
