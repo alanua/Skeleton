@@ -94,6 +94,7 @@ class NativeVideoHistoryTest {
 
         assertEquals(previous, historyItemsAfterRead(previous, null, null, homeEdgeTv = true))
         assertEquals(previous, historyItemsAfterRead(previous, saved, null, homeEdgeTv = false))
+        assertEquals(listOf("Babylon Berlin", "Perry Mason"), historyItemsAfterRead(previous, null, watched, homeEdgeTv = true).map { it.getString("title") })
 
         val tvMerged = historyItemsAfterRead(previous, saved, watched, homeEdgeTv = true)
         val samsung = historyItemsAfterRead(previous, saved, watched, homeEdgeTv = false)
@@ -109,8 +110,19 @@ class NativeVideoHistoryTest {
         val saved = listOf(history("bb", "Babylon Berlin"), history("future", "Future Saved Work"))
 
         assertEquals("/api/video/history", savedVideoHistoryPath())
-        assertEquals(listOf("Perry Mason"), historyItemsAfterRead(previous, null, watched, homeEdgeTv = true).map { it.getString("title") })
+        assertEquals(listOf("Babylon Berlin", "Perry Mason"), historyItemsAfterRead(previous, null, watched, homeEdgeTv = true).map { it.getString("title") })
         assertEquals(listOf("Babylon Berlin", "Future Saved Work"), historyItemsAfterRead(previous, saved, null, homeEdgeTv = true).map { it.getString("title") })
+    }
+
+    @Test
+    fun savedHistoryOpenCanonicalizesSourceAgainstMergedAllSeasonJob() {
+        val sources = listOf(source("s1e1", "1", "1"), source("s2e1", "2", "1"), source("trailer", "", ""))
+        sources[2].put("source_type", "trailer")
+        val stale = JSONObject().put("source_id", "old-single-season").put("season", "2").put("episode", "1").put("voice", "UA")
+        val exact = JSONObject().put("source_id", "s1e1").put("season", "1").put("episode", "1")
+
+        assertEquals("s2e1", canonicalSourceForSelection(stale, sources)?.getString("source_id"))
+        assertEquals("s1e1", canonicalSourceForSelection(exact, sources)?.getString("source_id"))
     }
 
     private fun history(id:String, title:String, poster:String = "", overview:String = "", season:String = "", episode:String = ""):JSONObject =

@@ -347,7 +347,7 @@ internal fun mergedHistoryItems(savedLibrary:List<JSONObject>,watchedHistory:Lis
 internal fun historyItemsAfterRead(previous:List<JSONObject>,savedLibrary:List<JSONObject>?,watchedHistory:List<JSONObject>?,homeEdgeTv:Boolean):List<JSONObject>{
     return if(homeEdgeTv){
         if(savedLibrary==null&&watchedHistory==null)previous
-        else canonicalHistoryItems(mergedHistoryItems(savedLibrary.orEmpty(),watchedHistory.orEmpty()))
+        else canonicalHistoryItems(mergedHistoryItems(savedLibrary ?: previous,watchedHistory ?: previous))
     }else{
         watchedHistory?.let(::canonicalHistoryItems) ?: previous
     }
@@ -381,6 +381,19 @@ internal fun endpointSelectionFromHistoryOpen(endpointId:String,item:JSONObject,
     preferred.cleanText("episode",item.cleanText("episode")).takeIf{it.isNotBlank()}?.let{out.put("episode",it)}
     item.cleanText("title").takeIf{it.isNotBlank()}?.let{out.put("title",it)}
     return out
+}
+internal fun canonicalSourceForSelection(selection:JSONObject,sources:List<JSONObject>):JSONObject?{
+    val playable=sources.filterNot(::isTrailerSource)
+    val sourceId=selection.cleanText("source_id")
+    if(sourceId.isNotBlank())playable.firstOrNull{it.cleanText("source_id")==sourceId}?.let{return it}
+    val season=selection.cleanText("season")
+    val episode=selection.cleanText("episode")
+    val voice=selection.cleanText("voice")
+    return playable.firstOrNull{
+        (season.isBlank()||it.cleanText("season")==season)&&
+            (episode.isBlank()||it.cleanText("episode")==episode)&&
+            (voice.isBlank()||sourceVoice(it)==voice)
+    } ?: playable.firstOrNull{season.isBlank()||it.cleanText("season")==season} ?: playable.firstOrNull()
 }
 internal fun sourceSeasons(sources:List<JSONObject>):Set<String> =
     sources.filterNot(::isTrailerSource).mapNotNull{it.cleanText("season").takeIf(String::isNotBlank)}.toSet()
@@ -1761,7 +1774,26 @@ private fun Header(title:String, connected:Boolean, endpointId:String, endpoints
 }
 @Composable private fun RoundControl(icon:String,primary:Boolean=false,onClick:()->Unit){Box(Modifier.size(48.dp).clip(CircleShape).background(if(primary)Accent else Color.Transparent).clickable(onClick=onClick),contentAlignment=Alignment.Center){Mdi(icon,if(icon=="volume-off")26.dp else 25.dp,Text)}}
 
-@Composable private fun VolumeRow(volume:Int,onVolume:(Int)->Unit,onMute:()->Unit){var v by remember(volume){mutableFloatStateOf(volume.toFloat())};Row(Modifier.fillMaxWidth().height(49.dp),verticalAlignment=Alignment.Top){Box(Modifier.size(40.dp).offset(y=9.dp).clickable{onVolume((volume-5).coerceAtLeast(0))},contentAlignment=Alignment.Center){Mdi("volume-high",19.dp,Text.copy(alpha=.72f))};BoxWithConstraints(Modifier.weight(1f).height(49.dp)){val lw=36.dp;val x=(maxWidth*(v.coerceIn(0f,100f)/100f)-lw/2).coerceIn(0.dp,(maxWidth-lw).coerceAtLeast(0.dp));Text("${v.toInt()}%",fontSize=11.sp,lineHeight=11.sp,color=Color(0xFFEEF1F3),textAlign=androidx.compose.ui.text.style.TextAlign.Center,modifier=Modifier.offset(x=x).width(lw));SkeletonRange(v,{v=it},{onVolume((v/5f).toInt()*5)},0f,100f,Modifier.fillMaxWidth().offset(y=18.dp))};Box(Modifier.size(40.dp).offset(y=9.dp).clickable{onVolume((volume+5).coerceAtMost(100))},contentAlignment=Alignment.Center){Mdi("volume-high",27.dp,Text)}}}
+@Composable private fun VolumeRow(volume:Int,onVolume:(Int)->Unit,onMute:()->Unit){
+    var v by remember(volume){mutableFloatStateOf(volume.toFloat())}
+    val density=LocalDensity.current
+    Row(Modifier.fillMaxWidth().height(54.dp),verticalAlignment=Alignment.Top){
+        Box(Modifier.size(40.dp).offset(y=12.dp).clickable{onVolume((volume-5).coerceAtLeast(0))},contentAlignment=Alignment.Center){Mdi("volume-high",19.dp,Text.copy(alpha=.72f))}
+        BoxWithConstraints(Modifier.weight(1f).height(54.dp)){
+            var labelWidthPx by remember{mutableIntStateOf(0)}
+            var labelHeightPx by remember{mutableIntStateOf(0)}
+            val trackWidthPx=constraints.maxWidth
+            val sliderTopPx=with(density){20.dp.roundToPx()}
+            val measuredGapPx=with(density){3.dp.roundToPx()}
+            val rawThumbCenterPx=(trackWidthPx*(v.coerceIn(0f,100f)/100f)).toInt()
+            val labelX=(rawThumbCenterPx-labelWidthPx/2).coerceIn(0,(trackWidthPx-labelWidthPx).coerceAtLeast(0))
+            val labelY=(sliderTopPx-measuredGapPx-labelHeightPx).coerceAtLeast(0)
+            Text("${v.toInt()}%",fontSize=11.sp,lineHeight=11.sp,color=Color(0xFFEEF1F3),textAlign=TextAlign.Center,modifier=Modifier.onSizeChanged{labelWidthPx=it.width;labelHeightPx=it.height}.offset{IntOffset(labelX,labelY)}.width(36.dp))
+            SkeletonRange(v,{v=it},{onVolume((v/5f).toInt()*5)},0f,100f,Modifier.fillMaxWidth().offset(y=20.dp))
+        }
+        Box(Modifier.size(40.dp).offset(y=12.dp).clickable{onVolume((volume+5).coerceAtMost(100))},contentAlignment=Alignment.Center){Mdi("volume-high",27.dp,Text)}
+    }
+}
 
 
 @Composable private fun YoutubePanel(onRemote:(String)->Unit,onMute:()->Unit,muted:Boolean,controls:JSONObject){
@@ -2036,16 +2068,14 @@ private fun VideoScreen(api:HomeApi,active:Boolean,selectionRevision:Int,endpoin
         loadJob(openedJobId)
         if(!mergedReadyJobHasLoadedSeasonSources(job))throw IllegalStateException("Збережений твір відкрито без підтверджених джерел")
         val body=JSONObject(preferred.toString()).put("endpoint_id",endpoint.endpointId).put("locked",true)
-        if(body.cleanText("source_id").isBlank()){
-            val preferredSeason=body.cleanText("season",seasonHint.orEmpty())
-            val fallback=sources.firstOrNull{!isTrailerSource(it)&&(preferredSeason.isBlank()||it.cleanText("season")==preferredSeason)} ?: sources.firstOrNull{!isTrailerSource(it)}
-            fallback?.let{
-                body.put("source_id",it.cleanText("source_id"))
-                it.cleanText("season").takeIf(String::isNotBlank)?.let{v->body.put("season",v)}
-                it.cleanText("episode").takeIf(String::isNotBlank)?.let{v->body.put("episode",v)}
-                body.put("voice",sourceVoice(it))
-            }
+        val canonicalSource=canonicalSourceForSelection(body,sources)
+        canonicalSource?.let{
+            body.put("source_id",it.cleanText("source_id"))
+            it.cleanText("season").takeIf(String::isNotBlank)?.let{v->body.put("season",v)}
+            it.cleanText("episode").takeIf(String::isNotBlank)?.let{v->body.put("episode",v)}
+            sourceVoice(it).takeIf(String::isNotBlank)?.let{v->body.put("voice",v)}
         }
+        if(body.cleanText("source_id").isBlank())throw IllegalStateException("Збережений твір відкрито без підтвердженого джерела")
         confirmEndpointSelection(body)
         selectedHistoryItem=item
         return true

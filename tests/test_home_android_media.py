@@ -82,6 +82,7 @@ def test_home_video_selection_and_history_are_canonical_endpoint_scoped() -> Non
     assert 'private fun mediaHistoryDeletePath(endpointId:String,item:JSONObject):String="/api/media/history/${Uri.encode(historyKey(item))}?endpoint=${Uri.encode(endpointId)}"' in text
     assert "canonicalHistoryItems(api.get(mediaHistoryPath(endpointId)).optJSONArray" in text
     assert "historyItemsAfterRead(history,saved.getOrNull(),watched.getOrNull(),true)" in text
+    assert "canonicalHistoryItems(mergedHistoryItems(savedLibrary ?: previous,watchedHistory ?: previous))" in text
     assert "historyEpisodeLabel(item)" in text
     assert 'api.get(savedVideoHistoryPath())' in text
     assert 'api.get(mediaHistoryPath(endpointId))' in text
@@ -90,6 +91,8 @@ def test_home_video_selection_and_history_are_canonical_endpoint_scoped() -> Non
     assert 'val preferred=historyPreferredSelection(endpoint.endpointId,item)' in text
     assert 'confirmEndpointSelection(preferred)' in text
     assert 'selection=JSONObject(body.toString())' in text
+    assert 'val canonicalSource=canonicalSourceForSelection(body,sources)' in text
+    assert 'if(body.cleanText("source_id").isBlank())throw IllegalStateException("Збережений твір відкрито без підтвердженого джерела")' in text
     assert 'onFailure{message=it.message?:"Не вдалося вибрати запис історії"}' in text
     assert '"/api/video/history/saved"' not in text
     assert '"/api/video/history/library"' not in text
@@ -101,6 +104,20 @@ def test_home_video_selection_and_history_are_canonical_endpoint_scoped() -> Non
     assert 'endpointPath(endpointId,"/video/history")' not in text
     assert 'endpointPath(endpoint.endpointId,"/video/history")' not in text
     assert "LaunchedEffect(api.server,endpointId){reload()}" in text
+
+
+def test_home_media_volume_label_uses_measured_gap_above_slider() -> None:
+    text = _source()
+    block = text.split("@Composable private fun VolumeRow", 1)[1].split("@Composable private fun YoutubePanel", 1)[0]
+
+    assert "Modifier.fillMaxWidth().height(54.dp)" in block
+    assert "var labelWidthPx by remember{mutableIntStateOf(0)}" in block
+    assert "var labelHeightPx by remember{mutableIntStateOf(0)}" in block
+    assert "val sliderTopPx=with(density){20.dp.roundToPx()}" in block
+    assert "val measuredGapPx=with(density){3.dp.roundToPx()}" in block
+    assert "val labelY=(sliderTopPx-measuredGapPx-labelHeightPx).coerceAtLeast(0)" in block
+    assert ".offset{IntOffset(labelX,labelY)}.width(36.dp)" in block
+    assert "SkeletonRange(v,{v=it},{onVolume((v/5f).toInt()*5)},0f,100f,Modifier.fillMaxWidth().offset(y=20.dp))" in block
 
 
 def test_home_nonyoutube_regressions_restore_history_and_telegram_only() -> None:
