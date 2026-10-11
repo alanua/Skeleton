@@ -270,6 +270,135 @@ def test_future_observed_at_fails_closed_as_stale() -> None:
     assert available["effective_status"] != "LIVE"
 
 
+def test_chat_scoped_registered_tool_evidence_does_not_cross_capability_boundary() -> None:
+    source = {
+        "version": "1.0.0",
+        "capabilities": {
+            "chat_alpha_tool": {
+                "status": "available",
+                "module": "alpha.py",
+                "entry": "alpha.run",
+                "tested": True,
+            },
+            "chat_beta_tool": {
+                "status": "available",
+                "module": "beta.py",
+                "entry": "beta.run",
+                "tested": True,
+            },
+        },
+    }
+
+    truth = reconcile_capability_runtime_truth(
+        source,
+        [
+            evidence(
+                "chat_alpha_tool",
+                runtime_bound=True,
+                source_runtime_parity=True,
+                usable_interfaces=("registered_tool:chat-alpha/alpha.run",),
+                source="synthetic_chat_alpha",
+                evidence_ref="chat_alpha_registered_tool_identity",
+                evidence_kind="registered_tool",
+            )
+        ],
+        now=NOW,
+    )
+    capabilities = by_id(truth)
+
+    assert capabilities["chat_alpha_tool"]["effective_status"] == "LIVE"
+    assert capabilities["chat_alpha_tool"]["usable_interfaces"] == [
+        "registered_tool:chat-alpha/alpha.run"
+    ]
+    assert capabilities["chat_alpha_tool"]["evidence_kinds"] == ["registered_tool"]
+    assert capabilities["chat_beta_tool"]["effective_status"] == "CONTRACT_ONLY"
+    assert capabilities["chat_beta_tool"]["freshness"] == "UNKNOWN"
+    assert capabilities["chat_beta_tool"]["runtime_evidence"] == []
+    assert truth["summary"]["live_count"] == 1
+    assert truth["summary"]["contract_only_count"] == 1
+
+
+def test_stale_main_runtime_parity_state_fails_closed_without_active_claims() -> None:
+    source = {
+        "version": "1.0.0",
+        "capabilities": {
+            "registered_runtime_tool": {
+                "status": "available",
+                "module": "tool.py",
+                "entry": "tool.run",
+                "tested": True,
+            },
+        },
+    }
+
+    truth = reconcile_capability_runtime_truth(
+        source,
+        [
+            evidence(
+                "registered_runtime_tool",
+                runtime_bound=True,
+                source_runtime_parity=False,
+                usable_interfaces=("registered_tool:main/tool.run",),
+                source="synthetic_main_runtime",
+                evidence_ref="main_runtime_state_stale",
+                evidence_kind="registered_tool",
+            )
+        ],
+        now=NOW,
+    )
+    registered_tool = by_id(truth)["registered_runtime_tool"]
+
+    assert registered_tool["freshness"] == "FRESH"
+    assert registered_tool["source_runtime_parity"] is False
+    assert registered_tool["effective_status"] == "PARTIAL"
+    assert "SOURCE_RUNTIME_PARITY_INCOMPLETE" in registered_tool["reason_codes"]
+    assert "active" not in registered_tool
+    assert "installed" not in registered_tool
+
+
+def test_revoked_or_unavailable_registered_tool_blocks_even_when_registry_available() -> None:
+    source = {
+        "version": "1.0.0",
+        "capabilities": {
+            "revoked_registered_tool": {
+                "status": "available",
+                "module": "revoked.py",
+                "entry": "revoked.run",
+                "tested": True,
+            },
+        },
+    }
+
+    truth = reconcile_capability_runtime_truth(
+        source,
+        [
+            evidence(
+                "revoked_registered_tool",
+                "unavailable",
+                runtime_bound=True,
+                source_runtime_parity=True,
+                usable_interfaces=("registered_tool:main/revoked.run",),
+                source="synthetic_revocation_record",
+                evidence_ref="registered_tool_revoked",
+                evidence_kind="registered_tool",
+            )
+        ],
+        now=NOW,
+    )
+    revoked = by_id(truth)["revoked_registered_tool"]
+
+    assert revoked["declared_status"] == "available"
+    assert revoked["effective_status"] == "BLOCKED"
+    assert revoked["drift"] is False
+    assert revoked["reason_codes"] == [
+        "FRESH_RUNTIME_EVIDENCE",
+        "REGISTRY_AVAILABLE",
+        "RUNTIME_UNAVAILABLE",
+    ]
+    assert truth["summary"]["blocked_count"] == 1
+    assert truth["summary"]["live_count"] == 0
+
+
 def test_malformed_and_unknown_evidence_raise_before_output() -> None:
     with pytest.raises(TypeError, match="RuntimeCapabilityEvidence"):
         reconcile_capability_runtime_truth(

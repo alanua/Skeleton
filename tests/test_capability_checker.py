@@ -64,3 +64,44 @@ def test_capability_checker_registry_available_without_evidence_is_not_live() ->
 
     assert boot_loader["declared_status"] == "available"
     assert boot_loader["effective_status"] != "LIVE"
+
+
+def test_capability_checker_source_implemented_tool_needs_same_chat_fresh_evidence() -> None:
+    checker = CapabilityChecker(REGISTRY_PATH)
+    evidence = RuntimeCapabilityEvidence(
+        capability_id="capability_runtime_truth",
+        runtime_state="available",
+        source="synthetic_chat_alpha",
+        evidence_ref="registered_tool:chat-alpha/reconcile_capability_runtime_truth",
+        observed_at="2026-10-01T00:00:00Z",
+        runtime_bound=True,
+        source_runtime_parity=True,
+        usable_interfaces=(
+            "registered_tool:chat-alpha/reconcile_capability_runtime_truth",
+        ),
+        evidence_kind="registered_tool",
+    )
+
+    chat_alpha_truth = checker.runtime_truth([evidence], now=NOW)
+    chat_beta_truth = checker.runtime_truth(now=NOW)
+    chat_alpha = next(
+        item
+        for item in chat_alpha_truth["capabilities"]
+        if item["capability_id"] == "capability_runtime_truth"
+    )
+    chat_beta = next(
+        item
+        for item in chat_beta_truth["capabilities"]
+        if item["capability_id"] == "capability_runtime_truth"
+    )
+
+    assert chat_alpha["declared_status"] == "source_implemented"
+    assert chat_alpha["effective_status"] == "LIVE"
+    assert chat_alpha["usable_interfaces"] == [
+        "registered_tool:chat-alpha/reconcile_capability_runtime_truth"
+    ]
+    assert chat_alpha["authoritative"] is False
+    assert chat_beta["effective_status"] == "CONTRACT_ONLY"
+    assert chat_beta["runtime_evidence"] == []
+    assert "active" not in chat_beta
+    assert "installed" not in chat_beta
