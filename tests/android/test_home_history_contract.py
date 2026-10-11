@@ -38,6 +38,8 @@ def test_history_picker_distinguishes_loading_error_empty_and_ready_states() -> 
     assert "var historyHydrated by remember(endpoint.endpointId){mutableStateOf(historyHydratedByEndpoint[endpoint.endpointId] == true)}" in text
     assert "var historyLoading by remember(endpoint.endpointId){mutableStateOf(false)}" in text
     assert "var historyError by remember(endpoint.endpointId){mutableStateOf(historyErrorByEndpoint[endpoint.endpointId].orEmpty())}" in text
+    assert "var historyOpen by remember(endpoint.endpointId){mutableStateOf(false)}" in text
+    assert "var selectedHistoryItem by remember(endpoint.endpointId){mutableStateOf<JSONObject?>(null)}" in text
     assert "historyLoading&&!historyHydrated->\"Читаю історію…\"" in text
     assert "historyError.isNotBlank()&&history.isEmpty()->\"Не вдалося завантажити · торкніться ще раз\"" in text
     assert "history.isEmpty()&&historyHydrated->\"Історія порожня\"" in text
