@@ -12,11 +12,11 @@ def _source() -> str:
     return MAIN_ACTIVITY.read_text(encoding="utf-8")
 
 
-def test_home_release_metadata_is_1_4_37_153() -> None:
+def test_home_release_metadata_is_1_4_38_154() -> None:
     text = BUILD_GRADLE.read_text(encoding="utf-8")
 
-    assert "versionCode = 153" in text
-    assert 'versionName = "1.4.37"' in text
+    assert "versionCode = 154" in text
+    assert 'versionName = "1.4.38"' in text
 
 
 def test_home_media_volume_and_mute_are_endpoint_isolated() -> None:
@@ -81,9 +81,9 @@ def test_home_video_selection_and_history_are_canonical_endpoint_scoped() -> Non
     assert 'internal fun historyKey(item:JSONObject):String=item.cleanText("history_id",item.cleanText("history_key",item.cleanText("content_key")))' in text
     assert 'private fun mediaHistoryDeletePath(endpointId:String,item:JSONObject):String="/api/media/history/${Uri.encode(historyKey(item))}?endpoint=${Uri.encode(endpointId)}"' in text
     assert "canonicalHistoryItems(api.get(mediaHistoryPath(endpointId)).optJSONArray" in text
-    assert "historyItemsAfterRead(history,saved.getOrNull(),watched.getOrNull(),true,savedHistory)" in text
+    assert "historyItemsAfterRead(history,saved?.getOrNull(),watched.getOrNull(),true,savedHistory)" in text
     assert "watchedHistoryForSavedLibrary(savedBase,it)" in text
-    assert "saved.getOrNull()?.let{savedHistory=canonicalHistoryItems(it)}" in text
+    assert "saved?.getOrNull()?.let{savedHistory=canonicalHistoryItems(it)}" in text
     assert "historyEpisodeLabel(item)" in text
     assert 'api.get(savedVideoHistoryPath())' in text
     assert 'api.get(mediaHistoryPath(endpointId))' in text
