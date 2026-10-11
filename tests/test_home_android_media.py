@@ -81,8 +81,9 @@ def test_home_video_selection_and_history_are_canonical_endpoint_scoped() -> Non
     assert 'internal fun historyKey(item:JSONObject):String=item.cleanText("history_id",item.cleanText("history_key",item.cleanText("content_key")))' in text
     assert 'private fun mediaHistoryDeletePath(endpointId:String,item:JSONObject):String="/api/media/history/${Uri.encode(historyKey(item))}?endpoint=${Uri.encode(endpointId)}"' in text
     assert "canonicalHistoryItems(api.get(mediaHistoryPath(endpointId)).optJSONArray" in text
-    assert "historyItemsAfterRead(history,saved.getOrNull(),watched.getOrNull(),true)" in text
-    assert "canonicalHistoryItems(mergedHistoryItems(savedLibrary ?: previous,watchedHistory ?: previous))" in text
+    assert "historyItemsAfterRead(history,saved.getOrNull(),watched.getOrNull(),true,savedHistory)" in text
+    assert "watchedHistoryForSavedLibrary(savedBase,it)" in text
+    assert "saved.getOrNull()?.let{savedHistory=canonicalHistoryItems(it)}" in text
     assert "historyEpisodeLabel(item)" in text
     assert 'api.get(savedVideoHistoryPath())' in text
     assert 'api.get(mediaHistoryPath(endpointId))' in text

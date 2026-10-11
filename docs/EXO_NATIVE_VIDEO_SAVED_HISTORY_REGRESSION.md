@@ -10,6 +10,8 @@ This regression covers the native Kotlin Compose video picker after the saved-li
 - Samsung keeps endpoint-scoped watched-history semantics and does not receive TV saved-library selection.
 - Polling only accepts canonical endpoint selections with matching endpoint, job, and source IDs, so a stale single-season job cannot overwrite a newer confirmed user selection.
 - Failed saved-library or watched-history reads preserve the previously visible picker entries instead of treating the failed side as an empty deletion result.
+- A successful saved-library read is authoritative for TV saved works: stale watched history can enrich matching saved entries, but cannot reintroduce a work that is no longer present in the canonical saved list.
+- If the saved-library read fails transiently, the picker keeps the last complete saved list and only applies watched-history enrichment for entries still present in that saved list.
 - Saved-history opens canonicalize the selected source against the loaded merged job, so stale single-season source IDs cannot bypass the all-season source set.
 - Metadata-only loaded seasons no longer produce a false loaded state when the current job has no sources. The UI can retry through merged history open for TV saved works or reports the unavailable state honestly.
 - Failed saved-library reads do not clear the existing history list; successful endpoint history remains a fallback.
@@ -26,3 +28,4 @@ This regression covers the native Kotlin Compose video picker after the saved-li
 - Samsung and TV canonical selection identities stay isolated.
 - Saved-history source selection replaces stale source IDs with a non-trailer source from the loaded merged job.
 - Failed network reads preserve existing native history, and Samsung continues to use watched-history scope instead of the TV saved library.
+- Successful saved reads exclude deleted works even when watched history is stale, while transient saved-read failures preserve the last complete saved list.

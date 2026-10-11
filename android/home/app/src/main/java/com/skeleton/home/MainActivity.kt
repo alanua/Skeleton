@@ -344,10 +344,22 @@ internal fun mergedHistoryItems(savedLibrary:List<JSONObject>,watchedHistory:Lis
     watchedHistory.forEach(::add)
     return out
 }
-internal fun historyItemsAfterRead(previous:List<JSONObject>,savedLibrary:List<JSONObject>?,watchedHistory:List<JSONObject>?,homeEdgeTv:Boolean):List<JSONObject>{
+private fun watchedHistoryForSavedLibrary(savedLibrary:List<JSONObject>,watchedHistory:List<JSONObject>):List<JSONObject>{
+    val savedKeys=savedLibrary.mapNotNull{historyKey(it).takeIf(String::isNotBlank)}.toSet()
+    if(savedKeys.isEmpty())return emptyList()
+    return watchedHistory.filter{historyKey(it) in savedKeys}
+}
+internal fun historyItemsAfterRead(previous:List<JSONObject>,savedLibrary:List<JSONObject>?,watchedHistory:List<JSONObject>?,homeEdgeTv:Boolean,previousSavedLibrary:List<JSONObject>? = null):List<JSONObject>{
     return if(homeEdgeTv){
+        val canonicalSaved=savedLibrary?.let(::canonicalHistoryItems)
+        val savedBase=canonicalSaved ?: previousSavedLibrary?.takeIf{it.isNotEmpty()} ?: previous
         if(savedLibrary==null&&watchedHistory==null)previous
-        else canonicalHistoryItems(mergedHistoryItems(savedLibrary ?: previous,watchedHistory ?: previous))
+        else{
+            val watchedBase=watchedHistory?.let{
+                if(canonicalSaved!=null||previousSavedLibrary!=null)watchedHistoryForSavedLibrary(savedBase,it) else it
+            } ?: emptyList()
+            canonicalHistoryItems(mergedHistoryItems(savedBase,watchedBase))
+        }
     }else{
         watchedHistory?.let(::canonicalHistoryItems) ?: previous
     }
@@ -2006,7 +2018,7 @@ private fun VideoScreen(api:HomeApi,active:Boolean,selectionRevision:Int,endpoin
             }
         }
     }
-    var history by remember{mutableStateOf(emptyList<JSONObject>())}; var historyOpen by remember{mutableStateOf(false)}; var seasonOpen by remember{mutableStateOf(false)}; var detailOpen by remember{mutableStateOf(false)}; var loadingSeason by remember{mutableStateOf("")}
+    var history by remember{mutableStateOf(emptyList<JSONObject>())}; var savedHistory by remember{mutableStateOf(emptyList<JSONObject>())}; var historyOpen by remember{mutableStateOf(false)}; var seasonOpen by remember{mutableStateOf(false)}; var detailOpen by remember{mutableStateOf(false)}; var loadingSeason by remember{mutableStateOf("")}
     var selection by remember{mutableStateOf(JSONObject())}; var selectionIdentity by remember{mutableStateOf("")}; var pendingSelectionIdentity by remember{mutableStateOf("")}; var selectedHistoryItem by remember{mutableStateOf<JSONObject?>(null)}; var job by remember{mutableStateOf<JSONObject?>(null)}; var sources by remember{mutableStateOf(emptyList<JSONObject>())}; var jobId by remember{mutableStateOf("")}; var loading by remember{mutableStateOf(false)}
     var season by remember{mutableStateOf("")}; var episode by remember{mutableStateOf("")}; var quality by remember{mutableStateOf("")}; var voice by remember{mutableStateOf("")}; var autoplay by remember{mutableStateOf(false)}; var monitor by remember{mutableStateOf(false)}; var monitorReady by remember{mutableStateOf(false)}; var external by remember{mutableStateOf(JSONObject())}; var message by remember{mutableStateOf("")}; var currentPlayer by remember{mutableStateOf(JSONObject())}; var audioSel by remember{mutableStateOf("")}; var subSel by remember{mutableStateOf("")}
     suspend fun loadJob(id:String){
@@ -2039,7 +2051,8 @@ private fun VideoScreen(api:HomeApi,active:Boolean,selectionRevision:Int,endpoin
         val watched=runCatching{api.get(mediaHistoryPath(endpoint.endpointId)).optJSONArray("items")?.objects().orEmpty()}
         if(endpoint.adapterKind=="home_edge_tv"){
             val saved=runCatching{api.get(savedVideoHistoryPath()).optJSONArray("items")?.objects().orEmpty()}
-            history=historyItemsAfterRead(history,saved.getOrNull(),watched.getOrNull(),true)
+            history=historyItemsAfterRead(history,saved.getOrNull(),watched.getOrNull(),true,savedHistory)
+            saved.getOrNull()?.let{savedHistory=canonicalHistoryItems(it)}
         }else{
             history=historyItemsAfterRead(history,null,watched.getOrNull(),false)
         }

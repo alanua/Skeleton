@@ -99,7 +99,7 @@ class NativeVideoHistoryTest {
         val tvMerged = historyItemsAfterRead(previous, saved, watched, homeEdgeTv = true)
         val samsung = historyItemsAfterRead(previous, saved, watched, homeEdgeTv = false)
 
-        assertEquals(listOf("Babylon Berlin", "Perry Mason", "Perry Mason"), tvMerged.map { it.getString("title") })
+        assertEquals(listOf("Babylon Berlin", "Perry Mason"), tvMerged.map { it.getString("title") })
         assertEquals(listOf("Perry Mason"), samsung.map { it.getString("title") })
     }
 
@@ -112,6 +112,30 @@ class NativeVideoHistoryTest {
         assertEquals("/api/video/history", savedVideoHistoryPath())
         assertEquals(listOf("Babylon Berlin", "Perry Mason"), historyItemsAfterRead(previous, null, watched, homeEdgeTv = true).map { it.getString("title") })
         assertEquals(listOf("Babylon Berlin", "Future Saved Work"), historyItemsAfterRead(previous, saved, null, homeEdgeTv = true).map { it.getString("title") })
+    }
+
+    @Test
+    fun successfulSavedReadIsAuthoritativeOverStaleWatchedHistory() {
+        val previous = listOf(history("bb", "Babylon Berlin"), history("deleted", "Deleted Saved Work"))
+        val saved = listOf(history("bb", "Babylon Berlin"))
+        val staleWatched = listOf(history("deleted", "Deleted Saved Work", season = "1", episode = "1"))
+
+        val visible = historyItemsAfterRead(previous, saved, staleWatched, homeEdgeTv = true)
+
+        assertEquals(listOf("Babylon Berlin"), visible.map { it.getString("title") })
+    }
+
+    @Test
+    fun transientSavedReadFailureKeepsLastCompleteSavedList() {
+        val previous = listOf(history("deleted", "Deleted Saved Work"))
+        val lastCompleteSaved = listOf(history("bb", "Babylon Berlin"))
+        val staleWatched = listOf(history("deleted", "Deleted Saved Work"), history("bb", "Babylon Berlin", season = "1", episode = "2"))
+
+        val visible = historyItemsAfterRead(previous, null, staleWatched, homeEdgeTv = true, previousSavedLibrary = lastCompleteSaved)
+
+        assertEquals(listOf("Babylon Berlin"), visible.map { it.getString("title") })
+        assertEquals("1", visible[0].getString("season"))
+        assertEquals("2", visible[0].getString("episode"))
     }
 
     @Test
