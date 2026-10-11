@@ -95,12 +95,20 @@ def test_home_video_selection_and_history_are_canonical_endpoint_scoped() -> Non
     assert 'api.delete(mediaHistoryDeletePath(endpointId,item))' in text
     assert 'val preferred=historyPreferredSelection(endpoint.endpointId,item)' in text
     assert 'confirmEndpointSelection(preferred)' in text
-    assert 'selection=JSONObject(body.toString())' in text
+    assert 'val confirmed=confirmedVideoSelectionFromPut(endpoint.endpointId,ack)' in text
+    assert 'throw IllegalStateException("Вибір не підтверджено")' in text
+    assert 'selection=JSONObject(body.toString())' not in text
     identity = text.split("private fun videoSelectionIdentity", 1)[1].split("internal fun videoSelectionIdentityForTest", 1)[0]
     assert "Uri.encode" not in identity
     assert 'VideoSelectionIdentityFields=listOf("job_id","source_id","season","episode","voice")+listOf("endpoint_id")' in text
     assert '"${value.length}:$value"' in identity
+    assert 'internal fun confirmedVideoSelectionFromPut(endpointId:String,ack:JSONObject):JSONObject?' in text
+    assert 'val direct=listOf(j.optJSONObject("selection"),j.optJSONObject("preferred"),j.optJSONObject("video_selection")).filterNotNull()' in text
+    assert 'val nested=listOf("data","result","response","payload").mapNotNull{j.optJSONObject(it)}.flatMap(::candidates)' in text
     assert 'val canonicalSource=canonicalSourceForSelection(body,sources)' in text
+    assert 'if(sourceId.isNotBlank())playable.firstOrNull{it.cleanText("source_id")==sourceId&&matchesIntent(it)}?.let{return it}' in text
+    assert 'if(season.isBlank()&&episode.isBlank()&&voice.isBlank())return null' in text
+    assert 'playable.firstOrNull{season.isBlank()||it.cleanText("season")==season}' not in text
     assert 'if(body.cleanText("source_id").isBlank())throw IllegalStateException("Збережений твір відкрито без підтвердженого джерела")' in text
     assert 'onFailure{message=it.message?:"Не вдалося вибрати запис історії"}' in text
     assert '"/api/video/history/saved"' not in text

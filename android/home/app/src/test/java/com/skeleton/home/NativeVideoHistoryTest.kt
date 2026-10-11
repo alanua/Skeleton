@@ -4,6 +4,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -168,6 +169,42 @@ class NativeVideoHistoryTest {
 
         assertEquals("s2e1", canonicalSourceForSelection(stale, sources)?.getString("source_id"))
         assertEquals("s1e1", canonicalSourceForSelection(exact, sources)?.getString("source_id"))
+    }
+
+    @Test
+    fun putSelectionAckParsesNestedEnvelopeAndRejectsOptimisticBodyOnlyAck() {
+        val confirmed = JSONObject()
+            .put("endpoint_id", "home_edge_tv")
+            .put("job_id", "job-merged")
+            .put("source_id", "s1e1")
+            .put("season", "1")
+            .put("episode", "1")
+            .put("voice", "UA")
+        val nested = JSONObject()
+            .put("success", true)
+            .put("data", JSONObject().put("selection", confirmed))
+        val bodyOnlyAck = JSONObject().put("success", true)
+        val wrongEndpoint = JSONObject().put("selection", JSONObject(confirmed.toString()).put("endpoint_id", "samsung_tv"))
+
+        assertEquals("s1e1", confirmedVideoSelectionFromPut("home_edge_tv", nested)?.getString("source_id"))
+        assertNull(confirmedVideoSelectionFromPut("home_edge_tv", bodyOnlyAck))
+        assertNull(confirmedVideoSelectionFromPut("home_edge_tv", wrongEndpoint))
+    }
+
+    @Test
+    fun sourceFallbackPreservesSeasonEpisodeVoiceAndNeverUsesTrailer() {
+        val s1 = source("s1e1", "1", "1")
+        val s2WrongVoice = source("s2e1-en", "2", "1").put("translation", "EN")
+        val trailer = source("s2e1-trailer", "2", "1").put("source_type", "trailer")
+        val sources = listOf(s1, s2WrongVoice, trailer)
+
+        val staleUaIntent = JSONObject().put("source_id", "old").put("season", "2").put("episode", "1").put("voice", "UA")
+        val exactButWrongEpisode = JSONObject().put("source_id", "s1e1").put("season", "1").put("episode", "2").put("voice", "UA")
+        val noIntent = JSONObject().put("source_id", "old")
+
+        assertNull(canonicalSourceForSelection(staleUaIntent, sources))
+        assertNull(canonicalSourceForSelection(exactButWrongEpisode, sources))
+        assertNull(canonicalSourceForSelection(noIntent, sources))
     }
 
     private fun history(id:String, title:String, poster:String = "", overview:String = "", season:String = "", episode:String = ""):JSONObject =

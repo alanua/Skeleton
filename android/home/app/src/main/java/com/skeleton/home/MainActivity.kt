@@ -389,6 +389,14 @@ internal fun shouldApplyPolledVideoSelection(latest:JSONObject,endpointId:String
     val latestIdentity=videoSelectionIdentity(latest)
     return pendingIdentity.isBlank()&&latestIdentity!=currentIdentity&&isCanonicalEndpointSelection(latest,endpointId)
 }
+internal fun confirmedVideoSelectionFromPut(endpointId:String,ack:JSONObject):JSONObject?{
+    fun candidates(j:JSONObject):List<JSONObject>{
+        val direct=listOf(j.optJSONObject("selection"),j.optJSONObject("preferred"),j.optJSONObject("video_selection")).filterNotNull()
+        val nested=listOf("data","result","response","payload").mapNotNull{j.optJSONObject(it)}.flatMap(::candidates)
+        return listOf(j)+direct+nested
+    }
+    return candidates(ack).firstOrNull{isCanonicalEndpointSelection(it,endpointId)}
+}
 internal fun savedHistoryOpenBody(endpointId:String,item:JSONObject,season:String?=null):JSONObject{
     val out=JSONObject().put("endpoint_id",endpointId)
     listOf("history_id","history_key","content_key","media_type","content_type","title","year").forEach { k ->
@@ -411,15 +419,16 @@ internal fun endpointSelectionFromHistoryOpen(endpointId:String,item:JSONObject,
 internal fun canonicalSourceForSelection(selection:JSONObject,sources:List<JSONObject>):JSONObject?{
     val playable=sources.filterNot(::isTrailerSource)
     val sourceId=selection.cleanText("source_id")
-    if(sourceId.isNotBlank())playable.firstOrNull{it.cleanText("source_id")==sourceId}?.let{return it}
     val season=selection.cleanText("season")
     val episode=selection.cleanText("episode")
     val voice=selection.cleanText("voice")
-    return playable.firstOrNull{
-        (season.isBlank()||it.cleanText("season")==season)&&
-            (episode.isBlank()||it.cleanText("episode")==episode)&&
-            (voice.isBlank()||sourceVoice(it)==voice)
-    } ?: playable.firstOrNull{season.isBlank()||it.cleanText("season")==season} ?: playable.firstOrNull()
+    fun matchesIntent(source:JSONObject):Boolean=
+        (season.isBlank()||source.cleanText("season")==season)&&
+            (episode.isBlank()||source.cleanText("episode")==episode)&&
+            (voice.isBlank()||sourceVoice(source)==voice)
+    if(sourceId.isNotBlank())playable.firstOrNull{it.cleanText("source_id")==sourceId&&matchesIntent(it)}?.let{return it}
+    if(season.isBlank()&&episode.isBlank()&&voice.isBlank())return null
+    return playable.firstOrNull(::matchesIntent)
 }
 internal fun sourceSeasons(sources:List<JSONObject>):Set<String> =
     sources.filterNot(::isTrailerSource).mapNotNull{it.cleanText("season").takeIf(String::isNotBlank)}.toSet()
@@ -2089,14 +2098,13 @@ private fun VideoScreen(api:HomeApi,active:Boolean,selectionRevision:Int,endpoin
     suspend fun confirmEndpointSelection(body:JSONObject):JSONObject{
         pendingSelectionIdentity=videoSelectionIdentity(body)
         return try{
-            val confirmed=api.put(endpointPath(endpoint.endpointId,"/video/selection"),body)
-            if(isCanonicalEndpointSelection(confirmed,endpoint.endpointId)){
+            val ack=api.put(endpointPath(endpoint.endpointId,"/video/selection"),body)
+            val confirmed=confirmedVideoSelectionFromPut(endpoint.endpointId,ack)
+            if(confirmed!=null){
                 applyEndpointSelection(confirmed,false)
                 confirmed
             }else{
-                selection=JSONObject(body.toString())
-                jobId=body.cleanText("job_id")
-                body
+                throw IllegalStateException("Вибір не підтверджено")
             }
         }finally{
             pendingSelectionIdentity=""
