@@ -111,11 +111,13 @@ def test_home_edge_endpoints_are_buildconfig_driven_without_private_literals() -
     source = "\n".join(kotlin_sources().values()) + "\n" + gradle
 
     assert 'val homeEdgeBaseUrls = providers.gradleProperty("homeEdgeBaseUrls").orElse("").get()' in gradle
+    assert "import java.net.URI" in gradle
     assert 'buildConfigField("String", "HOME_EDGE_BASE_URLS", "\\"$escapedHomeEdgeBaseUrls\\"")' in gradle
     assert "fun validateHomeEdgeReleaseBaseUrls(raw: String)" in gradle
     assert 'raw.split(",").map { it.trim() }.filter { it.isNotEmpty() }' in gradle
     assert 'require(urls.isNotEmpty())' in gradle
-    assert 'java.net.URI(url)' in gradle
+    assert 'URI(url)' in gradle
+    assert 'java.net.URI(url)' not in gradle
     assert 'parsed.scheme in setOf("https", "http")' in gradle
     assert "!parsed.host.isNullOrBlank()" in gradle
     assert 'if (allTasks.any { it.name == "assembleRelease" })' in gradle

@@ -1,3 +1,5 @@
+import java.net.URI
+
 val homeEdgeBaseUrls = providers.gradleProperty("homeEdgeBaseUrls").orElse("").get()
 val escapedHomeEdgeBaseUrls = homeEdgeBaseUrls.replace("\\", "\\\\").replace("\"", "\\\"")
 
@@ -7,7 +9,7 @@ fun validateHomeEdgeReleaseBaseUrls(raw: String) {
         "assembleRelease requires -PhomeEdgeBaseUrls with at least one HTTPS or HTTP base URL"
     }
     urls.forEach { url ->
-        val parsed = runCatching { java.net.URI(url) }.getOrNull()
+        val parsed = runCatching { URI(url) }.getOrNull()
         require(parsed != null && parsed.scheme in setOf("https", "http") && !parsed.host.isNullOrBlank()) {
             "assembleRelease requires every homeEdgeBaseUrls entry to be a valid HTTPS or HTTP base URL"
         }
