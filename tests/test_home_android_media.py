@@ -12,11 +12,11 @@ def _source() -> str:
     return MAIN_ACTIVITY.read_text(encoding="utf-8")
 
 
-def test_home_release_metadata_is_1_4_34_150() -> None:
+def test_home_release_metadata_is_1_4_36_152() -> None:
     text = BUILD_GRADLE.read_text(encoding="utf-8")
 
-    assert "versionCode = 151" in text
-    assert 'versionName = "1.4.35"' in text
+    assert "versionCode = 152" in text
+    assert 'versionName = "1.4.36"' in text
 
 
 def test_home_media_volume_and_mute_are_endpoint_isolated() -> None:
@@ -77,26 +77,52 @@ def test_home_video_selection_and_history_are_canonical_endpoint_scoped() -> Non
     assert 'api.put(endpointPath(endpoint.endpointId,"/video/selection"),selBody)' in text
     assert 'api.put("/api/video/selection",selBody)' not in text
     assert 'private fun mediaHistoryPath(endpointId:String):String="/api/media/history?endpoint=${Uri.encode(endpointId)}"' in text
-    assert 'private fun historyKey(item:JSONObject):String=item.cleanText("history_key",item.cleanText("content_key"))' in text
+    assert 'internal fun savedVideoHistoryPath():String="/api/video/history"' in text
+    assert 'internal fun historyKey(item:JSONObject):String=item.cleanText("history_id",item.cleanText("history_key",item.cleanText("content_key")))' in text
     assert 'private fun mediaHistoryDeletePath(endpointId:String,item:JSONObject):String="/api/media/history/${Uri.encode(historyKey(item))}?endpoint=${Uri.encode(endpointId)}"' in text
     assert "canonicalHistoryItems(api.get(mediaHistoryPath(endpointId)).optJSONArray" in text
-    assert "canonicalHistoryItems(it.optJSONArray" in text
+    assert "historyItemsAfterRead(history,saved.getOrNull(),watched.getOrNull(),true,savedHistory)" in text
+    assert "watchedHistoryForSavedLibrary(savedBase,it)" in text
+    assert "saved.getOrNull()?.let{savedHistory=canonicalHistoryItems(it)}" in text
     assert "historyEpisodeLabel(item)" in text
+    assert 'api.get(savedVideoHistoryPath())' in text
     assert 'api.get(mediaHistoryPath(endpointId))' in text
     assert 'api.get(mediaHistoryPath(endpoint.endpointId))' in text
     assert 'api.delete(mediaHistoryDeletePath(endpointId,item))' in text
     assert 'val preferred=historyPreferredSelection(endpoint.endpointId,item)' in text
-    assert 'runCatching{api.put(endpointPath(endpoint.endpointId,"/video/selection"),preferred)}' in text
-    assert 'selection=preferred' in text
+    assert 'confirmEndpointSelection(preferred)' in text
+    assert 'selection=JSONObject(body.toString())' in text
+    identity = text.split("private fun videoSelectionIdentity", 1)[1].split("internal fun videoSelectionIdentityForTest", 1)[0]
+    assert "Uri.encode" not in identity
+    assert 'VideoSelectionIdentityFields=listOf("job_id","source_id","season","episode","voice")+listOf("endpoint_id")' in text
+    assert '"${value.length}:$value"' in identity
+    assert 'val canonicalSource=canonicalSourceForSelection(body,sources)' in text
+    assert 'if(body.cleanText("source_id").isBlank())throw IllegalStateException("Збережений твір відкрито без підтвердженого джерела")' in text
     assert 'onFailure{message=it.message?:"Не вдалося вибрати запис історії"}' in text
+    assert '"/api/video/history/saved"' not in text
+    assert '"/api/video/history/library"' not in text
+    assert '"/api/media/library/saved"' not in text
     assert '"/api/media/history/delete"' not in text
     assert '"/api/media/history/open"' not in text
     assert '"/history/delete"' not in text
     assert '"/history/open"' not in text
-    assert '"history_id"' not in text
     assert 'endpointPath(endpointId,"/video/history")' not in text
     assert 'endpointPath(endpoint.endpointId,"/video/history")' not in text
     assert "LaunchedEffect(api.server,endpointId){reload()}" in text
+
+
+def test_home_media_volume_label_uses_measured_gap_above_slider() -> None:
+    text = _source()
+    block = text.split("@Composable private fun VolumeRow", 1)[1].split("@Composable private fun YoutubePanel", 1)[0]
+
+    assert "Modifier.fillMaxWidth().height(54.dp)" in block
+    assert "var labelWidthPx by remember{mutableIntStateOf(0)}" in block
+    assert "var labelHeightPx by remember{mutableIntStateOf(0)}" in block
+    assert "val sliderTopPx=with(density){20.dp.roundToPx()}" in block
+    assert "val measuredGapPx=with(density){3.dp.roundToPx()}" in block
+    assert "val labelY=(sliderTopPx-measuredGapPx-labelHeightPx).coerceAtLeast(0)" in block
+    assert ".offset{IntOffset(labelX,labelY)}.width(36.dp)" in block
+    assert "SkeletonRange(v,{v=it},{onVolume((v/5f).toInt()*5)},0f,100f,Modifier.fillMaxWidth().offset(y=20.dp))" in block
 
 
 def test_home_nonyoutube_regressions_restore_history_and_telegram_only() -> None:
@@ -104,7 +130,7 @@ def test_home_nonyoutube_regressions_restore_history_and_telegram_only() -> None
     assert 'var telegramSourcesExpanded by rememberSaveable{mutableStateOf(false)}' in text
     assert 'Mdi(if(telegramSourcesExpanded)"chevron-up" else "chevron-down",16.dp,Muted)' in text
     assert 'val preferred=historyPreferredSelection(endpoint.endpointId,item)' in text
-    assert 'runCatching{api.put(endpointPath(endpoint.endpointId,"/video/selection"),preferred)}' in text
+    assert 'confirmEndpointSelection(preferred)' in text
 
 
 def test_history_selection_payload_excludes_resume_position():
