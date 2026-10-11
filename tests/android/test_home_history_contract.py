@@ -32,9 +32,12 @@ def test_history_hydration_is_separate_from_selected_job_loading() -> None:
 def test_history_picker_distinguishes_loading_error_empty_and_ready_states() -> None:
     text = _source()
 
-    assert "var historyHydrated by remember{mutableStateOf(false)}" in text
-    assert "var historyLoading by remember{mutableStateOf(false)}" in text
-    assert "var historyError by remember{mutableStateOf(\"\")}" in text
+    assert "val historyByEndpoint=remember{mutableStateMapOf<String,List<JSONObject>>()}" in text
+    assert "val savedHistoryByEndpoint=remember{mutableStateMapOf<String,List<JSONObject>>()}" in text
+    assert "val historyHydratedByEndpoint=remember{mutableStateMapOf<String,Boolean>()}" in text
+    assert "var historyHydrated by remember(endpoint.endpointId){mutableStateOf(historyHydratedByEndpoint[endpoint.endpointId] == true)}" in text
+    assert "var historyLoading by remember(endpoint.endpointId){mutableStateOf(false)}" in text
+    assert "var historyError by remember(endpoint.endpointId){mutableStateOf(historyErrorByEndpoint[endpoint.endpointId].orEmpty())}" in text
     assert "historyLoading&&!historyHydrated->\"Читаю історію…\"" in text
     assert "historyError.isNotBlank()&&history.isEmpty()->\"Не вдалося завантажити · торкніться ще раз\"" in text
     assert "history.isEmpty()&&historyHydrated->\"Історія порожня\"" in text
@@ -53,8 +56,24 @@ def test_home_edge_tv_history_preserves_saved_library_on_partial_failure() -> No
     ).group("body")
 
     assert 'val watched=runCatching{api.get(mediaHistoryPath(endpoint.endpointId)).optJSONArray("items")?.objects().orEmpty()}' in loader
-    assert 'val saved=if(endpoint.adapterKind=="home_edge_tv")runCatching{api.get(savedVideoHistoryPath()).optJSONArray("items")?.objects().orEmpty()} else null' in loader
-    assert 'val ok=if(endpoint.adapterKind=="home_edge_tv")saved?.isSuccess==true||watched.isSuccess else watched.isSuccess' in loader
-    assert "history=historyItemsAfterRead(history,saved?.getOrNull(),watched.getOrNull(),true,savedHistory)" in loader
-    assert "saved?.getOrNull()?.let{savedHistory=canonicalHistoryItems(it)}" in loader
-    assert "historyError=(saved?.exceptionOrNull()?:watched.exceptionOrNull())?.message?:\"Історія недоступна\"" in loader
+    assert 'val saved=if(endpoint.adapterKind=="home_edge_tv")runCatching{savedVideoHistoryItemsWithRetry(api)} else null' in loader
+    assert 'val ok=if(endpoint.adapterKind=="home_edge_tv")saved?.isSuccess==true else watched.isSuccess' in loader
+    assert 'saved?.isSuccess==true||watched.isSuccess' not in loader
+    assert "setEndpointHistory(historyItemsAfterRead(history,saved?.getOrNull(),watched.getOrNull(),true,savedHistory))" in loader
+    assert "saved?.getOrNull()?.let{setEndpointSavedHistory(canonicalHistoryItems(it))}" in loader
+    assert "setEndpointHistoryError((saved?.exceptionOrNull()?:watched.exceptionOrNull())?.message?:\"Історія недоступна\")" in loader
+
+
+def test_home_edge_tv_saved_history_is_retried_before_fallback_error() -> None:
+    text = _source()
+    retry = re.search(
+        r"private suspend fun savedVideoHistoryItemsWithRetry\(api:HomeApi,attempts:Int=2\):List<JSONObject>\{(?P<body>.*?)\n\}",
+        text,
+        re.DOTALL,
+    ).group("body")
+
+    assert "repeat(attempts.coerceAtLeast(1)){i->" in retry
+    assert "api.get(savedVideoHistoryPath()).optJSONArray(\"items\")?.objects().orEmpty()" in retry
+    assert "result.onSuccess{return it}" in retry
+    assert "if(i<attempts-1)delay(650)" in retry
+    assert "throw lastError ?: IllegalStateException(\"Історія недоступна\")" in retry
