@@ -319,6 +319,28 @@ def test_validation_temp_cleanup_refuses_non_runner_directory_without_deleting(
     assert marker.read_text() == "synthetic\n"
 
 
+def test_validation_temp_cleanup_refuses_runner_named_symlink_without_deleting_target(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    parent = tmp_path / "synthetic-temp"
+    parent.mkdir()
+    target = tmp_path / "synthetic-target"
+    target.mkdir()
+    marker = target / "keep.txt"
+    marker.write_text("synthetic\n")
+    link = parent / ".runner-validation-pytest-synthetic"
+    link.symlink_to(target, target_is_directory=True)
+    monkeypatch.setattr(runner.tempfile, "tempdir", str(parent))
+
+    with pytest.raises(RuntimeError, match="validation_temp_cleanup_unsafe"):
+        runner._remove_validation_pytest_temp_root(link)
+
+    assert link.is_symlink()
+    assert target.is_dir()
+    assert marker.read_text() == "synthetic\n"
+
+
 def test_runner_vnext_preflight_reports_stale_attestation_without_mutating(
     tmp_path: Path,
 ) -> None:
@@ -331,6 +353,31 @@ def test_runner_vnext_preflight_reports_stale_attestation_without_mutating(
     status, fresh = runner._runner_vnext_preflight_attestation(state, now=121.0)
 
     assert (status, fresh) == ("stale", False)
+    assert attestation.read_text() == before
+
+
+def test_runner_vnext_preflight_rejects_mismatched_attestation_authority_without_mutating(
+    tmp_path: Path,
+) -> None:
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    state.chmod(0o700)
+    attestation = _write_attestation(state, observed=100.0, expires=120.0)
+    payload = json.loads(attestation.read_text())
+    envelope_base = {key: value for key, value in payload.items() if key != "payload_sha256"}
+    envelope_base["repository"] = "alanua/Other"
+    payload = {
+        **envelope_base,
+        "payload_sha256": hashlib.sha256(
+            json.dumps(envelope_base, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest(),
+    }
+    attestation.write_text(json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n")
+    before = attestation.read_text()
+
+    with pytest.raises(RuntimeError, match="preflight_attestation_identity_invalid"):
+        runner._runner_vnext_preflight_attestation(state, now=101.0)
+
     assert attestation.read_text() == before
 
 
