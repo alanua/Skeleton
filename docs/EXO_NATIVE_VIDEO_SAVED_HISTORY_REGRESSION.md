@@ -9,6 +9,7 @@ This regression covers the native Kotlin Compose video picker after the saved-li
 - TV saved-work selection does not call playback, mode, or handoff APIs.
 - Samsung keeps endpoint-scoped watched-history semantics and does not receive TV saved-library selection.
 - Polling only accepts canonical endpoint selections with matching endpoint, job, and source IDs, so a stale single-season job cannot overwrite a newer confirmed user selection.
+- Video selection identity uses a pure Kotlin length-prefixed serialization of `job_id`, `source_id`, `season`, `episode`, `voice`, and `endpoint_id`, avoiding Android `Uri` JVM mocks while keeping endpoint isolation and delimiter collision safety.
 - Failed saved-library or watched-history reads preserve the previously visible picker entries instead of treating the failed side as an empty deletion result.
 - A successful saved-library read is authoritative for TV saved works: stale watched history can enrich matching saved entries, but cannot reintroduce a work that is no longer present in the canonical saved list.
 - If the saved-library read fails transiently, the picker keeps the last complete saved list and only applies watched-history enrichment for entries still present in that saved list.
@@ -26,6 +27,7 @@ This regression covers the native Kotlin Compose video picker after the saved-li
 - A legacy S2-only job fails merged-readiness when metadata says S1 and S2 are loaded, while a merged S1+S2 job passes.
 - Metadata without sources does not count as loaded source availability.
 - Samsung and TV canonical selection identities stay isolated.
+- Selection identity remains endpoint-scoped and collision-safe when field values contain delimiters, without relying on Android framework URI encoding.
 - Saved-history source selection replaces stale source IDs with a non-trailer source from the loaded merged job.
 - Failed network reads preserve existing native history, and Samsung continues to use watched-history scope instead of the TV saved library.
 - Successful saved reads exclude deleted works even when watched history is stale, while transient saved-read failures preserve the last complete saved list.

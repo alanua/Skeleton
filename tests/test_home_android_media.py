@@ -92,6 +92,10 @@ def test_home_video_selection_and_history_are_canonical_endpoint_scoped() -> Non
     assert 'val preferred=historyPreferredSelection(endpoint.endpointId,item)' in text
     assert 'confirmEndpointSelection(preferred)' in text
     assert 'selection=JSONObject(body.toString())' in text
+    identity = text.split("private fun videoSelectionIdentity", 1)[1].split("internal fun videoSelectionIdentityForTest", 1)[0]
+    assert "Uri.encode" not in identity
+    assert 'VideoSelectionIdentityFields=listOf("job_id","source_id","season","episode","voice")+listOf("endpoint_id")' in text
+    assert '"${value.length}:$value"' in identity
     assert 'val canonicalSource=canonicalSourceForSelection(body,sources)' in text
     assert 'if(body.cleanText("source_id").isBlank())throw IllegalStateException("Збережений твір відкрито без підтвердженого джерела")' in text
     assert 'onFailure{message=it.message?:"Не вдалося вибрати запис історії"}' in text

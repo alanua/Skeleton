@@ -87,6 +87,27 @@ class NativeVideoHistoryTest {
     }
 
     @Test
+    fun videoSelectionIdentityIsPureLengthPrefixedAndEndpointScoped() {
+        val tv = JSONObject()
+            .put("endpoint_id", "home_edge_tv")
+            .put("job_id", "a|b")
+            .put("source_id", "c")
+            .put("season", " 1 ")
+            .put("episode", "2")
+            .put("voice", "UA|Dub")
+        val samsung = JSONObject()
+            .put("endpoint_id", "samsung_tv")
+            .put("job_id", "a")
+            .put("source_id", "b|c")
+            .put("season", "1")
+            .put("episode", "2")
+            .put("voice", "UA|Dub")
+
+        assertEquals("3:a|b|1:c|1:1|1:2|6:UA|Dub|12:home_edge_tv", videoSelectionIdentityForTest(tv))
+        assertFalse(videoSelectionIdentityForTest(tv) == videoSelectionIdentityForTest(samsung))
+    }
+
+    @Test
     fun failedNetworkReadPreservesExistingHistoryAndSamsungWatchedScope() {
         val previous = listOf(history("bb", "Babylon Berlin"))
         val watched = listOf(history("pm", "Perry Mason"))

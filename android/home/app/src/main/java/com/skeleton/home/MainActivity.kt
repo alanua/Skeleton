@@ -364,8 +364,12 @@ internal fun historyItemsAfterRead(previous:List<JSONObject>,savedLibrary:List<J
         watchedHistory?.let(::canonicalHistoryItems) ?: previous
     }
 }
+private val VideoSelectionIdentityFields=listOf("job_id","source_id","season","episode","voice")+listOf("endpoint_id")
 private fun videoSelectionIdentity(selection:JSONObject):String=
-    (listOf("job_id","source_id","season","episode","voice")+listOf("endpoint_id")).joinToString("|"){Uri.encode(selection.optString(it).trim())}
+    VideoSelectionIdentityFields.joinToString("|"){key->
+        val value=selection.optString(key).trim()
+        "${value.length}:$value"
+    }
 internal fun videoSelectionIdentityForTest(selection:JSONObject):String=videoSelectionIdentity(selection)
 internal fun isCanonicalEndpointSelection(selection:JSONObject,endpointId:String):Boolean{
     val selectedEndpoint=selection.cleanText("endpoint_id",endpointId)
