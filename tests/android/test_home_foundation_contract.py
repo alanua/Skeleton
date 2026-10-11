@@ -34,8 +34,8 @@ def test_package_identity_label_compose_and_main_entry_are_current() -> None:
 
     assert 'namespace = "com.skeleton.home"' in gradle
     assert 'applicationId = "com.skeleton.home"' in gradle
-    assert re.search(r"versionCode\s*=\s*152\b", gradle)
-    assert 'versionName = "1.4.36"' in gradle
+    assert re.search(r"versionCode\s*=\s*153\b", gradle)
+    assert 'versionName = "1.4.37"' in gradle
     assert "buildFeatures { compose = true; buildConfig = true }" in gradle
     assert "androidx.activity:activity-compose" in gradle
 
@@ -112,6 +112,16 @@ def test_home_edge_endpoints_are_buildconfig_driven_without_private_literals() -
 
     assert 'val homeEdgeBaseUrls = providers.gradleProperty("homeEdgeBaseUrls").orElse("").get()' in gradle
     assert 'buildConfigField("String", "HOME_EDGE_BASE_URLS", "\\"$escapedHomeEdgeBaseUrls\\"")' in gradle
+    assert "fun validateHomeEdgeReleaseBaseUrls(raw: String)" in gradle
+    assert 'raw.split(",").map { it.trim() }.filter { it.isNotEmpty() }' in gradle
+    assert 'require(urls.isNotEmpty())' in gradle
+    assert 'java.net.URI(url)' in gradle
+    assert 'parsed.scheme in setOf("https", "http")' in gradle
+    assert "!parsed.host.isNullOrBlank()" in gradle
+    assert 'if (allTasks.any { it.name == "assembleRelease" })' in gradle
+    assert "validateHomeEdgeReleaseBaseUrls(homeEdgeBaseUrls)" in gradle
+    assert '"$url"' not in gradle
+    assert '"$homeEdgeBaseUrls"' not in gradle
     assert "BuildConfig.HOME_EDGE_BASE_URLS" in main
     assert "BuildConfig.HOME_EDGE_BASE_URLS" in location
     assert '.filter { it.startsWith("http://") || it.startsWith("https://") }' in main

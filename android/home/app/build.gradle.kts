@@ -1,6 +1,25 @@
 val homeEdgeBaseUrls = providers.gradleProperty("homeEdgeBaseUrls").orElse("").get()
 val escapedHomeEdgeBaseUrls = homeEdgeBaseUrls.replace("\\", "\\\\").replace("\"", "\\\"")
 
+fun validateHomeEdgeReleaseBaseUrls(raw: String) {
+    val urls = raw.split(",").map { it.trim() }.filter { it.isNotEmpty() }
+    require(urls.isNotEmpty()) {
+        "assembleRelease requires -PhomeEdgeBaseUrls with at least one HTTPS or HTTP base URL"
+    }
+    urls.forEach { url ->
+        val parsed = runCatching { java.net.URI(url) }.getOrNull()
+        require(parsed != null && parsed.scheme in setOf("https", "http") && !parsed.host.isNullOrBlank()) {
+            "assembleRelease requires every homeEdgeBaseUrls entry to be a valid HTTPS or HTTP base URL"
+        }
+    }
+}
+
+gradle.taskGraph.whenReady {
+    if (allTasks.any { it.name == "assembleRelease" }) {
+        validateHomeEdgeReleaseBaseUrls(homeEdgeBaseUrls)
+    }
+}
+
 plugins { id("com.android.application"); id("org.jetbrains.kotlin.android") }
 android {
     namespace = "com.skeleton.home"
@@ -9,8 +28,8 @@ android {
         applicationId = "com.skeleton.home"
         minSdk = 26
         targetSdk = 34
-        versionCode = 152
-        versionName = "1.4.36"
+        versionCode = 153
+        versionName = "1.4.37"
         buildConfigField("String", "HOME_EDGE_BASE_URLS", "\"$escapedHomeEdgeBaseUrls\"")
     }
     buildFeatures { compose = true; buildConfig = true }

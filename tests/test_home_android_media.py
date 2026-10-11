@@ -12,11 +12,11 @@ def _source() -> str:
     return MAIN_ACTIVITY.read_text(encoding="utf-8")
 
 
-def test_home_release_metadata_is_1_4_36_152() -> None:
+def test_home_release_metadata_is_1_4_37_153() -> None:
     text = BUILD_GRADLE.read_text(encoding="utf-8")
 
-    assert "versionCode = 152" in text
-    assert 'versionName = "1.4.36"' in text
+    assert "versionCode = 153" in text
+    assert 'versionName = "1.4.37"' in text
 
 
 def test_home_media_volume_and_mute_are_endpoint_isolated() -> None:
