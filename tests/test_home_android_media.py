@@ -12,11 +12,11 @@ def _source() -> str:
     return MAIN_ACTIVITY.read_text(encoding="utf-8")
 
 
-def test_home_release_metadata_is_1_4_37_153() -> None:
+def test_home_release_metadata_is_1_4_38_154() -> None:
     text = BUILD_GRADLE.read_text(encoding="utf-8")
 
-    assert "versionCode = 153" in text
-    assert 'versionName = "1.4.37"' in text
+    assert "versionCode = 154" in text
+    assert 'versionName = "1.4.38"' in text
 
 
 def test_home_media_volume_and_mute_are_endpoint_isolated() -> None:
@@ -81,9 +81,13 @@ def test_home_video_selection_and_history_are_canonical_endpoint_scoped() -> Non
     assert 'internal fun historyKey(item:JSONObject):String=item.cleanText("history_id",item.cleanText("history_key",item.cleanText("content_key")))' in text
     assert 'private fun mediaHistoryDeletePath(endpointId:String,item:JSONObject):String="/api/media/history/${Uri.encode(historyKey(item))}?endpoint=${Uri.encode(endpointId)}"' in text
     assert "canonicalHistoryItems(api.get(mediaHistoryPath(endpointId)).optJSONArray" in text
-    assert "historyItemsAfterRead(history,saved.getOrNull(),watched.getOrNull(),true,savedHistory)" in text
+    assert "setEndpointHistory(historyItemsAfterRead(history,saved?.getOrNull(),watched.getOrNull(),true,savedHistory))" in text
     assert "watchedHistoryForSavedLibrary(savedBase,it)" in text
-    assert "saved.getOrNull()?.let{savedHistory=canonicalHistoryItems(it)}" in text
+    assert "saved?.getOrNull()?.let{setEndpointSavedHistory(canonicalHistoryItems(it))}" in text
+    assert 'val ok=if(endpoint.adapterKind=="home_edge_tv")saved?.isSuccess==true else watched.isSuccess' in text
+    assert 'saved?.isSuccess==true||watched.isSuccess' not in text
+    assert "val historyByEndpoint=remember{mutableStateMapOf<String,List<JSONObject>>()}" in text
+    assert "val savedHistoryByEndpoint=remember{mutableStateMapOf<String,List<JSONObject>>()}" in text
     assert "historyEpisodeLabel(item)" in text
     assert 'api.get(savedVideoHistoryPath())' in text
     assert 'api.get(mediaHistoryPath(endpointId))' in text
@@ -91,12 +95,20 @@ def test_home_video_selection_and_history_are_canonical_endpoint_scoped() -> Non
     assert 'api.delete(mediaHistoryDeletePath(endpointId,item))' in text
     assert 'val preferred=historyPreferredSelection(endpoint.endpointId,item)' in text
     assert 'confirmEndpointSelection(preferred)' in text
-    assert 'selection=JSONObject(body.toString())' in text
+    assert 'val confirmed=confirmedVideoSelectionFromPut(endpoint.endpointId,ack)' in text
+    assert 'throw IllegalStateException("Вибір не підтверджено")' in text
+    assert 'selection=JSONObject(body.toString())' not in text
     identity = text.split("private fun videoSelectionIdentity", 1)[1].split("internal fun videoSelectionIdentityForTest", 1)[0]
     assert "Uri.encode" not in identity
     assert 'VideoSelectionIdentityFields=listOf("job_id","source_id","season","episode","voice")+listOf("endpoint_id")' in text
     assert '"${value.length}:$value"' in identity
+    assert 'internal fun confirmedVideoSelectionFromPut(endpointId:String,ack:JSONObject):JSONObject?' in text
+    assert 'val direct=listOf(j.optJSONObject("selection"),j.optJSONObject("preferred"),j.optJSONObject("video_selection")).filterNotNull()' in text
+    assert 'val nested=listOf("data","result","response","payload").mapNotNull{j.optJSONObject(it)}.flatMap(::candidates)' in text
     assert 'val canonicalSource=canonicalSourceForSelection(body,sources)' in text
+    assert 'if(sourceId.isNotBlank())playable.firstOrNull{it.cleanText("source_id")==sourceId&&matchesIntent(it)}?.let{return it}' in text
+    assert 'if(season.isBlank()&&episode.isBlank()&&voice.isBlank())return null' in text
+    assert 'playable.firstOrNull{season.isBlank()||it.cleanText("season")==season}' not in text
     assert 'if(body.cleanText("source_id").isBlank())throw IllegalStateException("Збережений твір відкрито без підтвердженого джерела")' in text
     assert 'onFailure{message=it.message?:"Не вдалося вибрати запис історії"}' in text
     assert '"/api/video/history/saved"' not in text

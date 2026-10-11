@@ -314,6 +314,16 @@ internal fun savedVideoHistoryPath():String="/api/video/history"
 private fun mediaHistoryPath(endpointId:String):String="/api/media/history?endpoint=${Uri.encode(endpointId)}"
 internal fun historyKey(item:JSONObject):String=item.cleanText("history_id",item.cleanText("history_key",item.cleanText("content_key")))
 private fun mediaHistoryDeletePath(endpointId:String,item:JSONObject):String="/api/media/history/${Uri.encode(historyKey(item))}?endpoint=${Uri.encode(endpointId)}"
+private suspend fun savedVideoHistoryItemsWithRetry(api:HomeApi,attempts:Int=2):List<JSONObject>{
+    var lastError:Throwable?=null
+    repeat(attempts.coerceAtLeast(1)){i->
+        val result=runCatching{api.get(savedVideoHistoryPath()).optJSONArray("items")?.objects().orEmpty()}
+        result.onSuccess{return it}
+        lastError=result.exceptionOrNull()
+        if(i<attempts-1)delay(650)
+    }
+    throw lastError ?: IllegalStateException("Історія недоступна")
+}
 internal fun canonicalHistoryItems(items:List<JSONObject>):List<JSONObject>{
     val seen=mutableSetOf<String>()
     return items.filter{val k=historyKey(it);k.isBlank()||seen.add(k)}
@@ -379,6 +389,14 @@ internal fun shouldApplyPolledVideoSelection(latest:JSONObject,endpointId:String
     val latestIdentity=videoSelectionIdentity(latest)
     return pendingIdentity.isBlank()&&latestIdentity!=currentIdentity&&isCanonicalEndpointSelection(latest,endpointId)
 }
+internal fun confirmedVideoSelectionFromPut(endpointId:String,ack:JSONObject):JSONObject?{
+    fun candidates(j:JSONObject):List<JSONObject>{
+        val direct=listOf(j.optJSONObject("selection"),j.optJSONObject("preferred"),j.optJSONObject("video_selection")).filterNotNull()
+        val nested=listOf("data","result","response","payload").mapNotNull{j.optJSONObject(it)}.flatMap(::candidates)
+        return listOf(j)+direct+nested
+    }
+    return candidates(ack).firstOrNull{isCanonicalEndpointSelection(it,endpointId)}
+}
 internal fun savedHistoryOpenBody(endpointId:String,item:JSONObject,season:String?=null):JSONObject{
     val out=JSONObject().put("endpoint_id",endpointId)
     listOf("history_id","history_key","content_key","media_type","content_type","title","year").forEach { k ->
@@ -401,15 +419,16 @@ internal fun endpointSelectionFromHistoryOpen(endpointId:String,item:JSONObject,
 internal fun canonicalSourceForSelection(selection:JSONObject,sources:List<JSONObject>):JSONObject?{
     val playable=sources.filterNot(::isTrailerSource)
     val sourceId=selection.cleanText("source_id")
-    if(sourceId.isNotBlank())playable.firstOrNull{it.cleanText("source_id")==sourceId}?.let{return it}
     val season=selection.cleanText("season")
     val episode=selection.cleanText("episode")
     val voice=selection.cleanText("voice")
-    return playable.firstOrNull{
-        (season.isBlank()||it.cleanText("season")==season)&&
-            (episode.isBlank()||it.cleanText("episode")==episode)&&
-            (voice.isBlank()||sourceVoice(it)==voice)
-    } ?: playable.firstOrNull{season.isBlank()||it.cleanText("season")==season} ?: playable.firstOrNull()
+    fun matchesIntent(source:JSONObject):Boolean=
+        (season.isBlank()||source.cleanText("season")==season)&&
+            (episode.isBlank()||source.cleanText("episode")==episode)&&
+            (voice.isBlank()||sourceVoice(source)==voice)
+    if(sourceId.isNotBlank())playable.firstOrNull{it.cleanText("source_id")==sourceId&&matchesIntent(it)}?.let{return it}
+    if(season.isBlank()&&episode.isBlank()&&voice.isBlank())return null
+    return playable.firstOrNull(::matchesIntent)
 }
 internal fun sourceSeasons(sources:List<JSONObject>):Set<String> =
     sources.filterNot(::isTrailerSource).mapNotNull{it.cleanText("season").takeIf(String::isNotBlank)}.toSet()
@@ -1979,7 +1998,7 @@ private fun trackDisplayLabel(t:JSONObject,index:Int):String{val bits=listOf(t.o
     }
 }
 
-@Composable private fun HistoryPickerField(value:String,enabled:Boolean,onClick:()->Unit){Row(Modifier.fillMaxWidth().heightIn(min=56.dp),verticalAlignment=Alignment.Bottom){Box(Modifier.width(28.dp).height(39.dp).padding(bottom=9.dp),contentAlignment=Alignment.BottomCenter){Mdi("history",20.dp,Color(0xFFD8DDE2))};Spacer(Modifier.width(8.dp));Column(Modifier.weight(1f)){Text(ui("Історія"),fontSize=10.sp,color=Color(0xFFC4CAD0),modifier=Modifier.padding(bottom=3.dp));Row(Modifier.fillMaxWidth().height(39.dp).clip(RoundedCornerShape(9.dp)).background(Input).border(1.dp,Line,RoundedCornerShape(9.dp)).clickable(enabled=enabled,onClick=onClick).padding(start=10.dp,end=9.dp),verticalAlignment=Alignment.CenterVertically){Text(value,fontSize=14.sp,color=if(enabled)Text else Text.copy(alpha=.55f),modifier=Modifier.weight(1f),maxLines=1,overflow=TextOverflow.Ellipsis);Mdi("chevron-down",16.dp,Muted.copy(alpha=if(enabled)1f else .55f))}}}}
+@Composable private fun HistoryPickerField(value:String,enabled:Boolean,loading:Boolean,error:Boolean,onClick:()->Unit){Row(Modifier.fillMaxWidth().heightIn(min=56.dp),verticalAlignment=Alignment.Bottom){Box(Modifier.width(28.dp).height(39.dp).padding(bottom=9.dp),contentAlignment=Alignment.BottomCenter){Mdi("history",20.dp,Color(0xFFD8DDE2))};Spacer(Modifier.width(8.dp));Column(Modifier.weight(1f)){Text(ui("Історія"),fontSize=10.sp,color=Color(0xFFC4CAD0),modifier=Modifier.padding(bottom=3.dp));Row(Modifier.fillMaxWidth().height(39.dp).clip(RoundedCornerShape(9.dp)).background(Input).border(1.dp,Line,RoundedCornerShape(9.dp)).clickable(enabled=enabled,onClick=onClick).padding(start=10.dp,end=9.dp),verticalAlignment=Alignment.CenterVertically){Text(value,fontSize=14.sp,color=if(enabled)Text else Text.copy(alpha=.55f),modifier=Modifier.weight(1f),maxLines=1,overflow=TextOverflow.Ellipsis);when{loading->CircularProgressIndicator(Modifier.size(15.dp),strokeWidth=2.dp,color=Accent);error->Mdi("refresh",16.dp,Accent);else->Mdi("chevron-down",16.dp,Muted.copy(alpha=if(enabled)1f else .55f))}}}}}
 @Composable private fun HistoryPickerDialog(api:HomeApi,items:List<JSONObject>,onSelect:(JSONObject)->Unit,onDismiss:()->Unit){
     var query by remember{mutableStateOf("")};val canonical=remember(items){canonicalHistoryItems(items)};val q=query.trim().lowercase(Locale.ROOT);val visible=if(q.isBlank())canonical else canonical.filter{x->listOf(x.optString("title"),x.optString("year"),x.optString("content_type"),x.optString("overview")).joinToString(" ").lowercase(Locale.ROOT).contains(q)}
     val focusRequester=remember{FocusRequester()};val keyboard=LocalSoftwareKeyboardController.current
@@ -2022,9 +2041,14 @@ private fun VideoScreen(api:HomeApi,active:Boolean,selectionRevision:Int,endpoin
             }
         }
     }
-    var history by remember{mutableStateOf(emptyList<JSONObject>())}; var savedHistory by remember{mutableStateOf(emptyList<JSONObject>())}; var historyOpen by remember{mutableStateOf(false)}; var seasonOpen by remember{mutableStateOf(false)}; var detailOpen by remember{mutableStateOf(false)}; var loadingSeason by remember{mutableStateOf("")}
-    var selection by remember{mutableStateOf(JSONObject())}; var selectionIdentity by remember{mutableStateOf("")}; var pendingSelectionIdentity by remember{mutableStateOf("")}; var selectedHistoryItem by remember{mutableStateOf<JSONObject?>(null)}; var job by remember{mutableStateOf<JSONObject?>(null)}; var sources by remember{mutableStateOf(emptyList<JSONObject>())}; var jobId by remember{mutableStateOf("")}; var loading by remember{mutableStateOf(false)}
+    val historyByEndpoint=remember{mutableStateMapOf<String,List<JSONObject>>()}; val savedHistoryByEndpoint=remember{mutableStateMapOf<String,List<JSONObject>>()}; val historyHydratedByEndpoint=remember{mutableStateMapOf<String,Boolean>()}; val historyErrorByEndpoint=remember{mutableStateMapOf<String,String>()}
+    var history by remember(endpoint.endpointId){mutableStateOf(historyByEndpoint[endpoint.endpointId].orEmpty())}; var savedHistory by remember(endpoint.endpointId){mutableStateOf(savedHistoryByEndpoint[endpoint.endpointId].orEmpty())}; var historyHydrated by remember(endpoint.endpointId){mutableStateOf(historyHydratedByEndpoint[endpoint.endpointId] == true)}; var historyLoading by remember(endpoint.endpointId){mutableStateOf(false)}; var historyError by remember(endpoint.endpointId){mutableStateOf(historyErrorByEndpoint[endpoint.endpointId].orEmpty())}; var historyOpen by remember(endpoint.endpointId){mutableStateOf(false)}; var seasonOpen by remember{mutableStateOf(false)}; var detailOpen by remember{mutableStateOf(false)}; var loadingSeason by remember{mutableStateOf("")}
+    var selection by remember{mutableStateOf(JSONObject())}; var selectionIdentity by remember{mutableStateOf("")}; var pendingSelectionIdentity by remember{mutableStateOf("")}; var selectedHistoryItem by remember(endpoint.endpointId){mutableStateOf<JSONObject?>(null)}; var job by remember{mutableStateOf<JSONObject?>(null)}; var sources by remember{mutableStateOf(emptyList<JSONObject>())}; var jobId by remember{mutableStateOf("")}; var loading by remember{mutableStateOf(false)}
     var season by remember{mutableStateOf("")}; var episode by remember{mutableStateOf("")}; var quality by remember{mutableStateOf("")}; var voice by remember{mutableStateOf("")}; var autoplay by remember{mutableStateOf(false)}; var monitor by remember{mutableStateOf(false)}; var monitorReady by remember{mutableStateOf(false)}; var external by remember{mutableStateOf(JSONObject())}; var message by remember{mutableStateOf("")}; var currentPlayer by remember{mutableStateOf(JSONObject())}; var audioSel by remember{mutableStateOf("")}; var subSel by remember{mutableStateOf("")}
+    fun setEndpointHistory(items:List<JSONObject>){history=items;historyByEndpoint[endpoint.endpointId]=items}
+    fun setEndpointSavedHistory(items:List<JSONObject>){savedHistory=items;savedHistoryByEndpoint[endpoint.endpointId]=items}
+    fun setEndpointHistoryHydrated(value:Boolean){historyHydrated=value;historyHydratedByEndpoint[endpoint.endpointId]=value}
+    fun setEndpointHistoryError(value:String){historyError=value;historyErrorByEndpoint[endpoint.endpointId]=value}
     suspend fun loadJob(id:String){
         if(id.isBlank())return; loading=true
         repeat(30){
@@ -2051,27 +2075,36 @@ private fun VideoScreen(api:HomeApi,active:Boolean,selectionRevision:Int,endpoin
         jobId=latest.optString("job_id")
         if(reloadWork&&jobId.isNotBlank()){loadJob(jobId);loadMonitor()}
     }
-    suspend fun loadHistoryForEndpoint(){
+    suspend fun loadHistoryForEndpoint():Boolean{
+        if(api.server==null)return false
+        historyLoading=true; setEndpointHistoryError("")
         val watched=runCatching{api.get(mediaHistoryPath(endpoint.endpointId)).optJSONArray("items")?.objects().orEmpty()}
-        if(endpoint.adapterKind=="home_edge_tv"){
-            val saved=runCatching{api.get(savedVideoHistoryPath()).optJSONArray("items")?.objects().orEmpty()}
-            history=historyItemsAfterRead(history,saved.getOrNull(),watched.getOrNull(),true,savedHistory)
-            saved.getOrNull()?.let{savedHistory=canonicalHistoryItems(it)}
+        val saved=if(endpoint.adapterKind=="home_edge_tv")runCatching{savedVideoHistoryItemsWithRetry(api)} else null
+        val ok=if(endpoint.adapterKind=="home_edge_tv")saved?.isSuccess==true else watched.isSuccess
+        if(ok){
+            if(endpoint.adapterKind=="home_edge_tv"){
+                setEndpointHistory(historyItemsAfterRead(history,saved?.getOrNull(),watched.getOrNull(),true,savedHistory))
+                saved?.getOrNull()?.let{setEndpointSavedHistory(canonicalHistoryItems(it))}
+            }else{
+                setEndpointHistory(historyItemsAfterRead(history,null,watched.getOrNull(),false))
+            }
+            setEndpointHistoryHydrated(true)
         }else{
-            history=historyItemsAfterRead(history,null,watched.getOrNull(),false)
+            setEndpointHistoryError((saved?.exceptionOrNull()?:watched.exceptionOrNull())?.message?:"Історія недоступна")
         }
+        historyLoading=false
+        return ok
     }
     suspend fun confirmEndpointSelection(body:JSONObject):JSONObject{
         pendingSelectionIdentity=videoSelectionIdentity(body)
         return try{
-            val confirmed=api.put(endpointPath(endpoint.endpointId,"/video/selection"),body)
-            if(isCanonicalEndpointSelection(confirmed,endpoint.endpointId)){
+            val ack=api.put(endpointPath(endpoint.endpointId,"/video/selection"),body)
+            val confirmed=confirmedVideoSelectionFromPut(endpoint.endpointId,ack)
+            if(confirmed!=null){
                 applyEndpointSelection(confirmed,false)
                 confirmed
             }else{
-                selection=JSONObject(body.toString())
-                jobId=body.cleanText("job_id")
-                body
+                throw IllegalStateException("Вибір не підтверджено")
             }
         }finally{
             pendingSelectionIdentity=""
@@ -2102,14 +2135,17 @@ private fun VideoScreen(api:HomeApi,active:Boolean,selectionRevision:Int,endpoin
         // Fast path first: render the selected work immediately. History is the expensive call.
         val sel=runCatching{endpointVideoSelection(api,endpoint.endpointId)};sel.onSuccess{applyEndpointSelection(it,true)}
         runCatching{api.get(endpointPath(endpoint.endpointId,"/player"))}.onSuccess{currentPlayer=it}
-        val h=runCatching{loadHistoryForEndpoint()}
         runCatching{api.get("/api/video/autoplay")}.onSuccess{autoplay=it.optBoolean("enabled")}
-        return h.isSuccess&&sel.isSuccess
+        return sel.isSuccess
     }
     LaunchedEffect(api.server,selectionRevision,endpoint.endpointId){
         if(api.server!=null){
             while(true){if(loadAll())break;delay(1500)}
         }
+    }
+    LaunchedEffect(api.server,endpoint.endpointId){
+        setEndpointHistoryHydrated(historyByEndpoint.containsKey(endpoint.endpointId)); setEndpointHistoryError("")
+        if(api.server!=null)while(true){if(loadHistoryForEndpoint())break;delay(1500)}
     }
     LaunchedEffect(api.server,active,endpoint.endpointId){
         if(api.server!=null&&active)while(true){
@@ -2194,7 +2230,16 @@ private fun VideoScreen(api:HomeApi,active:Boolean,selectionRevision:Int,endpoin
                         Row(Modifier.fillMaxWidth().clickable{detailOpen=true}.padding(top=4.dp,bottom=2.dp),horizontalArrangement=Arrangement.End,verticalAlignment=Alignment.CenterVertically){Text("Детальніше",fontSize=11.sp,fontWeight=FontWeight.SemiBold,color=Accent);Spacer(Modifier.width(3.dp));Mdi("chevron-right",16.dp,Accent)}
                     }
                     Spacer(Modifier.height(16.dp))
-                    HistoryPickerField(if(job!=null)cat.optString("title","Обраний твір")else if(history.isEmpty())"Історія порожня" else "Оберіть збережений твір",history.isNotEmpty()){historyOpen=true}
+                    val historyLabel=when{
+                        api.server==null->"Home Edge недоступний"
+                        historyLoading&&!historyHydrated->"Читаю історію…"
+                        historyError.isNotBlank()&&history.isEmpty()->"Не вдалося завантажити · торкніться ще раз"
+                        history.isEmpty()&&historyHydrated->"Історія порожня"
+                        job!=null->cat.optString("title","Обраний твір")
+                        else->"Оберіть збережений твір"
+                    }
+                    val historyActionable=api.server!=null&&!historyLoading&&(history.isNotEmpty()||historyError.isNotBlank())
+                    HistoryPickerField(historyLabel,historyActionable,historyLoading,historyError.isNotBlank()){if(history.isNotEmpty())historyOpen=true else scope.launch{loadHistoryForEndpoint()}}
                     if(isSeries){
                         SeasonPickerField(season,seasonItems,loadedSeasons){seasonOpen=true}
                         SelectorField(ui("Серія"),"play",if(selectedIsTrailer)"Трейлер" else episode,if(selectedIsTrailer)listOf("Трейлер") else episodes,showCount=!selectedIsTrailer,trailing=if(selectedIsTrailer)"" else selectedDuration){if(!selectedIsTrailer)episode=it}
