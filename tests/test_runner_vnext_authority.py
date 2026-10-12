@@ -12,6 +12,7 @@ from core.runner_vnext_authority import (
     ROUTE_CODE_GENERATION,
     ROUTE_DIAGNOSTIC,
     ROUTE_MERGE,
+    ROUTE_PUBLISH_ONLY,
     ROUTE_RUNTIME_ONLY,
     PrivilegedAuthorityInput,
     RunnerVNextAuthorityError,
@@ -129,6 +130,38 @@ def test_pre_grant_receipt_is_planning_only_not_authorizing() -> None:
     assert public["execution_authorized"] is False
     assert public["allow_legacy_mechanical_shell"] is False
     assert public["side_effects_executed"] is False
+
+
+def test_publish_only_authority_is_draft_pr_planning_not_done_or_merge_authority() -> None:
+    bound = bind_runner_operation(
+        runner_task=runner_task(
+            allowed_files=("tests/test_runner_vnext_reconciliation.py",),
+            payload_text="publish synthetic guard",
+        ),
+        route=ROUTE_PUBLISH_ONLY,
+        operation="publication",
+        source_task_ref="issue:4749",
+    )
+
+    receipt = authority_receipt_from_bound(
+        bound,
+        status="bound",
+        reason_code="VNEXT_AUTHORITATIVE_BOUND_NOT_EXECUTED",
+    )
+    public = receipt.to_public_mapping()
+    public_blob = json.dumps(public, sort_keys=True)
+
+    assert bound.binding.operation_kind == "draft_pr_open"
+    assert bound.binding.effects == ("draft_pr_open",)
+    assert bound.binding.lane is Lane.PUBLISH
+    assert bound.policy_decision.effect_class is EffectClass.GREEN
+    assert public["execution_authorized"] is False
+    assert public["side_effects_executed"] is False
+    assert public["privileged_broker_request"] is False
+    assert "protected_merge" not in bound.operation_ir.effects
+    assert "DONE" not in public_blob
+    assert "MERGE" not in public_blob
+    assert "approval" not in public_blob.lower()
 
 
 def test_diagnostic_route_is_typed_green_and_not_codegen() -> None:

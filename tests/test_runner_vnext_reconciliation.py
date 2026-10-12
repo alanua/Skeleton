@@ -20,7 +20,7 @@ from core.runner_vnext_scheduler import LaneRequest, VNextScheduler
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def runtime(*, privacy=PrivacyClass.PUBLIC_SAFE, sensitive=False):
+def runtime(*, privacy=PrivacyClass.PUBLIC_SAFE, sensitive=False, effects=("workspace_write",)):
     task_id = "task:customer-sensitive" if sensitive else "task:1"
     op_id = "op:customer-sensitive" if sensitive else "op:1"
     idem = "idem:customer-sensitive" if sensitive else "idem:1"
@@ -28,7 +28,7 @@ def runtime(*, privacy=PrivacyClass.PUBLIC_SAFE, sensitive=False):
     resource = "private:customer/path/file" if sensitive else "repo:core/a.py"
     envelope = ExecutionEnvelope(
         operation_id=op_id, adapter_id="adapter:repo", target_state_ref=target, fence_token=1,
-        idempotency_key=idem, resources=(resource,), effects=("workspace_write",),
+        idempotency_key=idem, resources=(resource,), effects=effects,
         effect_class=EffectClass.GREEN, policy_reason_code="GREEN_AUTONOMOUS_TYPED_EFFECT",
         required_capabilities=("repository_write_allowlisted",), privacy=privacy,
     )
@@ -133,6 +133,44 @@ def test_partial_changed_state_emits_non_executable_rollback_request() -> None:
     rollback_public = StartedOperationReconciler.rollback_public_projection(receipt.rollback_request, privacy="PUBLIC_SAFE")
     schema = json.loads((ROOT / "schemas" / "runner_rollback_request.schema.json").read_text())
     jsonschema.validate(rollback_public, schema)
+
+
+def test_partial_publication_failure_after_push_is_not_done_merge_or_retry_authority() -> None:
+    scheduler, ledger, grant = runtime(effects=("branch_commit_push", "draft_pr_open"))
+    pushed_without_pr = evidence(
+        grant,
+        outcome="PARTIAL",
+        before="git:source-head-before",
+        after="git:pushed-branch-without-pr",
+        reason_code="PR_CREATE_FAILED",
+    )
+    reconciler = StartedOperationReconciler(scheduler=scheduler, ledger=ledger)
+
+    receipt = reconciler.reconcile(
+        grant,
+        Probe(pushed_without_pr),
+        evidence_verifier=Verifier(),
+    )
+    public = reconciler.public_projection(receipt)
+    public_blob = json.dumps(public, sort_keys=True)
+
+    assert receipt.status == "RECONCILED_FAILED"
+    assert receipt.reason_code == "PR_CREATE_FAILED"
+    assert receipt.outcome == "PARTIAL"
+    assert receipt.rollback_required is True
+    assert receipt.rollback_request is not None
+    assert receipt.rollback_request.execution_authorized is False
+    assert receipt.rollback_request.original_effects == ("branch_commit_push", "draft_pr_open")
+    assert receipt.lease_released is True
+    assert receipt.needs_recovery is True
+    assert ledger.status(grant.idempotency_key) == "FAILED"
+    assert scheduler.current(lane=Lane.CODEGEN, scope_key=grant.lease_scope_key) is None
+    assert public["status"] == "RECONCILED_FAILED"
+    assert public["rollback_required"] is True
+    assert "RECONCILED_COMPLETED" not in public_blob
+    assert "DONE" not in public_blob
+    assert "MERGE" not in public_blob
+    assert "approval" not in public_blob.lower()
 
 
 def test_no_effect_requires_same_state_and_terminalizes_failed_without_rollback() -> None:
