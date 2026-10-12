@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
+from numbers import Real
 from typing import Mapping
 
 from core.model_registry import ModelRecord
@@ -26,9 +28,12 @@ class TaskFitRequest:
         if not self.required_capabilities:
             raise ModelSelectionError("required_capabilities_required")
         for capability_id, minimum_score in self.required_capabilities.items():
-            if not capability_id:
+            if not capability_id or not capability_id.strip():
                 raise ModelSelectionError("capability_id_required")
-            if not 0.0 <= float(minimum_score) <= 1.0:
+            if isinstance(minimum_score, bool) or not isinstance(minimum_score, Real):
+                raise ModelSelectionError("minimum_score_invalid")
+            normalized_score = float(minimum_score)
+            if not math.isfinite(normalized_score) or not 0.0 <= normalized_score <= 1.0:
                 raise ModelSelectionError("minimum_score_out_of_range")
 
 

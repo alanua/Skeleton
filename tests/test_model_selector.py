@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from core.model_registry import CapabilityRecord, ModelRecord, load_model_registry
-from core.model_selector import TaskFitRequest, rank_models, select_model
+from core.model_selector import ModelSelectionError, TaskFitRequest, rank_models, select_model
 
 
 REGISTRY = Path(__file__).resolve().parents[1] / "MODEL_REGISTRY.yaml"
@@ -15,6 +17,34 @@ def test_same_profile_same_snapshot_same_ranking() -> None:
     first = [model.model_id for model in rank_models(records, request)]
     second = [model.model_id for model in rank_models(records, request)]
     assert first == second
+
+
+@pytest.mark.parametrize("minimum_score", [float("nan"), float("inf"), -float("inf"), "0.5", True, False])
+def test_required_capability_thresholds_must_be_finite_numbers(minimum_score: object) -> None:
+    with pytest.raises(ModelSelectionError):
+        TaskFitRequest("analysis", {"reasoning": minimum_score}, "PUBLIC")
+
+
+@pytest.mark.parametrize("capability_id", ["", " ", "\t\n"])
+def test_required_capability_ids_must_not_be_blank(capability_id: str) -> None:
+    with pytest.raises(ModelSelectionError):
+        TaskFitRequest("analysis", {capability_id: 0.5}, "PUBLIC")
+
+
+@pytest.mark.parametrize("minimum_score", [0, 0.0, 0.5, 1, 1.0])
+def test_required_capability_threshold_accepts_valid_numeric_range(minimum_score: float) -> None:
+    TaskFitRequest("analysis", {"reasoning": minimum_score}, "PUBLIC")
+
+
+def test_required_capability_order_does_not_change_ranking() -> None:
+    first = _record("first", 0.91, latency=1, cost=1)
+    second = _record("second", 0.90, latency=0, cost=0)
+    first.capabilities["tool_use"] = CapabilityRecord("tool_use", "LIVE", 0.81, True)
+    second.capabilities["tool_use"] = CapabilityRecord("tool_use", "LIVE", 0.80, True)
+    forward = TaskFitRequest("analysis", {"reasoning": 0.70, "tool_use": 0.70}, "PUBLIC")
+    reversed_order = TaskFitRequest("analysis", {"tool_use": 0.70, "reasoning": 0.70}, "PUBLIC")
+
+    assert rank_models((second, first), forward) == rank_models((second, first), reversed_order)
 
 
 def test_tool_use_coding_excludes_response_only_glm_route() -> None:
