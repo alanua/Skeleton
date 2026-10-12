@@ -359,6 +359,20 @@ def _usable_interfaces(
     capability: Mapping[str, Any],
     fresh_evidence: tuple[RuntimeCapabilityEvidence, ...],
 ) -> list[str]:
+    # A registered tool is live only when its own runtime registration
+    # attests a usable interface. Registry entries are not runtime proof,
+    # nor can a different evidence kind supply the missing tool identity.
+    registered = tuple(
+        item for item in fresh_evidence if item.evidence_kind == "registered_tool"
+    )
+    if registered:
+        return sorted(
+            {
+                interface
+                for item in registered
+                for interface in item.usable_interfaces
+            }
+        )
     interfaces = sorted(
         {
             interface
