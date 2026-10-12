@@ -80,6 +80,39 @@ def test_secrets_route_uses_secret_manager_target() -> None:
     assert routes["secrets_credentials"]["target"] == "local_encrypted_store_or_secret_manager"
 
 
+def test_private_and_secret_routes_cannot_target_public_github_metadata() -> None:
+    routing = load_yaml("MEMORY_ROUTING.yaml")
+    routes = routing["routes"]
+
+    public_targets = {"public_github_canon", "projects/skeleton/REVIEW_QUEUE.yaml"}
+
+    for route_name in ["private_context", "secrets_credentials"]:
+        assert routes[route_name]["target"] not in public_targets
+        assert route_name in routing["classification_required_for"]
+
+
+def test_public_github_canon_route_requires_reviewed_public_safe_classification() -> None:
+    routing = load_yaml("MEMORY_ROUTING.yaml")
+    routes = routing["routes"]
+
+    assert routes["public_safe_durable"]["target"] == "public_github_canon"
+    assert routes["public_safe_durable"]["fixuy_rule"] == (
+        "record_after_classification_via_GitHub_canon_review_without_extra_plus"
+    )
+    assert routes["private_context"]["fixuy_rule"] == "record_after_classification_in_private_memory"
+    assert routes["secrets_credentials"]["fixuy_rule"] == (
+        "refuse_chat_GitHub_plain_storage_require_secret_manager_or_local_encrypted_route"
+    )
+
+
+def test_public_review_queue_forbids_private_data_and_secrets() -> None:
+    review_queue = load_yaml("MEMORY_ROUTING.yaml")["routes"]["public_safe_review_queue"]
+
+    assert review_queue["target"] == "projects/skeleton/REVIEW_QUEUE.yaml"
+    assert "private_data" in review_queue["forbids"]
+    assert "secrets" in review_queue["forbids"]
+
+
 def test_fixuy_memory_routes_are_explicit_and_secrets_refuse_plain_storage() -> None:
     routing = load_yaml("MEMORY_ROUTING.yaml")
     routes = routing["routes"]
