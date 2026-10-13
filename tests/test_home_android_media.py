@@ -192,6 +192,9 @@ def test_home_and_video_header_keep_connection_status() -> None:
 
 def test_native_home_episode_arrows_use_real_backend_route_and_double_size() -> None:
     text = _source()
+    assert 'val target=api.get("/api/media/target").optString("target","")' in text
+    assert 'val expected=when(endpointId){"home_edge_tv"->"tv";"samsung_tv"->"samsung";else->""}' in text
+    assert 'if(expected.isBlank()||target!=expected)throw IllegalStateException(' in text
     assert 'api.post("/api/video/episode/step",JSONObject().put("direction",direction))' in text
     assert 'endpointPath(endpointId,"/video/episode/step")' not in text
     assert 'Modifier.align(Alignment.CenterStart).width(maxOf(frameSide,72.dp)).fillMaxHeight()' in text
