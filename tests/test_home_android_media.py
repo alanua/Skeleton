@@ -228,3 +228,13 @@ def test_youtube_cached_ownership_scopes_like_subtitles_and_seekability() -> Non
     assert 'val youtubeControls=if(sameVideo)remoteControls else JSONObject()' in card
     assert 'val canSeek=if(sameVideo)liveRemote.optBoolean("is_seekable",!isLive&&rawDuration>1.0) else !isLive&&rawDuration>1.0' in card
     assert 'val remoteDuration=if(sameVideo)liveRemote.optDouble("duration",0.0).toFloat() else 0f' in card
+
+
+def test_home_discovery_prefers_last_verified_endpoint_to_avoid_tailnet_lag() -> None:
+    text = _source()
+    assert 'val lastHealthy=server' in text
+    assert 'val candidates=if(lastHealthy!=null&&lastHealthy in servers)' in text
+    assert 'listOf(lastHealthy)+servers.filterNot{it==lastHealthy} else servers' in text
+    assert 'for (s in candidates) try {' in text
+    assert 'if (ok) { server = s; return@withContext s }' in text
+    assert 'server = null; null' in text
