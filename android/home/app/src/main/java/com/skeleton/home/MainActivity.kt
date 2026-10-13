@@ -207,7 +207,12 @@ private class HomeApi {
         .distinct()
     var server by mutableStateOf<String?>(null)
     suspend fun discover(): String? = withContext(Dispatchers.IO) {
-        for (s in servers) try {
+        // Keep a healthy LAN or Tailscale endpoint sticky. Otherwise every 5s,
+        // a phone outside the LAN waits for the unreachable LAN URL first.
+        val lastHealthy=server
+        val candidates=if(lastHealthy!=null&&lastHealthy in servers)
+            listOf(lastHealthy)+servers.filterNot{it==lastHealthy} else servers
+        for (s in candidates) try {
             val c = URL("$s/health").openConnection() as HttpURLConnection
             c.connectTimeout = 1800; c.readTimeout = 1800
             val ok = c.responseCode in 200..299; c.disconnect()
