@@ -49,7 +49,7 @@ def test_home_tv_youtube_uses_endpoint_player_without_snapshot_polling() -> None
     assert 'val canonicalTitle=lastGoodPlayer.optString("display-title",lastGoodPlayer.optString("title",lastGoodPlayer.optString("media-title",""))).trim()' in text
     assert 'val remotePoster=remotePlayer.optString("poster_landscape",remotePlayer.optString("poster",""))' in text
     assert 'val canonicalPoster=lastGoodPlayer.optString("poster_landscape",lastGoodPlayer.optString("poster",""))' in text
-    assert 'val remoteState=liveRemote.optInt("state",-99)' in text
+    assert 'val remoteState=if(sameVideo)liveRemote.optInt("state",-99) else -99' in text
     assert 'val remoteDuration=liveRemote.optDouble("duration",0.0).toFloat()' in text
     assert 'val remoteVideoId=liveRemote.optString("video_id","")' in text
     assert 'val videoId=remoteVideoId.ifBlank{canonicalVideoId}' in text
@@ -188,3 +188,31 @@ def test_home_and_video_header_keep_connection_status() -> None:
     assert "showStatus=false" not in video_line
     assert 'Text(if(connected) "Підключено" else "Недоступно"' in text
     assert 'background(if(connected)Green else Muted)' in text
+
+
+def test_native_home_episode_arrows_use_real_backend_route_and_double_size() -> None:
+    text = _source()
+    assert 'api.post("/api/video/episode/step",JSONObject().put("direction",direction))' in text
+    assert 'endpointPath(endpointId,"/video/episode/step")' not in text
+    assert 'Modifier.align(Alignment.CenterStart).width(maxOf(frameSide,72.dp)).fillMaxHeight()' in text
+    assert 'Modifier.align(Alignment.CenterEnd).width(maxOf(frameSide,72.dp)).fillMaxHeight()' in text
+    assert 'Text("‹",fontSize=54.sp,lineHeight=56.sp' in text
+    assert 'Text("›",fontSize=54.sp,lineHeight=56.sp' in text
+    assert 'finally{episodeStepping=false}' in text
+
+
+def test_native_youtube_remote_errors_are_not_silenced() -> None:
+    text = _source()
+    assert 'api.post(endpointPath(endpoint.endpointId,"/remote/control"),endpointMutation(endpoint.endpointId,"action" to act,"phase" to "tap"))' in text
+    assert 'if(endpoint.adapterKind!="samsung"&&!reply.optBoolean("applied",false))' in text
+    assert 'android.widget.Toast.makeText(context,"Пульт YouTube: "' in text
+    assert 'onRemote={act->scope.launch{runCatching{api.post' not in text
+
+
+def test_youtube_current_video_metadata_overrides_stale_cached_remote() -> None:
+    text = _source()
+    assert 'val videoId=if(!sameVideo&&canonicalVideoId.isNotBlank())canonicalVideoId else remoteVideoId.ifBlank{canonicalVideoId}' in text
+    assert 'sameVideo&&remoteTitle.isNotBlank()->remoteTitle' in text
+    assert 'canonicalTitle.isNotBlank()->canonicalTitle' in text
+    assert 'val poster=if(sameVideo)remotePoster.ifBlank{canonicalPoster} else canonicalPoster' in text
+    assert 'val serverPos=(if(sameVideo&&liveRemote.has("time"))' in text
