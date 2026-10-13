@@ -50,10 +50,10 @@ def test_home_tv_youtube_uses_endpoint_player_without_snapshot_polling() -> None
     assert 'val remotePoster=remotePlayer.optString("poster_landscape",remotePlayer.optString("poster",""))' in text
     assert 'val canonicalPoster=lastGoodPlayer.optString("poster_landscape",lastGoodPlayer.optString("poster",""))' in text
     assert 'val remoteState=if(sameVideo)liveRemote.optInt("state",-99) else -99' in text
-    assert 'val remoteDuration=liveRemote.optDouble("duration",0.0).toFloat()' in text
+    assert 'val remoteDuration=if(sameVideo)liveRemote.optDouble("duration",0.0).toFloat() else 0f' in text
     assert 'val remoteVideoId=liveRemote.optString("video_id","")' in text
-    assert 'val videoId=remoteVideoId.ifBlank{canonicalVideoId}' in text
-    assert 'val serverPos=(if(liveRemote.has("time"))liveRemote.optDouble("time",fallbackPos) else fallbackPos).toFloat()' in text
+    assert 'val videoId=if(!sameVideo&&canonicalVideoId.isNotBlank())canonicalVideoId else remoteVideoId.ifBlank{canonicalVideoId}' in text
+    assert 'val serverPos=(if(sameVideo&&liveRemote.has("time"))liveRemote.optDouble("time",fallbackPos) else fallbackPos).toFloat()' in text
     assert 'val rawDuration=if(remoteDuration>1f)remoteDuration else lastGoodPlayer.optDouble("duration",0.0).toFloat()' in text
     assert 'val paused=when(remoteState){1->false;2,3->true;else->lastGoodPlayer.optBoolean("pause",false)}' in text
     assert 'remoteState in setOf(1,2,3)' in text
@@ -216,3 +216,12 @@ def test_youtube_current_video_metadata_overrides_stale_cached_remote() -> None:
     assert 'canonicalTitle.isNotBlank()->canonicalTitle' in text
     assert 'val poster=if(sameVideo)remotePoster.ifBlank{canonicalPoster} else canonicalPoster' in text
     assert 'val serverPos=(if(sameVideo&&liveRemote.has("time"))' in text
+
+
+def test_youtube_cached_ownership_scopes_like_subtitles_and_seekability() -> None:
+    text = _source()
+    card = text.split("@Composable private fun YoutubeRemoteCard", 1)[1].split("@Composable private fun VideoRemoteCard", 1)[0]
+    assert 'val remoteControls=remote.optJSONObject("youtube_context")?.optJSONObject("controls")' in card
+    assert 'val youtubeControls=if(sameVideo)remoteControls else JSONObject()' in card
+    assert 'val canSeek=if(sameVideo)liveRemote.optBoolean("is_seekable",!isLive&&rawDuration>1.0) else !isLive&&rawDuration>1.0' in card
+    assert 'val remoteDuration=if(sameVideo)liveRemote.optDouble("duration",0.0).toFloat() else 0f' in card
