@@ -87,6 +87,66 @@ def test_queue_fence_reset_requires_current_matching_fence() -> None:
     assert receipt.effect_ceiling is EffectClass.YELLOW
 
 
+def test_stale_queue_fence_recovery_does_not_execute_or_replay_handler() -> None:
+    calls: list[str] = []
+
+    def counted_handler(request: RecoveryRequest, _context: RecoveryContext) -> RecoveryHandlerResult:
+        calls.append(request.idempotency_key)
+        return RecoveryHandlerResult(
+            reason_code="RECOVERY_VERIFIED",
+            touched_resource_refs=("runner:queue-fence",),
+            before_state_ref="sha256:before",
+            after_state_ref="sha256:after",
+            validation_status="PASS",
+        )
+
+    request = RecoveryRequest(
+        request_id="r-stale",
+        command=RecoveryCommand.QUEUE_FENCE_RESET,
+        target_state_ref="git:new",
+        idempotency_key="r-stale@git:new@f1",
+        bounded_resources=("runner:queue-fence",),
+        expected_effects=("control_plane_change",),
+        current_fence_token=1,
+    )
+    kernel = RecoveryKernel({request.command: counted_handler})
+
+    for _ in range(2):
+        with pytest.raises(RecoveryError, match="RECOVERY_STALE_FENCE_EVIDENCE"):
+            kernel.execute(request, RecoveryContext(current_target_state_ref="git:new", current_fence_token=2))
+
+    assert calls == []
+
+
+def test_interrupted_recovery_request_cannot_mutate_retained_dirty_worktree_ref() -> None:
+    touched: list[str] = []
+
+    def dirty_worktree_handler(request: RecoveryRequest, _context: RecoveryContext) -> RecoveryHandlerResult:
+        touched.extend(request.bounded_resources)
+        return RecoveryHandlerResult(
+            reason_code="RECOVERY_VERIFIED",
+            touched_resource_refs=request.bounded_resources,
+            before_state_ref="git:dirty-retained",
+            after_state_ref="git:dirty-retained",
+            validation_status="PASS",
+        )
+
+    stale_request = RecoveryRequest(
+        request_id="r-dirty-old",
+        command=RecoveryCommand.TYPED_REPAIR_RUNTIME_STATE,
+        target_state_ref="git:old",
+        idempotency_key="r-dirty-old@git:old",
+        bounded_resources=("runner:retained-worktree",),
+        expected_effects=("control_plane_change",),
+    )
+    kernel = RecoveryKernel({stale_request.command: dirty_worktree_handler})
+
+    with pytest.raises(RecoveryError, match="RECOVERY_TARGET_STATE_MISMATCH"):
+        kernel.execute(stale_request, RecoveryContext(current_target_state_ref="git:dirty-retained"))
+
+    assert touched == []
+
+
 def test_public_receipt_rejects_private_path_like_refs() -> None:
     def private_handler(_request: RecoveryRequest, _context: RecoveryContext) -> RecoveryHandlerResult:
         return RecoveryHandlerResult("RECOVERY_VERIFIED", ("/private/path",), "sha256:a", "sha256:b", "PASS")
