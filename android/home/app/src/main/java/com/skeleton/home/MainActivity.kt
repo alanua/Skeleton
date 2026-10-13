@@ -1686,7 +1686,7 @@ private fun Header(title:String, connected:Boolean, endpointId:String, endpoints
         val yp=remote.optJSONObject("youtube_player") ?: remote
         if(yp.length()>0) liveRemote=yp
     }
-    val youtubeControls=remote.optJSONObject("youtube_context")?.optJSONObject("controls")
+    val remoteControls=remote.optJSONObject("youtube_context")?.optJSONObject("controls")
         ?: remote.optJSONObject("controls")
         ?: JSONObject()
     val remotePlayer=remote.optJSONObject("player") ?: JSONObject()
@@ -1697,6 +1697,7 @@ private fun Header(title:String, connected:Boolean, endpointId:String, endpoints
     val videoId=if(!sameVideo&&canonicalVideoId.isNotBlank())canonicalVideoId else remoteVideoId.ifBlank{canonicalVideoId}
     val remoteState=if(sameVideo)liveRemote.optInt("state",-99) else -99
     val remoteDuration=if(sameVideo)liveRemote.optDouble("duration",0.0).toFloat() else 0f
+    val youtubeControls=if(sameVideo)remoteControls else JSONObject()
     val running=lastGoodPlayer.optBoolean("running") || (videoId.isNotBlank()&&remoteState in setOf(1,2,3))
     val remoteTitle=remotePlayer.optString("display-title",remotePlayer.optString("title",remotePlayer.optString("media-title",""))).trim()
     val canonicalTitle=lastGoodPlayer.optString("display-title",lastGoodPlayer.optString("title",lastGoodPlayer.optString("media-title",""))).trim()
@@ -1724,7 +1725,7 @@ private fun Header(title:String, connected:Boolean, endpointId:String, endpoints
     val fallbackPos=lastGoodPlayer.optDouble("time-pos",0.0)
     val serverPos=(if(sameVideo&&liveRemote.has("time"))liveRemote.optDouble("time",fallbackPos) else fallbackPos).toFloat()
     val rawDuration=if(remoteDuration>1f)remoteDuration else lastGoodPlayer.optDouble("duration",0.0).toFloat()
-    val canSeek=liveRemote.optBoolean("is_seekable",!isLive&&rawDuration>1.0)
+    val canSeek=if(sameVideo)liveRemote.optBoolean("is_seekable",!isLive&&rawDuration>1.0) else !isLive&&rawDuration>1.0
     val duration=rawDuration.coerceAtLeast(1f)
     LaunchedEffect(videoId,serverPos,rawDuration){seek=serverPos.coerceIn(0f,duration)}
     val paused=when(remoteState){1->false;2,3->true;else->lastGoodPlayer.optBoolean("pause",false)}
