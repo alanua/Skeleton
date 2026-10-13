@@ -1793,6 +1793,11 @@ private fun Header(title:String, connected:Boolean, endpointId:String, endpoints
             if(seriesNav){
                 fun step(direction:Int){if(episodeStepping)return;episodeStepping=true;scope.launch{
                     try{
+                        // The backend episode-step endpoint acts on the globally selected device.
+                        // A local TV/tablet card must never step a different endpoint by accident.
+                        val target=api.get("/api/media/target").optString("target","")
+                        val expected=when(endpointId){"home_edge_tv"->"tv";"samsung_tv"->"samsung";else->""}
+                        if(expected.isBlank()||target!=expected)throw IllegalStateException("Оберіть активний пристрій перед переходом серії")
                         api.post("/api/video/episode/step",JSONObject().put("direction",direction))
                     }catch(error:Exception){
                         android.widget.Toast.makeText(context,error.message?.take(140)?:"Сусідня серія недоступна",android.widget.Toast.LENGTH_SHORT).show()
