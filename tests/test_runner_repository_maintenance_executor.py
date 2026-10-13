@@ -908,6 +908,76 @@ def test_control_plane_recovery_wires_fixed_actions_without_hermes_substitution(
     assert runner.HERMES_WORKER_PREFLIGHT not in calls
 
 
+def test_finalize_success_blocks_after_exact_branch_push_when_draft_pr_transport_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    issue = {"number": 4757, "title": "synthetic publisher regression"}
+    issue_branch = runner.issue_branch(issue["number"])
+    calls: list[list[str]] = []
+
+    monkeypatch.setattr(runner, "changed_files", lambda _workdir: ["tests/test_synthetic.py"])
+    monkeypatch.setattr(runner, "cleanup_runtime_artifacts", lambda _workdir: None)
+    monkeypatch.setattr(
+        runner,
+        "_run_finalization_validation_command",
+        lambda command, *, cwd: (0, "1 passed\n"),
+    )
+
+    def fake_run_command(command: list[str], *, cwd: str | None = None) -> tuple[int, str]:
+        del cwd
+        calls.append(command)
+        if command[:2] == ["git", "add"]:
+            return 0, ""
+        if command[:3] == ["git", "diff", "--cached"]:
+            return 0, ""
+        if command[:2] == ["git", "commit"]:
+            return 0, "[runner/issue-4757 abc1234] synthetic\n"
+        if command[:2] == ["git", "push"]:
+            assert command == [
+                "git",
+                "push",
+                "--force-with-lease",
+                "-u",
+                "origin",
+                issue_branch,
+            ]
+            return 0, "pushed exact synthetic branch\n"
+        if command[:3] == ["git", "rev-parse", "HEAD"]:
+            return 0, "a" * 40 + "\n"
+        if command[:3] == ["gh", "pr", "create"]:
+            assert "--draft" in command
+            assert command[command.index("--head") + 1] == issue_branch
+            return 1, "synthetic create_draft_pr transport failure"
+        if command[:3] == ["gh", "pr", "view"]:
+            assert issue_branch in command
+            return 1, "synthetic lookup transport failure"
+        raise AssertionError(command)
+
+    monkeypatch.setattr(runner, "run_command", fake_run_command)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        runner.finalize_success(issue, "/tmp/synthetic-worktree", "RESULT: DONE\n")
+
+    message = str(excinfo.value)
+    assert "gh pr create failed" in message
+    assert "gh pr view failed" in message
+    assert "Draft PR:" not in message
+    assert calls.count(
+        [
+            "git",
+            "push",
+            "--force-with-lease",
+            "-u",
+            "origin",
+            issue_branch,
+        ]
+    ) == 1
+    assert sum(1 for command in calls if command[:3] == ["gh", "pr", "create"]) == 1
+    assert not any(command[:2] == ["git", "merge"] for command in calls)
+    assert not any(command[:3] == ["gh", "pr", "merge"] for command in calls)
+    assert not any(command[:3] == ["gh", "issue", "edit"] for command in calls)
+
+
 def _lavalamp_task(**overrides: object) -> RunnerTask:
     payload: dict[str, object] = {
         "operation": BUILD_AND_LOCAL_OTA_OPERATION,
