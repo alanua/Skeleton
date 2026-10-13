@@ -63,7 +63,7 @@ def test_home_tv_youtube_uses_endpoint_player_without_snapshot_polling() -> None
     assert "delay(4000)" not in text
     assert 'runCatching{api.get(endpointPath(endpoint.endpointId,"/remote/status"))}.onSuccess{status->' in text
     assert 'delay(if(System.currentTimeMillis()<fastUntil)250 else 850)' in text
-    assert "val youtubeControls=remote.optJSONObject" in text
+    assert "val remoteControls=remote.optJSONObject" in text
     assert "LaunchedEffect(videoId,running,canSeek,paused,rawDuration)" in text
     card = text.split("@Composable private fun YoutubeRemoteCard", 1)[1].split("@Composable private fun VideoRemoteCard", 1)[0]
     assert "api.get(" not in card
@@ -155,7 +155,7 @@ def test_youtube_fast_status_drives_progress_and_poster():
     src = MAIN_ACTIVITY.read_text(encoding="utf-8")
     assert 'delay(if(System.currentTimeMillis()<fastUntil)250 else 850)' in src
     assert 'liveRemote.optDouble("time",fallbackPos)' in src
-    assert 'val remoteDuration=liveRemote.optDouble("duration",0.0).toFloat()' in src
+    assert 'val remoteDuration=if(sameVideo)liveRemote.optDouble("duration",0.0).toFloat() else 0f' in src
     assert '"https://i.ytimg.com/vi/$videoId/hqdefault.jpg"' in src
 
 
