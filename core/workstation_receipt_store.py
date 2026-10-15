@@ -6,12 +6,13 @@ machine key through registered SecretStore and authenticates acknowledgements.
 from __future__ import annotations
 
 from collections.abc import Callable
+import hashlib
 import json
 import os
 from pathlib import Path
 import sqlite3
 
-from core.workstation_agent import CommandReceipt, WorkstationRejected
+from core.workstation_agent import CommandEnvelope, CommandReceipt, WorkstationRejected
 
 _SCHEMA = "skeleton.workstation_receipt.v1"
 
@@ -53,6 +54,11 @@ class EncryptedReceiptStore:
             "CREATE TABLE IF NOT EXISTS receipts ("
             "hash TEXT PRIMARY KEY, nonce BLOB NOT NULL, encrypted BLOB NOT NULL)"
         )
+        self._db.execute(
+            "CREATE TABLE IF NOT EXISTS command_journal ("
+            "key_hash TEXT PRIMARY KEY, fingerprint TEXT NOT NULL,"
+            "state TEXT NOT NULL, receipt_hash TEXT)"
+        )
         self._db.commit()
 
     def close(self) -> None:
@@ -66,6 +72,65 @@ class EncryptedReceiptStore:
 
     def count(self) -> int:
         return int(self._db.execute("SELECT COUNT(*) FROM receipts").fetchone()[0])
+
+    def unresolved_count(self) -> int:
+        return int(self._db.execute(
+            "SELECT COUNT(*) FROM command_journal WHERE state='PENDING'"
+        ).fetchone()[0])
+
+    def reserve(self, command: CommandEnvelope) -> str:
+        """Durably mark one exact command BEFORE any possible CAD mutation.
+
+        A crash leaves PENDING, which blocks all further commands until
+        separate, operator-controlled state reconciliation. Never auto-retry.
+        """
+        if not isinstance(command, CommandEnvelope):
+            raise WorkstationRejected("TYPED_COMMAND_REQUIRED")
+        key_hash = hashlib.sha256(command.idempotency_key.encode()).hexdigest()
+        fingerprint = command.fingerprint()
+        if self.unresolved_count():
+            return "PENDING"
+        row = self._db.execute(
+            "SELECT fingerprint,state FROM command_journal WHERE key_hash=?", (key_hash,)
+        ).fetchone()
+        if row:
+            if row[0] != fingerprint:
+                return "CONFLICT"
+            return "COMPLETED" if row[1] == "COMPLETED" else "PENDING"
+        if self.count() >= self._max_items:
+            raise WorkstationRejected("RECEIPT_QUEUE_FULL")
+        with self._db:
+            self._db.execute(
+                "INSERT INTO command_journal (key_hash,fingerprint,state)"
+                " VALUES (?,?,'PENDING')", (key_hash, fingerprint)
+            )
+        return "NEW"
+
+    def finalize(self, command: CommandEnvelope, receipt: CommandReceipt) -> None:
+        """Complete command and persist encrypted outbox receipt atomically."""
+        if not isinstance(command, CommandEnvelope) or not isinstance(receipt, CommandReceipt):
+            raise WorkstationRejected("TYPED_COMMAND_RECEIPT_REQUIRED")
+        key_hash = hashlib.sha256(command.idempotency_key.encode()).hexdigest()
+        row = self._db.execute(
+            "SELECT fingerprint,state FROM command_journal WHERE key_hash=?", (key_hash,)
+        ).fetchone()
+        if not row or row != (command.fingerprint(), "PENDING"):
+            raise WorkstationRejected("JOURNAL_NOT_RESERVED")
+        data = receipt.public()
+        body = json.dumps(data, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+        if len(body) > 2048 or len(receipt.receipt_hash) != 64:
+            raise WorkstationRejected("INVALID_RECEIPT")
+        nonce = os.urandom(12)
+        encrypted = self._cipher.encrypt(nonce, body, receipt.receipt_hash.encode("ascii"))
+        with self._db:
+            self._db.execute(
+                "INSERT INTO receipts(hash,nonce,encrypted) VALUES (?,?,?)",
+                (receipt.receipt_hash, nonce, encrypted)
+            )
+            self._db.execute(
+                "UPDATE command_journal SET state='COMPLETED',receipt_hash=? WHERE key_hash=?",
+                (receipt.receipt_hash, key_hash)
+            )
 
     def enqueue(self, receipt: CommandReceipt) -> bool:
         if not isinstance(receipt, CommandReceipt):
