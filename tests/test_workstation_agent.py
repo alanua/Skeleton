@@ -120,7 +120,8 @@ def test_checkpoint_apply_and_rollback_simulated_only():
     assert db.public_snapshot()["revision"] == 1
     assert a.submit(cmd("ROLLBACK", key="stale", revision=0, payload={"checkpoint_id":"base"})).reason_class == "STALE_APPLICATION_CONTEXT"
     assert a.submit(cmd("ROLLBACK", key="rollback", revision=1, payload={"checkpoint_id":"base"})).status == "APPLIED"
-    assert db.public_snapshot()["object_count"] == 0 and db.public_snapshot()["revision"] == 0
+    assert db.public_snapshot()["object_count"] == 0 and db.public_snapshot()["revision"] == 2
+    assert a.submit(cmd("SNAPSHOT", key="obsolete", revision=0)).reason_class == "STALE_APPLICATION_CONTEXT"
 
 
 def test_invalid_command_payload_ttl_and_unknown_operation():
