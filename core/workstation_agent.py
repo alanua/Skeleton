@@ -225,6 +225,15 @@ class CommandReceipt:
                 "receipt_hash": self.receipt_hash, "acknowledged": self.acknowledged}
 
 
+class CommandJournal(Protocol):
+    def unresolved_count(self) -> int: ...
+    def count(self) -> int: ...
+    def reserve(self, command: CommandEnvelope) -> str: ...
+    def finalize(self, command: CommandEnvelope, receipt: CommandReceipt) -> None: ...
+    def list_pending(self, limit: int = 100) -> tuple[dict[str, object], ...]: ...
+    def acknowledge(self, receipt_hash: str, signed_ack: bytes) -> bool: ...
+
+
 class WorkstationAgent:
     """Pure offline-safe command state-machine; not a network endpoint.
 
@@ -235,7 +244,8 @@ class WorkstationAgent:
     def __init__(self, *, identity: NodeIdentity, node_session: NodeSession,
                  application: ApplicationSession, lease: InteractionLease,
                  gate: TrustedGate | None, adapter: BoundedAdapter,
-                 clock: Callable[[], float] = time.time) -> None:
+                 clock: Callable[[], float] = time.time,
+                 journal: CommandJournal | None = None) -> None:
         self.identity = identity
         self.node_session = node_session
         self.application = application
@@ -243,11 +253,20 @@ class WorkstationAgent:
         self._gate = gate
         self._adapter = adapter
         self._clock = clock
+        self._journal = journal
         self._seen: dict[str, tuple[str, CommandReceipt]] = {}
         self._outbox: list[CommandReceipt] = []
         self._paused = False
         self._aborted = False
         self._connected = bool(node_session.connected)
+        if journal is not None:
+            try:
+                if journal.unresolved_count():
+                    self._aborted = True
+                    self._paused = True
+            except Exception:
+                self._aborted = True
+                self._paused = True
         if (node_session.node_id != identity.node_id
                 or application.node_session_id != node_session.node_session_id
                 or lease.application_session_id != application.application_session_id
@@ -269,15 +288,20 @@ class WorkstationAgent:
     def public_status(self) -> dict[str, object]:
         return {"schema": "skeleton.workstation_status.v1", "online": self._connected,
                 "trusted": self.identity.trust is Trust.TRUSTED, "paused": self._paused,
-                "aborted": self._aborted, "pending_receipts": len(self._outbox),
+                "aborted": self._aborted,
+                "pending_receipts": self._journal.count() if self._journal is not None else len(self._outbox),
                 "processed_commands": len(self._seen)}
 
     def pending_receipts(self) -> tuple[dict[str, object], ...]:
         # No command payload, workspace, provider, private device name or secret.
+        if self._journal is not None:
+            return self._journal.list_pending()
         return tuple(receipt.public() for receipt in self._outbox)
 
-    def ack_receipt(self, receipt_hash: str) -> bool:
+    def ack_receipt(self, receipt_hash: str, *, signed_ack: bytes = b"") -> bool:
         _id(receipt_hash, "receipt_hash")
+        if self._journal is not None:
+            return self._journal.acknowledge(receipt_hash, signed_ack)
         before = len(self._outbox)
         self._outbox = [r for r in self._outbox if r.receipt_hash != receipt_hash]
         return len(self._outbox) < before
@@ -321,24 +345,48 @@ class WorkstationAgent:
                 or grant.lease_id != command.lease_id or grant.command_id != command.command_id
                 or grant.operation != command.operation or grant.expires_at <= now):
             return self._reject(command, "GATE_BINDING_MISMATCH")
+        journal = self._journal
+        if journal is not None:
+            try:
+                reservation = journal.reserve(command)
+            except Exception:
+                self.local_abort()
+                return self._reject(command, "JOURNAL_UNAVAILABLE")
+            if reservation != "NEW":
+                return self._reject(command, {
+                    "PENDING": "JOURNAL_UNRESOLVED",
+                    "COMPLETED": "ALREADY_COMPLETED",
+                    "CONFLICT": "IDEMPOTENCY_CONFLICT",
+                }.get(reservation, "JOURNAL_UNAVAILABLE"))
         before = self._adapter.public_snapshot()["revision"]
         try:
             result = self._adapter.handle(command.operation, command.payload)
             after = self._adapter.public_snapshot()["revision"]
             if not isinstance(result, dict) or result.get("status") not in {"OK", "REJECTED"}:
+                if journal is not None:
+                    self.local_abort()
                 return self._reject(command, "ADAPTER_CONTRACT_VIOLATION")
             status = "APPLIED" if result["status"] == "OK" else "BLOCKED"
             reason = "OK" if status == "APPLIED" else str(result.get("reason", "ADAPTER_REJECTED"))
             if not re.fullmatch(r"[A-Z_]{2,64}", reason):
                 reason = "ADAPTER_REJECTED"
         except Exception:
-            # Actual deployment must bind to a private adapter with transactional failure rules.
+            # A journal PENDING record survives a crash/failure; do not auto-retry.
+            if journal is not None:
+                self.local_abort()
             return self._reject(command, "ADAPTER_FAILED")
         receipt = self._receipt(command, status, reason, before, after)
+        if journal is not None:
+            try:
+                journal.finalize(command, receipt)
+            except Exception:
+                self.local_abort()
+                return self._reject(command, "JOURNAL_COMMIT_FAILED")
         if status == "APPLIED" and command.operation in _MUTATIONS:
             self.application = replace(self.application, context_revision=after)
         self._seen[command.idempotency_key] = (fp, receipt)
-        self._outbox.append(receipt)
+        if journal is None:
+            self._outbox.append(receipt)
         return receipt
 
     def _preflight(self, command: CommandEnvelope, now: float) -> str | None:
