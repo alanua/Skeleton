@@ -72,7 +72,10 @@ class SyntheticWorkstationAdapter:
             name = str(data["checkpoint_id"])
             if name not in self._checkpoints:
                 return {"status": "REJECTED", "reason": "CHECKPOINT_UNKNOWN"}
-            self._revision, self._objects = deepcopy(self._checkpoints[name])
+            _checkpoint_revision, restored = self._checkpoints[name]
+            self._objects = deepcopy(restored)
+            # Revision must never decrease: an old command must not become valid after rollback.
+            self._revision += 1
             return {"status": "OK"}
         if operation == "APPLY":
             entity = str(data["entity_id"])
