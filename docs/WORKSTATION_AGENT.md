@@ -74,14 +74,21 @@ exact-hash acknowledgements for the registered node before deletion. Synthetic
 tests cover wrong keys, tampering, duplicate replay, full queue and invalid
 acknowledgements.
 
-**Important integration gap:** The current `WorkstationAgent` still uses a
-volatile `_seen` map and receipt queue. The persistent store is a separately
-tested building block and is **not yet a transactional command-execution
-journal**. An unexpected crash between a native CAD mutation and storing its
-receipt could otherwise allow a duplicate application after restart. Never
-enable live CAD write operations until crash-safe admission/commit/recovery,
-adapter undo semantics, installer ACL checks and trusted service credentials
-are implemented and proven in integration tests.
+**Pre-mutation journal added:** With an explicitly registered
+`WorkstationAgent(journal=EncryptedReceiptStore(...))`, the agent reserves an
+idempotency fingerprint **durably before** calling its adapter, then commits
+its final receipt and encrypted outbox row in one SQLite transaction. On restart
+an unresolved PENDING reservation forces local abort. Completed commands cannot
+silently replay even after receipt acknowledgement. The default synthetic
+agent still supports a volatile store for isolated tests only.
+
+**Important remaining gap:** This protocol is not an atomic transaction with
+an external AutoCAD/SOLIDWORKS process. If a real CAD mutation occurs and
+receipt finalization fails, the command is left PENDING and **must be reconciled
+with the application's real state by the authorized operator**, never replayed
+automatically. The production signer, authenticated transport, encrypted
+machine-key delivery, installer ACL verification, real provider undo semantics
+and release recovery remain unimplemented. Therefore DO_NOT_DEPLOY.
 
 ### Windows dry-run and bundle staging
 
@@ -117,8 +124,8 @@ against each authorized Windows node.
   a cross-repo conformance adapter; do not merge two incompatible engines.
 - Integrate signed Gate proof issuance, trusted node enrollment and pinned
   certificate/public-key delivery through the existing Skeleton authority.
-- Add crash-safe command journal and encrypted queue wiring, authenticated
-  outbound transport and server acknowledgement on the real target.
+- Verify the new fail-closed journal/receipt wiring with a real CAD adapter,
+  authenticated outbound transport, machine-key enrollment and server ACK.
 - Implement/validate provider-specific **private** adapters for each installed
   CAD application without publishing private paths, client drawings or keys.
 - Validate Windows packaging/install/uninstall and ACLs on a disposable
