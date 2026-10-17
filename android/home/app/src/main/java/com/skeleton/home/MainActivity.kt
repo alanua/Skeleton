@@ -2526,7 +2526,23 @@ private fun openProviderApp(context:Context,trakt:Boolean,pkg:String?,ext:JSONOb
     if(!ok)Toast.makeText(context,"Moviebase не зміг відкрити сторінку цього твору",Toast.LENGTH_LONG).show()
 }
 
-private data class NativeDeviceUi(val id:String,val name:String,val role:String,val adapter:String,val online:Boolean,val location:String,val dependencies:List<String>,val controller:String,val domain:String,val connection:String)
+private data class NativeDeviceUi(val id:String,val name:String,val role:String,val adapter:String,val online:Boolean,val location:String,val dependencies:List<String>,val controller:String,val domain:String,val connection:String,val connectivityStatus:String,val statusLabel:String)
+private fun nativeConnectivityStatus(d:JSONObject):String{
+    val explicit=d.optString("connectivity_status","")
+    if(explicit in setOf("reachable","unreachable","unknown","controller_only","connected","disconnected"))return explicit
+    if(!d.has("online")||d.isNull("online"))return "unknown"
+    // Compatibility with older snapshots: neither controller health nor a TV
+    // without an IP probe establishes physical peripheral reachability.
+    if(d.optString("adapter")=="host" && d.optString("device_id")!="home_edge_01")return "controller_only"
+    if(d.optString("device_id")=="sharp_tv_living_room")return "unknown"
+    return if(d.optBoolean("online"))"reachable" else "unreachable"
+}
+private fun nativeConnectivityLabel(d:JSONObject,status:String):String{
+    val value=d.optString("status_label","").trim()
+    if(value.isNotBlank())return value
+    return when(status){"reachable"->"На зв’язку";"unreachable"->"Не відповідає";"connected"->"Підключено";"disconnected"->"Не підключено";"controller_only"->"Контролер доступний";else->"Стан невідомий"}
+}
+private fun nativeStatusVerified(status:String)=status=="reachable"||status=="connected"
 private val deviceDomainOrder=listOf("Житло","Мережа","Керування","Документи","Київ / поза домом")
 private fun nativeDeviceDomain(id:String,role:String,location:String):String{
     if(id.startsWith("kyiv_")||location.startsWith("kyiv_"))return "Київ / поза домом"
@@ -2581,13 +2597,13 @@ private fun nativeDeviceIcon(role:String)=when(role){
 }
 @Composable private fun DeviceDomainCard(title:String,items:List<NativeDeviceUi>,onSharp:()->Unit,onMfp:()->Unit,onHomeEdge:()->Unit){
     Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(Card)){
-        Row(Modifier.fillMaxWidth().padding(horizontal=15.dp,vertical=12.dp),verticalAlignment=Alignment.CenterVertically){Text(title,fontSize=15.sp,fontWeight=FontWeight.Bold,color=Text,modifier=Modifier.weight(1f));Text(ui("${items.count{it.online}}/${items.size} на зв’язку"),fontSize=10.sp,color=Muted)}
+        Row(Modifier.fillMaxWidth().padding(horizontal=15.dp,vertical=12.dp),verticalAlignment=Alignment.CenterVertically){Text(title,fontSize=15.sp,fontWeight=FontWeight.Bold,color=Text,modifier=Modifier.weight(1f));Text(ui("${items.count{nativeStatusVerified(it.connectivityStatus)}}/${items.size} доступні"+items.count{it.connectivityStatus in setOf("unknown","controller_only")}.let{if(it>0)" · $it невідомі" else ""}),fontSize=10.sp,color=Muted)}
         items.forEachIndexed{index,d->
             if(index>0)Box(Modifier.fillMaxWidth().height(1.dp).background(Line))
             Row(Modifier.fillMaxWidth().heightIn(min=76.dp).clickable(enabled=d.id=="sharp_tv_living_room"||d.id=="brother_printer"||d.id=="home_edge_01"){when(d.id){"sharp_tv_living_room"->onSharp();"brother_printer"->onMfp();"home_edge_01"->onHomeEdge()}}.padding(horizontal=14.dp,vertical=10.dp),verticalAlignment=Alignment.CenterVertically){
-                Box(Modifier.size(42.dp).clip(RoundedCornerShape(12.dp)).background(Action),contentAlignment=Alignment.Center){Mdi(nativeDeviceIcon(d.role),23.dp,if(d.online)Text else Muted)}
+                Box(Modifier.size(42.dp).clip(RoundedCornerShape(12.dp)).background(Action),contentAlignment=Alignment.Center){Mdi(nativeDeviceIcon(d.role),23.dp,if(nativeStatusVerified(d.connectivityStatus))Text else Muted)}
                 Column(Modifier.weight(1f).padding(start=12.dp)){Text(d.name,fontSize=17.sp,lineHeight=22.sp,fontWeight=FontWeight.SemiBold,color=Text,maxLines=2,overflow=TextOverflow.Ellipsis);Text(d.connection,fontSize=10.sp,lineHeight=14.sp,color=Muted,maxLines=3,overflow=TextOverflow.Ellipsis,modifier=Modifier.padding(top=4.dp))}
-                Column(horizontalAlignment=Alignment.End){Box(Modifier.size(8.dp).clip(CircleShape).background(if(d.online)Green else Muted));Text(if(d.online)"На зв’язку" else "Не на зв’язку",fontSize=9.sp,color=if(d.online)Green else Muted,modifier=Modifier.padding(top=4.dp));if(d.id=="sharp_tv_living_room"||d.id=="brother_printer"||d.id=="home_edge_01")Mdi("chevron-right",18.dp,Muted,Modifier.padding(top=5.dp))}
+                Column(horizontalAlignment=Alignment.End){Box(Modifier.size(8.dp).clip(CircleShape).background(if(nativeStatusVerified(d.connectivityStatus))Green else Muted));Text(d.statusLabel,fontSize=9.sp,color=if(nativeStatusVerified(d.connectivityStatus))Green else Muted,modifier=Modifier.padding(top=4.dp));if(d.id=="sharp_tv_living_room"||d.id=="brother_printer"||d.id=="home_edge_01")Mdi("chevron-right",18.dp,Muted,Modifier.padding(top=5.dp))}
             }
         }
     }
@@ -3216,7 +3232,7 @@ private fun orderNativeDevices(items:List<NativeDeviceUi>,prefs:android.content.
     var sharpRemoteOpen by rememberSaveable{mutableStateOf(false)}; var mfpOpen by rememberSaveable{mutableStateOf(false)}; var homeEdgeOpen by rememberSaveable{mutableStateOf(false)}; var devices by remember{mutableStateOf(emptyList<NativeDeviceUi>())}; var loaded by remember{mutableStateOf(false)}
     val context=LocalContext.current; val devicePrefs=remember(context){context.getSharedPreferences("home_ui",Context.MODE_PRIVATE)}
     LaunchedEffect(Unit){if(deviceOrderIds(devicePrefs).isEmpty())devicePrefs.edit().putString(DEVICE_ORDER_PREF,"brother_printer").apply()}
-    LaunchedEffect(api.server,active){if(api.server!=null){suspend fun pull():Boolean{var ok=false;runCatching{api.get("/api/native/devices")}.onSuccess{j->devices=j.optJSONArray("items")?.objects().orEmpty().map{d->val id=d.cleanText("device_id");val role=d.cleanText("role");val adapter=d.cleanText("adapter");val location=d.cleanText("location");val deps=d.optJSONArray("dependency_names")?.strings().orEmpty();val controller=d.cleanText("controller_name",d.cleanText("controller"));NativeDeviceUi(id,d.cleanText("name",id),role,adapter,d.optBoolean("online"),location,deps,controller,nativeDeviceDomain(id,role,location),nativeDeviceConnection(id,role,adapter,location,deps,controller))};loaded=true;ok=true};return ok};while(!loaded){if(pull())break;delay(1500)};if(active)while(true){delay(15000);pull()}}}
+    LaunchedEffect(api.server,active){if(api.server!=null){suspend fun pull():Boolean{var ok=false;runCatching{api.get("/api/native/devices")}.onSuccess{j->devices=j.optJSONArray("items")?.objects().orEmpty().map{d->val id=d.cleanText("device_id");val role=d.cleanText("role");val adapter=d.cleanText("adapter");val location=d.cleanText("location");val deps=d.optJSONArray("dependency_names")?.strings().orEmpty();val controller=d.cleanText("controller_name",d.cleanText("controller"));NativeDeviceUi(id,d.cleanText("name",id),role,adapter,d.optBoolean("online"),location,deps,controller,nativeDeviceDomain(id,role,location),nativeDeviceConnection(id,role,adapter,location,deps,controller),nativeConnectivityStatus(d),nativeConnectivityLabel(d,nativeConnectivityStatus(d)))};loaded=true;ok=true};return ok};while(!loaded){if(pull())break;delay(1500)};if(active)while(true){delay(15000);pull()}}}
     if(homeEdgeOpen){HomeEdgeScreen(api,endpointId,endpoints,onEndpoint,onMenu){homeEdgeOpen=false};return}
     Column(Modifier.fillMaxSize().background(Bg)){
         LazyColumn(Modifier.weight(1f).padding(horizontal=13.dp),contentPadding=PaddingValues(top=6.dp,bottom=18.dp),verticalArrangement=Arrangement.spacedBy(10.dp)){
