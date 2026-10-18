@@ -1223,7 +1223,7 @@ private fun HomeComposeApp(sharedUrl:String?, consumeShare:()->Unit) {
 }
 
 @Composable private fun HistoryEditorDialog(api:HomeApi,endpointId:String,onDismiss:()->Unit){
-    val scope=rememberCoroutineScope();var items by remember{mutableStateOf(emptyList<JSONObject>())};var query by remember{mutableStateOf("")};var busy by remember{mutableStateOf(false)};val focusRequester=remember{FocusRequester()};val keyboard=LocalSoftwareKeyboardController.current
+    val scope=rememberCoroutineScope();var items by remember{mutableStateOf(emptyList<JSONObject>())};var query by remember{mutableStateOf("")};var busy by remember{mutableStateOf(false)};var error by remember{mutableStateOf("")};val focusRequester=remember{FocusRequester()};val keyboard=LocalSoftwareKeyboardController.current
     suspend fun reload(){if(api.server==null)return;busy=true;items=runCatching{canonicalHistoryItems(api.get(mediaHistoryPath(endpointId)).optJSONArray("items")?.objects().orEmpty())}.getOrElse{emptyList()};busy=false}
     LaunchedEffect(api.server,endpointId){reload()}
     val q=query.trim().lowercase(Locale.ROOT)
@@ -1242,9 +1242,10 @@ private fun HomeComposeApp(sharedUrl:String?, consumeShare:()->Unit) {
                     }
                     Row(Modifier.fillMaxWidth().padding(horizontal=2.dp,vertical=6.dp),verticalAlignment=Alignment.CenterVertically){Text(ui("Останні додані або переглянуті — першими"),fontSize=10.sp,color=Muted);Spacer(Modifier.weight(1f));Text(if(q.isBlank())"${items.size}" else "${visible.size} з ${items.size}",fontSize=10.sp,fontWeight=FontWeight.Bold,color=Accent)}
                 }
+                if(error.isNotBlank())Text(error,color=Color(0xFFFFB8B8),fontSize=12.sp,modifier=Modifier.padding(horizontal=14.dp))
                 if(busy) Box(Modifier.fillMaxSize(),contentAlignment=Alignment.Center){CircularProgressIndicator(color=Accent,strokeWidth=2.dp,modifier=Modifier.size(28.dp))}
                 else LazyColumn(Modifier.weight(1f).fillMaxWidth().padding(horizontal=10.dp),contentPadding=PaddingValues(bottom=18.dp)){
-                    items(visible,key={historyKey(it).ifBlank{it.optString("title")}}){item->HistoryEditorRow(api,item,{scope.launch{runCatching{api.delete(mediaHistoryDeletePath(endpointId,item))};reload()} })}
+                    items(visible,key={historyKey(it).ifBlank{it.optString("title")}}){item->HistoryEditorRow(api,item,{scope.launch{if(historyKey(item).isBlank()){error="Немає ідентифікатора запису";return@launch};busy=true;runCatching{api.delete(mediaHistoryDeletePath(endpointId,item))}.onSuccess{items=items.filterNot{historyKey(it)==historyKey(item)};error="";reload()}.onFailure{error="Не вдалося видалити: ${it.message ?: "помилка сервера"}"};busy=false} })}
                 }
             }
         }
