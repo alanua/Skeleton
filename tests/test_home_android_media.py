@@ -78,7 +78,7 @@ def test_home_video_selection_and_history_are_canonical_endpoint_scoped() -> Non
     assert 'api.put("/api/video/selection",selBody)' not in text
     assert 'private fun mediaHistoryPath(endpointId:String):String="/api/media/history?endpoint=${Uri.encode(endpointId)}"' in text
     assert 'internal fun savedVideoHistoryPath():String="/api/video/history"' in text
-    assert 'internal fun historyKey(item:JSONObject):String=item.cleanText("history_id",item.cleanText("history_key",item.cleanText("content_key")))' in text
+    assert 'internal fun historyKey(item:JSONObject):String=item.cleanText("history_key",item.cleanText("content_key",item.cleanText("history_id")))' in text
     assert 'private fun mediaHistoryDeletePath(endpointId:String,item:JSONObject):String="/api/media/history/${Uri.encode(historyKey(item))}?endpoint=${Uri.encode(endpointId)}"' in text
     assert "canonicalHistoryItems(api.get(mediaHistoryPath(endpointId)).optJSONArray" in text
     assert "setEndpointHistory(historyItemsAfterRead(history,saved?.getOrNull(),watched.getOrNull(),true,savedHistory))" in text
@@ -122,6 +122,19 @@ def test_home_video_selection_and_history_are_canonical_endpoint_scoped() -> Non
     assert 'endpointPath(endpoint.endpointId,"/video/history")' not in text
     assert "LaunchedEffect(api.server,endpointId){reload()}" in text
 
+
+
+def test_home_history_cards_prefer_server_canonical_work_identity() -> None:
+    text = _source()
+    # A source/discovery job may have a stale history_id. The stable work key
+    # must drive both the card dedupe and the saved-library progress join.
+    assert 'internal fun historyKey(item:JSONObject):String=item.cleanText("history_key",item.cleanText("content_key",item.cleanText("history_id")))' in text
+    assert "return items.filter{val k=historyKey(it);k.isBlank()||seen.add(k)}" in text
+    assert "val key=historyKey(item)" in text
+    assert "val savedKeys=savedLibrary.mapNotNull{historyKey(it).takeIf(String::isNotBlank)}.toSet()" in text
+    assert "return watchedHistory.filter{historyKey(it) in savedKeys}" in text
+    assert 'private fun mediaHistoryDeletePath(endpointId:String,item:JSONObject):String="/api/media/history/${Uri.encode(historyKey(item))}?endpoint=${Uri.encode(endpointId)}"' in text
+    assert 'historyKey(item:JSONObject):String=item.cleanText("history_id",' not in text
 
 def test_home_media_volume_label_uses_measured_gap_above_slider() -> None:
     text = _source()
