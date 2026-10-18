@@ -2243,7 +2243,11 @@ private fun VideoScreen(api:HomeApi,active:Boolean,selectionRevision:Int,endpoin
                     HistoryPickerField(historyLabel,historyActionable,historyLoading,historyError.isNotBlank()){if(history.isNotEmpty())historyOpen=true else scope.launch{loadHistoryForEndpoint()}}
                     if(isSeries){
                         SeasonPickerField(season,seasonItems,loadedSeasons){seasonOpen=true}
-                        SelectorField(ui("Серія"),"play",if(selectedIsTrailer)"Трейлер" else episode,if(selectedIsTrailer)listOf("Трейлер") else episodes,showCount=!selectedIsTrailer,trailing=if(selectedIsTrailer)"" else selectedDuration){if(!selectedIsTrailer)episode=it}
+                        Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically){
+                            RoundAction("chevron-left",false){if(!selectedIsTrailer){val index=episodes.indexOf(episode);if(index>0)episode=episodes[index-1]}}
+                            Box(Modifier.weight(1f)){SelectorField(ui("Серія"),"play",if(selectedIsTrailer)"Трейлер" else episode,if(selectedIsTrailer)listOf("Трейлер") else episodes,showCount=!selectedIsTrailer,trailing=if(selectedIsTrailer)"" else selectedDuration){if(!selectedIsTrailer)episode=it}}
+                            RoundAction("chevron-right",false){if(!selectedIsTrailer){val index=episodes.indexOf(episode);if(index>=0&&index<episodes.lastIndex)episode=episodes[index+1]}}
+                        }
                     }
                     SelectorField(ui("Якість"),"quality-high",quality,qualities){quality=it}
                     SelectorField(if(selectedIsTrailer)"Джерело" else "Озвучка","account-voice",voice,voices){voice=it}
