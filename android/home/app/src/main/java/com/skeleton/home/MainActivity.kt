@@ -1224,7 +1224,7 @@ private fun HomeComposeApp(sharedUrl:String?, consumeShare:()->Unit) {
 
 @Composable private fun HistoryEditorDialog(api:HomeApi,endpointId:String,onDismiss:()->Unit){
     val scope=rememberCoroutineScope();var items by remember{mutableStateOf(emptyList<JSONObject>())};var query by remember{mutableStateOf("")};var busy by remember{mutableStateOf(false)};var error by remember{mutableStateOf("")};val focusRequester=remember{FocusRequester()};val keyboard=LocalSoftwareKeyboardController.current
-    suspend fun reload(){if(api.server==null)return;busy=true;items=runCatching{canonicalHistoryItems(api.get(mediaHistoryPath(endpointId)).optJSONArray("items")?.objects().orEmpty())}.getOrElse{emptyList()};busy=false}
+    suspend fun reload(){if(api.server==null)return;busy=true;runCatching{canonicalHistoryItems(api.get(mediaHistoryPath(endpointId)).optJSONArray("items")?.objects().orEmpty())}.onSuccess{items=it;error=""}.onFailure{error="Не вдалося оновити історію: ${it.message ?: "помилка сервера"}"};busy=false}
     LaunchedEffect(api.server,endpointId){reload()}
     val q=query.trim().lowercase(Locale.ROOT)
     val visible=if(q.isBlank())items else items.filter{ x -> listOf(x.optString("title"),x.optString("year"),x.optString("content_type"),x.optString("overview")).joinToString(" ").lowercase(Locale.ROOT).contains(q) }
