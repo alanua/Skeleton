@@ -1223,8 +1223,8 @@ private fun HomeComposeApp(sharedUrl:String?, consumeShare:()->Unit) {
 }
 
 @Composable private fun HistoryEditorDialog(api:HomeApi,endpointId:String,onDismiss:()->Unit){
-    val scope=rememberCoroutineScope();var items by remember{mutableStateOf(emptyList<JSONObject>())};var query by remember{mutableStateOf("")};var busy by remember{mutableStateOf(false)};val focusRequester=remember{FocusRequester()};val keyboard=LocalSoftwareKeyboardController.current
-    suspend fun reload(){if(api.server==null)return;busy=true;items=runCatching{canonicalHistoryItems(api.get(mediaHistoryPath(endpointId)).optJSONArray("items")?.objects().orEmpty())}.getOrElse{emptyList()};busy=false}
+    val scope=rememberCoroutineScope();var items by remember{mutableStateOf(emptyList<JSONObject>())};var query by remember{mutableStateOf("")};var busy by remember{mutableStateOf(false)};var error by remember{mutableStateOf("")};val focusRequester=remember{FocusRequester()};val keyboard=LocalSoftwareKeyboardController.current
+    suspend fun reload(){if(api.server==null)return;busy=true;runCatching{canonicalHistoryItems(api.get(mediaHistoryPath(endpointId)).optJSONArray("items")?.objects().orEmpty())}.onSuccess{items=it;error=""}.onFailure{error="Не вдалося оновити історію: ${it.message ?: "помилка сервера"}"};busy=false}
     LaunchedEffect(api.server,endpointId){reload()}
     val q=query.trim().lowercase(Locale.ROOT)
     val visible=if(q.isBlank())items else items.filter{ x -> listOf(x.optString("title"),x.optString("year"),x.optString("content_type"),x.optString("overview")).joinToString(" ").lowercase(Locale.ROOT).contains(q) }
@@ -1242,9 +1242,10 @@ private fun HomeComposeApp(sharedUrl:String?, consumeShare:()->Unit) {
                     }
                     Row(Modifier.fillMaxWidth().padding(horizontal=2.dp,vertical=6.dp),verticalAlignment=Alignment.CenterVertically){Text(ui("Останні додані або переглянуті — першими"),fontSize=10.sp,color=Muted);Spacer(Modifier.weight(1f));Text(if(q.isBlank())"${items.size}" else "${visible.size} з ${items.size}",fontSize=10.sp,fontWeight=FontWeight.Bold,color=Accent)}
                 }
+                if(error.isNotBlank())Text(error,color=Color(0xFFFFB8B8),fontSize=12.sp,modifier=Modifier.padding(horizontal=14.dp))
                 if(busy) Box(Modifier.fillMaxSize(),contentAlignment=Alignment.Center){CircularProgressIndicator(color=Accent,strokeWidth=2.dp,modifier=Modifier.size(28.dp))}
                 else LazyColumn(Modifier.weight(1f).fillMaxWidth().padding(horizontal=10.dp),contentPadding=PaddingValues(bottom=18.dp)){
-                    items(visible,key={historyKey(it).ifBlank{it.optString("title")}}){item->HistoryEditorRow(api,item,{scope.launch{runCatching{api.delete(mediaHistoryDeletePath(endpointId,item))};reload()} })}
+                    items(visible,key={historyKey(it).ifBlank{it.optString("title")}}){item->HistoryEditorRow(api,item,{scope.launch{if(historyKey(item).isBlank()){error="Немає ідентифікатора запису";return@launch};busy=true;runCatching{api.delete(mediaHistoryDeletePath(endpointId,item))}.onSuccess{items=items.filterNot{historyKey(it)==historyKey(item)};error="";reload()}.onFailure{error="Не вдалося видалити: ${it.message ?: "помилка сервера"}"};busy=false} })}
                 }
             }
         }
@@ -2242,7 +2243,11 @@ private fun VideoScreen(api:HomeApi,active:Boolean,selectionRevision:Int,endpoin
                     HistoryPickerField(historyLabel,historyActionable,historyLoading,historyError.isNotBlank()){if(history.isNotEmpty())historyOpen=true else scope.launch{loadHistoryForEndpoint()}}
                     if(isSeries){
                         SeasonPickerField(season,seasonItems,loadedSeasons){seasonOpen=true}
-                        SelectorField(ui("Серія"),"play",if(selectedIsTrailer)"Трейлер" else episode,if(selectedIsTrailer)listOf("Трейлер") else episodes,showCount=!selectedIsTrailer,trailing=if(selectedIsTrailer)"" else selectedDuration){if(!selectedIsTrailer)episode=it}
+                        Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically){
+                            RoundAction("chevron-left",false){if(!selectedIsTrailer){val index=episodes.indexOf(episode);if(index>0)episode=episodes[index-1]}}
+                            Box(Modifier.weight(1f)){SelectorField(ui("Серія"),"play",if(selectedIsTrailer)"Трейлер" else episode,if(selectedIsTrailer)listOf("Трейлер") else episodes,showCount=!selectedIsTrailer,trailing=if(selectedIsTrailer)"" else selectedDuration){if(!selectedIsTrailer)episode=it}}
+                            RoundAction("chevron-right",false){if(!selectedIsTrailer){val index=episodes.indexOf(episode);if(index>=0&&index<episodes.lastIndex)episode=episodes[index+1]}}
+                        }
                     }
                     SelectorField(ui("Якість"),"quality-high",quality,qualities){quality=it}
                     SelectorField(if(selectedIsTrailer)"Джерело" else "Озвучка","account-voice",voice,voices){voice=it}
