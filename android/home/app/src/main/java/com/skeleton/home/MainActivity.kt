@@ -2182,7 +2182,7 @@ private fun VideoScreen(api:HomeApi,active:Boolean,selectionRevision:Int,endpoin
     val voices=if(isSeries)sourceValues(sources,"voice",season,episode,quality,excludeTrailers=true) else sourceValues(sources,"voice",quality=quality)
     if(voice !in voices)voice=voices.firstOrNull().orEmpty()
     val poster=if(isSeries)cat.optJSONObject("season_posters")?.optString(season,cat.optString("poster",""))?:cat.optString("poster","") else cat.optString("poster","")
-    val bm=remoteBitmap(if(poster.isNotBlank()&&api.server!=null)api.server+poster else null,256,384)
+    val posterUrl=poster.trim().takeIf{it.isNotEmpty()}?.let{if(it.startsWith("https://")||it.startsWith("http://"))it else api.server?.trimEnd('/')+"/"+it.trimStart('/')};val bm=remoteBitmap(posterUrl,256,384)
     val selectedCandidate=if(isSeries)
         sources.firstOrNull{it.optString("season")==season&&it.optString("episode")==episode&&it.optString("quality")==quality&&sourceVoice(it)==voice}
     else
@@ -2410,7 +2410,7 @@ private fun detailValueUa(label:String,value:String):String{
     }
 }
 private fun mediaDurationLabel(seconds:Double):String{val total=seconds.toInt().coerceAtLeast(0);if(total<=0)return "";val mins=(total+30)/60;return if(mins<60)"$mins хв" else {val h=mins/60;val m=mins%60;if(m>0)"$h год $m хв" else "$h год"}}
-private fun metadataRuntimeLabel(x:JSONObject):String=x.optString("runtime_label","").trim().ifBlank{val m=x.optInt("runtime_minutes",0);if(m<=0)"" else if(m<60)"$m хв" else {val h=m/60;val r=m%60;if(r>0)"$h год $r хв" else "$h год"}}
+private fun metadataRuntimeLabel(x:JSONObject):String{val m=x.optInt("runtime_minutes",0);if(m in 1..1440)return if(m<60)"$m хв" else {val h=m/60;val r=m%60;if(r>0)"$h год $r хв" else "$h год"};val label=x.optString("runtime_label","").trim();return label.takeIf{it.isNotBlank()&&!it.contains("рік",true)&&!it.contains("рок",true)&&!it.contains("year",true)}?: ""}
 private fun historyRuntimeLabel(x:JSONObject):String=x.optString("runtime_label","").trim().ifBlank{x.optInt("runtime_minutes",0).takeIf{it>0}?.let{m->if(m<60)"$m хв" else {val h=m/60;val r=m%60;if(r>0)"$h год $r хв" else "$h год"}}?:""}
 private fun detailGenreUa(value:String)=when(value.lowercase(Locale.ROOT)){"crime"->"Кримінал";"drama"->"Драма";"mystery"->"Детектив";"thriller"->"Трилер";"comedy"->"Комедія";"action"->"Бойовик";"adventure"->"Пригоди";"animation"->"Анімація";"documentary"->"Документальний";"family"->"Сімейний";"fantasy"->"Фентезі";"history"->"Історичний";"horror"->"Жахи";"music"->"Музика";"romance"->"Мелодрама";"science fiction"->"Наукова фантастика";"war"->"Військовий";"western"->"Вестерн";else->value}
 private fun openCatalogUrl(context:Context,url:String){if(url.isBlank())return;runCatching{context.startActivity(Intent(Intent.ACTION_VIEW,Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))}}
@@ -2434,7 +2434,7 @@ private fun openCatalogUrl(context:Context,url:String){if(url.isBlank())return;r
     Dialog(onDismissRequest=onDismiss,properties=DialogProperties(usePlatformDefaultWidth=false)){Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha=.90f)),contentAlignment=Alignment.BottomCenter){Box(Modifier.matchParentSize().clickable(onClick=onDismiss));Column(Modifier.fillMaxWidth().widthIn(max=620.dp).fillMaxHeight(.96f).clip(RoundedCornerShape(topStart=22.dp,topEnd=22.dp)).background(Color(0xFF100D13)).clickable(enabled=false){}){
         Spacer(Modifier.height(18.dp))
         Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(horizontal=18.dp,vertical=6.dp)){
-            if(bm!=null)Box(Modifier.fillMaxWidth(),contentAlignment=Alignment.Center){Image(bm,null,Modifier.width(235.dp).aspectRatio(2f/3f).clip(RoundedCornerShape(18.dp)).clickable(onClick=onDismiss),contentScale=ContentScale.Crop)}
+            Box(Modifier.fillMaxWidth(),contentAlignment=Alignment.Center){Box(Modifier.width(235.dp).aspectRatio(2f/3f).clip(RoundedCornerShape(18.dp)).background(Bg),contentAlignment=Alignment.Center){if(bm!=null)Image(bm,null,Modifier.fillMaxSize().clickable(onClick=onDismiss),contentScale=ContentScale.Crop)else Mdi("movie-open",52.dp,Muted)}}
             Text(cat.optString("title","Відео"),fontSize=27.sp,lineHeight=32.sp,fontWeight=FontWeight.Bold,color=Text,textAlign=TextAlign.Center,modifier=Modifier.fillMaxWidth().padding(top=18.dp))
             val status=detailValueUa("Статус",details.optString("status"));val type=detailValueUa("Тип",details.optString("type",contentTypeLabel(cat.optString("content_type"),mediaType)));val topMeta=buildList{cat.optString("year").takeIf{it.isNotBlank()}?.let(::add);status.takeIf{it.isNotBlank()}?.let(::add);type.takeIf{it.isNotBlank()}?.let(::add)}.joinToString(" · ")
             if(topMeta.isNotBlank())Text(topMeta,fontSize=16.sp,lineHeight=22.sp,color=Muted,textAlign=TextAlign.Center,modifier=Modifier.fillMaxWidth().padding(top=8.dp,bottom=12.dp))
