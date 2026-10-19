@@ -317,6 +317,11 @@ internal fun canonicalVideoHistoryDeletePath(item:JSONObject):String="/api/video
 // One saved work must have one stable card identity; legacy history_id is only a fallback.
 internal fun historyKey(item:JSONObject):String=item.cleanText("history_key",item.cleanText("content_key",item.cleanText("history_id")))
 private fun mediaHistoryDeletePath(endpointId:String,item:JSONObject):String="/api/media/history/${Uri.encode(historyKey(item))}?endpoint=${Uri.encode(endpointId)}"
+// JSONObjects use referential equality. Avoid replacing an unchanged work list
+// with a newly decoded copy and redrawing every title/poster on quiet refresh.
+internal fun sameMediaHistoryRows(previous:List<JSONObject>,fresh:List<JSONObject>):Boolean =
+    previous.size==fresh.size&&previous.indices.all{previous[it].toString()==fresh[it].toString()}
+
 private suspend fun savedVideoHistoryItemsWithRetry(api:HomeApi,attempts:Int=2):List<JSONObject>{
     var lastError:Throwable?=null
     repeat(attempts.coerceAtLeast(1)){i->
@@ -2043,8 +2048,8 @@ private fun VideoScreen(api:HomeApi,active:Boolean,selectionRevision:Int,endpoin
     var history by remember(endpoint.endpointId){mutableStateOf(historyByEndpoint[endpoint.endpointId].orEmpty())}; var savedHistory by remember(endpoint.endpointId){mutableStateOf(savedHistoryByEndpoint[endpoint.endpointId].orEmpty())}; var historyHydrated by remember(endpoint.endpointId){mutableStateOf(historyHydratedByEndpoint[endpoint.endpointId] == true)}; var historyLoading by remember(endpoint.endpointId){mutableStateOf(false)}; var historyError by remember(endpoint.endpointId){mutableStateOf(historyErrorByEndpoint[endpoint.endpointId].orEmpty())}; var historyOpen by remember(endpoint.endpointId){mutableStateOf(false)}; var seasonOpen by remember{mutableStateOf(false)}; var detailOpen by remember{mutableStateOf(false)}; var loadingSeason by remember{mutableStateOf("")}
     var selection by remember{mutableStateOf(JSONObject())}; var selectionIdentity by remember{mutableStateOf("")}; var pendingSelectionIdentity by remember{mutableStateOf("")}; var selectedHistoryItem by remember(endpoint.endpointId){mutableStateOf<JSONObject?>(null)}; var job by remember{mutableStateOf<JSONObject?>(null)}; var sources by remember{mutableStateOf(emptyList<JSONObject>())}; var jobId by remember{mutableStateOf("")}; var loading by remember{mutableStateOf(false)}
     var season by remember{mutableStateOf("")}; var episode by remember{mutableStateOf("")}; var quality by remember{mutableStateOf("")}; var voice by remember{mutableStateOf("")}; var autoplay by remember{mutableStateOf(false)}; var monitor by remember{mutableStateOf(false)}; var monitorReady by remember{mutableStateOf(false)}; var external by remember{mutableStateOf(JSONObject())}; var message by remember{mutableStateOf("")}; var currentPlayer by remember{mutableStateOf(JSONObject())}; var audioSel by remember{mutableStateOf("")}; var subSel by remember{mutableStateOf("")}
-    fun setEndpointHistory(items:List<JSONObject>){history=items;historyByEndpoint[endpoint.endpointId]=items}
-    fun setEndpointSavedHistory(items:List<JSONObject>){savedHistory=items;savedHistoryByEndpoint[endpoint.endpointId]=items}
+    fun setEndpointHistory(items:List<JSONObject>){if(!sameMediaHistoryRows(history,items)){history=items;historyByEndpoint[endpoint.endpointId]=items}}
+    fun setEndpointSavedHistory(items:List<JSONObject>){if(!sameMediaHistoryRows(savedHistory,items)){savedHistory=items;savedHistoryByEndpoint[endpoint.endpointId]=items}}
     fun setEndpointHistoryHydrated(value:Boolean){historyHydrated=value;historyHydratedByEndpoint[endpoint.endpointId]=value}
     fun setEndpointHistoryError(value:String){historyError=value;historyErrorByEndpoint[endpoint.endpointId]=value}
     suspend fun loadJob(id:String){
@@ -2074,21 +2079,26 @@ private fun VideoScreen(api:HomeApi,active:Boolean,selectionRevision:Int,endpoin
         if(reloadWork&&jobId.isNotBlank()){loadJob(jobId);loadMonitor()}
     }
     suspend fun loadHistoryForEndpoint():Boolean{
-        if(api.server==null)return false
-        historyLoading=true; setEndpointHistoryError("")
-        // Both dialogs read the same work membership, regardless of output device.
-        val saved=runCatching{savedVideoHistoryItemsWithRetry(api)}
-        val watched=runCatching{api.get(mediaHistoryPath(endpoint.endpointId)).optJSONArray("items")?.objects().orEmpty()}
-        if(saved.isSuccess){
-            val catalog=canonicalHistoryItems(saved.getOrThrow())
-            setEndpointSavedHistory(catalog)
-            setEndpointHistory(historyItemsAfterRead(history,catalog,watched.getOrNull(),endpoint.adapterKind=="home_edge_tv"))
-            setEndpointHistoryHydrated(true)
-        }else{
-            setEndpointHistoryError(saved.exceptionOrNull()?.message?:"Спільний каталог недоступний")
+        if(api.server==null||historyLoading)return false
+        // Refresh quietly once the endpoint's work history has already loaded.
+        historyLoading=!historyHydrated; setEndpointHistoryError("")
+        return try{
+            // Membership is shared; device-specific watch history only enriches progress.
+            val saved=runCatching{savedVideoHistoryItemsWithRetry(api)}
+            if(saved.isSuccess){
+                val catalog=canonicalHistoryItems(saved.getOrThrow())
+                val watched=runCatching{api.get(mediaHistoryPath(endpoint.endpointId)).optJSONArray("items")?.objects().orEmpty()}
+                setEndpointSavedHistory(catalog)
+                setEndpointHistory(historyItemsAfterRead(history,catalog,watched.getOrNull(),endpoint.adapterKind=="home_edge_tv"))
+                setEndpointHistoryHydrated(true)
+                true
+            }else{
+                setEndpointHistoryError(saved.exceptionOrNull()?.message?:"Спільний каталог недоступний")
+                false
+            }
+        }finally{
+            historyLoading=false
         }
-        historyLoading=false
-        return saved.isSuccess
     }
     suspend fun confirmEndpointSelection(body:JSONObject):JSONObject{
         pendingSelectionIdentity=videoSelectionIdentity(body)
@@ -2140,7 +2150,14 @@ private fun VideoScreen(api:HomeApi,active:Boolean,selectionRevision:Int,endpoin
     }
     LaunchedEffect(api.server,endpoint.endpointId){
         setEndpointHistoryHydrated(historyByEndpoint.containsKey(endpoint.endpointId)); setEndpointHistoryError("")
-        if(api.server!=null)while(true){if(loadHistoryForEndpoint())break;delay(1500)}
+        // Loaded cards persist across tab/endpoint switches. Do not refetch them
+        // just because the selected screen or server route was recomposed.
+        if(api.server!=null&&!historyHydrated){
+            repeat(2){ attempt->
+                if(loadHistoryForEndpoint())return@LaunchedEffect
+                if(attempt==0)delay(1500)
+            }
+        }
     }
     LaunchedEffect(api.server,active,endpoint.endpointId){
         if(api.server!=null&&active)while(true){
@@ -2233,8 +2250,8 @@ private fun VideoScreen(api:HomeApi,active:Boolean,selectionRevision:Int,endpoin
                         job!=null->cat.optString("title","Обраний твір")
                         else->"Оберіть збережений твір"
                     }
-                    val historyActionable=api.server!=null&&!historyLoading
-                    HistoryPickerField(historyLabel,historyActionable,historyLoading,historyError.isNotBlank()){scope.launch{if(loadHistoryForEndpoint()&&history.isNotEmpty())historyOpen=true}}
+                    val historyActionable=api.server!=null&&(!historyLoading||historyHydrated)
+                    HistoryPickerField(historyLabel,historyActionable,historyLoading&&!historyHydrated,historyError.isNotBlank()){scope.launch{val refreshed=loadHistoryForEndpoint();if((refreshed||historyHydrated)&&history.isNotEmpty())historyOpen=true}}
                     if(isSeries){
                         SeasonPickerField(season,seasonItems,loadedSeasons){seasonOpen=true}
                         SelectorField(ui("Серія"),"play",if(selectedIsTrailer)"Трейлер" else episode,if(selectedIsTrailer)listOf("Трейлер") else episodes,showCount=!selectedIsTrailer,trailing=if(selectedIsTrailer)"" else selectedDuration){if(!selectedIsTrailer)episode=it}
