@@ -143,13 +143,31 @@ def test_history_picker_and_editor_share_one_library_membership() -> None:
     assert "setEndpointSavedHistory(catalog)" in loader
     assert "setEndpointHistory(historyItemsAfterRead(history,catalog,watched.getOrNull()" in loader
     assert 'if(endpoint.adapterKind=="home_edge_tv")saved?.isSuccess==true else watched.isSuccess' not in loader
-    assert 'val historyActionable=api.server!=null&&!historyLoading' in text
-    assert 'if(loadHistoryForEndpoint()&&history.isNotEmpty())historyOpen=true' in text
+    assert 'val historyActionable=api.server!=null&&(!historyLoading||historyHydrated)' in text
+    assert 'val refreshed=loadHistoryForEndpoint();if((refreshed||historyHydrated)&&history.isNotEmpty())historyOpen=true' in text
     assert "watchedHistoryForSavedLibrary(savedBase,it)" in text
     assert "return canonicalHistoryItems(mergedHistoryItems(savedBase,watchedBase))" in text
     assert 'internal fun canonicalVideoHistoryDeletePath(item:JSONObject):String="/api/video/history/${Uri.encode(historyKey(item))}"' in text
     assert "setEndpointHistoryHydrated(true)" in loader
     assert "setEndpointHistoryError(saved.exceptionOrNull()?.message" in loader
+
+
+def test_history_refresh_is_quiet_bounded_and_does_not_redraw_unchanged_cards() -> None:
+    text = _source()
+    loader = text.split("suspend fun loadHistoryForEndpoint():Boolean{", 1)[1].split(
+        "suspend fun confirmEndpointSelection(", 1
+    )[0]
+    assert "if(api.server==null||historyLoading)return false" in loader
+    assert "historyLoading=!historyHydrated" in loader
+    assert "finally{" in loader and "historyLoading=false" in loader
+    assert "setEndpointHistoryHydrated(true)" in loader
+    assert "sameMediaHistoryRows(history,items)" in text
+    assert "sameMediaHistoryRows(savedHistory,items)" in text
+    assert "previous.size==fresh.size&&previous.indices.all" in text
+    assert "if(api.server!=null&&!historyHydrated)" in text
+    assert "repeat(2){ attempt->" in text
+    assert "while(true){if(loadHistoryForEndpoint())" not in text
+    assert "HistoryPickerField(historyLabel,historyActionable,historyLoading&&!historyHydrated" in text
 
 
 def test_home_history_cards_prefer_server_canonical_work_identity() -> None:
