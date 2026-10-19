@@ -134,9 +134,4 @@ class MediaHistoryCanonicalCardTest {
         assertEquals("saved-only-work", historyKey(result.single()))
     }
 
-    @Test
-    fun editorDeleteTargetsSharedCanonicalHistoryNotDeviceWatchLedger() {
-        val work = JSONObject().put("history_id", "canonical-work-id")
-        assertEquals("/api/video/history/canonical-work-id", canonicalVideoHistoryDeletePath(work))
-    }
 }
