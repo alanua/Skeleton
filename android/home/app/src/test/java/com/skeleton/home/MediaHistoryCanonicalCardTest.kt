@@ -134,4 +134,21 @@ class MediaHistoryCanonicalCardTest {
         assertEquals("saved-only-work", historyKey(result.single()))
     }
 
+
+    @Test
+    fun identicalDownloadedHistoryDoesNotForceRepainting() {
+        val first = listOf(
+            JSONObject().put("history_id", "one").put("title", "Star Trek").put("episode_key", "s2e1"),
+            JSONObject().put("history_id", "two").put("title", "Babylon Berlin")
+        )
+        val refreshed = listOf(
+            JSONObject().put("history_id", "one").put("title", "Star Trek").put("episode_key", "s2e1"),
+            JSONObject().put("history_id", "two").put("title", "Babylon Berlin")
+        )
+        assertTrue(sameMediaHistoryRows(first, refreshed))
+        assertTrue(sameMediaHistoryRows(emptyList(), emptyList()))
+        refreshed[0].put("episode_key", "s2e2")
+        assertTrue(!sameMediaHistoryRows(first, refreshed))
+        assertTrue(!sameMediaHistoryRows(first, refreshed.take(1)))
+    }
 }
