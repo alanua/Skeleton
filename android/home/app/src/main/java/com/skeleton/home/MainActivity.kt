@@ -312,7 +312,8 @@ private fun endpointMutation(endpointId:String,vararg pairs:Pair<String,Any?>):J
 private fun endpointPath(endpointId:String,suffix:String):String="/api/media/endpoints/${Uri.encode(endpointId)}$suffix"
 internal fun savedVideoHistoryPath():String="/api/video/history"
 private fun mediaHistoryPath(endpointId:String):String="/api/media/history?endpoint=${Uri.encode(endpointId)}"
-internal fun historyKey(item:JSONObject):String=item.cleanText("history_id",item.cleanText("history_key",item.cleanText("content_key")))
+// One saved work must have one stable card identity; legacy history_id is only a fallback.
+internal fun historyKey(item:JSONObject):String=item.cleanText("history_key",item.cleanText("content_key",item.cleanText("history_id")))
 private fun mediaHistoryDeletePath(endpointId:String,item:JSONObject):String="/api/media/history/${Uri.encode(historyKey(item))}?endpoint=${Uri.encode(endpointId)}"
 private suspend fun savedVideoHistoryItemsWithRetry(api:HomeApi,attempts:Int=2):List<JSONObject>{
     var lastError:Throwable?=null
