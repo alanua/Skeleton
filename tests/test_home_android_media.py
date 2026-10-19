@@ -80,19 +80,19 @@ def test_home_video_selection_and_history_are_canonical_endpoint_scoped() -> Non
     assert 'internal fun savedVideoHistoryPath():String="/api/video/history"' in text
     assert 'internal fun historyKey(item:JSONObject):String=item.cleanText("history_key",item.cleanText("content_key",item.cleanText("history_id")))' in text
     assert 'private fun mediaHistoryDeletePath(endpointId:String,item:JSONObject):String="/api/media/history/${Uri.encode(historyKey(item))}?endpoint=${Uri.encode(endpointId)}"' in text
-    assert "canonicalHistoryItems(api.get(mediaHistoryPath(endpointId)).optJSONArray" in text
-    assert "setEndpointHistory(historyItemsAfterRead(history,saved?.getOrNull(),watched.getOrNull(),true,savedHistory))" in text
+    assert 'runCatching{canonicalHistoryItems(savedVideoHistoryItemsWithRetry(api))}' in text
+    assert 'setEndpointHistory(historyItemsAfterRead(history,catalog,watched.getOrNull(),endpoint.adapterKind=="home_edge_tv"))' in text
     assert "watchedHistoryForSavedLibrary(savedBase,it)" in text
-    assert "saved?.getOrNull()?.let{setEndpointSavedHistory(canonicalHistoryItems(it))}" in text
-    assert 'val ok=if(endpoint.adapterKind=="home_edge_tv")saved?.isSuccess==true else watched.isSuccess' in text
+    assert "setEndpointSavedHistory(catalog)" in text
+    assert "if(saved.isSuccess){" in text
     assert 'saved?.isSuccess==true||watched.isSuccess' not in text
     assert "val historyByEndpoint=remember{mutableStateMapOf<String,List<JSONObject>>()}" in text
     assert "val savedHistoryByEndpoint=remember{mutableStateMapOf<String,List<JSONObject>>()}" in text
     assert "historyEpisodeLabel(item)" in text
     assert 'api.get(savedVideoHistoryPath())' in text
-    assert 'api.get(mediaHistoryPath(endpointId))' in text
+    assert 'val watched=runCatching{api.get(mediaHistoryPath(endpoint.endpointId))' in text
     assert 'api.get(mediaHistoryPath(endpoint.endpointId))' in text
-    assert 'api.delete(mediaHistoryDeletePath(endpointId,item))' in text
+    assert 'api.delete(canonicalVideoHistoryDeletePath(item))' in text
     assert 'val preferred=historyPreferredSelection(endpoint.endpointId,item)' in text
     assert 'confirmEndpointSelection(preferred)' in text
     assert 'val confirmed=confirmedVideoSelectionFromPut(endpoint.endpointId,ack)' in text
@@ -122,6 +122,52 @@ def test_home_video_selection_and_history_are_canonical_endpoint_scoped() -> Non
     assert 'endpointPath(endpoint.endpointId,"/video/history")' not in text
     assert "LaunchedEffect(api.server,endpointId){reload()}" in text
 
+
+
+def test_history_picker_and_editor_share_one_library_membership() -> None:
+    text = _source()
+    editor = text.split("@Composable private fun HistoryEditorDialog", 1)[1].split(
+        "@Composable private fun HistoryEditorRow", 1
+    )[0]
+    picker = text.split("@Composable private fun HistoryPickerDialog", 1)[1].split(
+        "@Composable private fun HistoryPickerRow", 1
+    )[0]
+    loader = text.split("suspend fun loadHistoryForEndpoint():Boolean{", 1)[1].split(
+        "suspend fun confirmEndpointSelection(", 1
+    )[0]
+    assert "savedVideoHistoryItemsWithRetry(api)" in editor
+    assert "api.delete(canonicalVideoHistoryDeletePath(item))" in editor
+    assert 'api.delete(mediaHistoryDeletePath(endpointId,item))' not in editor
+    assert "canonicalHistoryItems(items)" in picker
+    assert "savedVideoHistoryItemsWithRetry(api)" in loader
+    assert "setEndpointSavedHistory(catalog)" in loader
+    assert "setEndpointHistory(historyItemsAfterRead(history,catalog,watched.getOrNull()" in loader
+    assert 'if(endpoint.adapterKind=="home_edge_tv")saved?.isSuccess==true else watched.isSuccess' not in loader
+    assert 'val historyActionable=api.server!=null&&(!historyLoading||historyHydrated)' in text
+    assert 'val refreshed=loadHistoryForEndpoint();if((refreshed||historyHydrated)&&history.isNotEmpty())historyOpen=true' in text
+    assert "watchedHistoryForSavedLibrary(savedBase,it)" in text
+    assert "return canonicalHistoryItems(mergedHistoryItems(savedBase,watchedBase))" in text
+    assert 'internal fun canonicalVideoHistoryDeletePath(item:JSONObject):String="/api/video/history/${Uri.encode(historyKey(item))}"' in text
+    assert "setEndpointHistoryHydrated(true)" in loader
+    assert "setEndpointHistoryError(saved.exceptionOrNull()?.message" in loader
+
+
+def test_history_refresh_is_quiet_bounded_and_does_not_redraw_unchanged_cards() -> None:
+    text = _source()
+    loader = text.split("suspend fun loadHistoryForEndpoint():Boolean{", 1)[1].split(
+        "suspend fun confirmEndpointSelection(", 1
+    )[0]
+    assert "if(api.server==null||historyLoading)return false" in loader
+    assert "historyLoading=!historyHydrated" in loader
+    assert "finally{" in loader and "historyLoading=false" in loader
+    assert "setEndpointHistoryHydrated(true)" in loader
+    assert "sameMediaHistoryRows(history,items)" in text
+    assert "sameMediaHistoryRows(savedHistory,items)" in text
+    assert "previous.size==fresh.size&&previous.indices.all" in text
+    assert "if(api.server!=null&&!historyHydrated)" in text
+    assert "repeat(2){ attempt->" in text
+    assert "while(true){if(loadHistoryForEndpoint())" not in text
+    assert "HistoryPickerField(historyLabel,historyActionable,historyLoading&&!historyHydrated" in text
 
 
 def test_home_history_cards_prefer_server_canonical_work_identity() -> None:

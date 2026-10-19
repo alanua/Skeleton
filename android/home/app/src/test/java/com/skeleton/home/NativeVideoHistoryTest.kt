@@ -109,20 +109,22 @@ class NativeVideoHistoryTest {
     }
 
     @Test
-    fun failedNetworkReadPreservesExistingHistoryAndSamsungWatchedScope() {
+    fun sharedCatalogRemainsAuthoritativeOnTvAndTabletEvenOnNetworkFailure() {
         val previous = listOf(history("bb", "Babylon Berlin"))
         val watched = listOf(history("pm", "Perry Mason"))
         val saved = listOf(history("bb", "Babylon Berlin"), history("pm-saved", "Perry Mason"))
 
         assertEquals(previous, historyItemsAfterRead(previous, null, null, homeEdgeTv = true))
-        assertEquals(previous, historyItemsAfterRead(previous, saved, null, homeEdgeTv = false))
-        assertEquals(listOf("Babylon Berlin", "Perry Mason"), historyItemsAfterRead(previous, null, watched, homeEdgeTv = true).map { it.getString("title") })
+        assertEquals(previous, historyItemsAfterRead(previous, null, watched, homeEdgeTv = true))
+        assertEquals(previous, historyItemsAfterRead(previous, null, watched, homeEdgeTv = false))
+        assertEquals(saved.map(::historyKey), historyItemsAfterRead(previous, saved, null, homeEdgeTv = false).map(::historyKey))
 
         val tvMerged = historyItemsAfterRead(previous, saved, watched, homeEdgeTv = true)
         val samsung = historyItemsAfterRead(previous, saved, watched, homeEdgeTv = false)
 
-        assertEquals(listOf("Babylon Berlin", "Perry Mason"), tvMerged.map { it.getString("title") })
-        assertEquals(listOf("Perry Mason"), samsung.map { it.getString("title") })
+        assertEquals(saved.map(::historyKey), tvMerged.map(::historyKey))
+        assertEquals(tvMerged.map(::historyKey), samsung.map(::historyKey))
+        assertEquals(listOf("Babylon Berlin", "Perry Mason"), samsung.map { it.getString("title") })
     }
 
     @Test
@@ -132,7 +134,7 @@ class NativeVideoHistoryTest {
         val saved = listOf(history("bb", "Babylon Berlin"), history("future", "Future Saved Work"))
 
         assertEquals("/api/video/history", savedVideoHistoryPath())
-        assertEquals(listOf("Babylon Berlin", "Perry Mason"), historyItemsAfterRead(previous, null, watched, homeEdgeTv = true).map { it.getString("title") })
+        assertEquals(listOf("Babylon Berlin"), historyItemsAfterRead(previous, null, watched, homeEdgeTv = true).map { it.getString("title") })
         assertEquals(listOf("Babylon Berlin", "Future Saved Work"), historyItemsAfterRead(previous, saved, null, homeEdgeTv = true).map { it.getString("title") })
     }
 
