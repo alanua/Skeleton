@@ -312,6 +312,8 @@ private fun endpointMutation(endpointId:String,vararg pairs:Pair<String,Any?>):J
 private fun endpointPath(endpointId:String,suffix:String):String="/api/media/endpoints/${Uri.encode(endpointId)}$suffix"
 internal fun savedVideoHistoryPath():String="/api/video/history"
 private fun mediaHistoryPath(endpointId:String):String="/api/media/history?endpoint=${Uri.encode(endpointId)}"
+// The library is shared across devices; only the watched progress belongs to an endpoint.
+internal fun canonicalVideoHistoryDeletePath(item:JSONObject):String="/api/video/history/${Uri.encode(historyKey(item))}"
 // One saved work must have one stable card identity; legacy history_id is only a fallback.
 internal fun historyKey(item:JSONObject):String=item.cleanText("history_key",item.cleanText("content_key",item.cleanText("history_id")))
 private fun mediaHistoryDeletePath(endpointId:String,item:JSONObject):String="/api/media/history/${Uri.encode(historyKey(item))}?endpoint=${Uri.encode(endpointId)}"
@@ -360,20 +362,14 @@ private fun watchedHistoryForSavedLibrary(savedLibrary:List<JSONObject>,watchedH
     if(savedKeys.isEmpty())return emptyList()
     return watchedHistory.filter{historyKey(it) in savedKeys}
 }
+// The saved work catalog is the only membership authority on every endpoint.
+// Endpoint watch rows only enrich matching works with device-scoped progress.
+// Even a stale watch record cannot resurrect a deleted catalog entry.
+@Suppress("UNUSED_PARAMETER")
 internal fun historyItemsAfterRead(previous:List<JSONObject>,savedLibrary:List<JSONObject>?,watchedHistory:List<JSONObject>?,homeEdgeTv:Boolean,previousSavedLibrary:List<JSONObject>? = null):List<JSONObject>{
-    return if(homeEdgeTv){
-        val canonicalSaved=savedLibrary?.let(::canonicalHistoryItems)
-        val savedBase=canonicalSaved ?: previousSavedLibrary?.takeIf{it.isNotEmpty()} ?: previous
-        if(savedLibrary==null&&watchedHistory==null)previous
-        else{
-            val watchedBase=watchedHistory?.let{
-                if(canonicalSaved!=null||previousSavedLibrary!=null)watchedHistoryForSavedLibrary(savedBase,it) else it
-            } ?: emptyList()
-            canonicalHistoryItems(mergedHistoryItems(savedBase,watchedBase))
-        }
-    }else{
-        watchedHistory?.let(::canonicalHistoryItems) ?: previous
-    }
+    val savedBase=savedLibrary?.let(::canonicalHistoryItems) ?: previousSavedLibrary?.let(::canonicalHistoryItems) ?: return previous
+    val watchedBase=watchedHistory?.let{watchedHistoryForSavedLibrary(savedBase,it)}.orEmpty()
+    return canonicalHistoryItems(mergedHistoryItems(savedBase,watchedBase))
 }
 private val VideoSelectionIdentityFields=listOf("job_id","source_id","season","episode","voice")+listOf("endpoint_id")
 private fun videoSelectionIdentity(selection:JSONObject):String=
@@ -1224,8 +1220,8 @@ private fun HomeComposeApp(sharedUrl:String?, consumeShare:()->Unit) {
 }
 
 @Composable private fun HistoryEditorDialog(api:HomeApi,endpointId:String,onDismiss:()->Unit){
-    val scope=rememberCoroutineScope();var items by remember{mutableStateOf(emptyList<JSONObject>())};var query by remember{mutableStateOf("")};var busy by remember{mutableStateOf(false)};val focusRequester=remember{FocusRequester()};val keyboard=LocalSoftwareKeyboardController.current
-    suspend fun reload(){if(api.server==null)return;busy=true;items=runCatching{canonicalHistoryItems(api.get(mediaHistoryPath(endpointId)).optJSONArray("items")?.objects().orEmpty())}.getOrElse{emptyList()};busy=false}
+    val scope=rememberCoroutineScope();var items by remember{mutableStateOf(emptyList<JSONObject>())};var query by remember{mutableStateOf("")};var busy by remember{mutableStateOf(false)};var error by remember{mutableStateOf("")};val focusRequester=remember{FocusRequester()};val keyboard=LocalSoftwareKeyboardController.current
+    suspend fun reload(){if(api.server==null)return;busy=true;runCatching{canonicalHistoryItems(savedVideoHistoryItemsWithRetry(api))}.onSuccess{items=it;error=""}.onFailure{error=it.message?:"Спільний каталог недоступний"};busy=false}
     LaunchedEffect(api.server,endpointId){reload()}
     val q=query.trim().lowercase(Locale.ROOT)
     val visible=if(q.isBlank())items else items.filter{ x -> listOf(x.optString("title"),x.optString("year"),x.optString("content_type"),x.optString("overview")).joinToString(" ").lowercase(Locale.ROOT).contains(q) }
@@ -1241,11 +1237,12 @@ private fun HomeComposeApp(sharedUrl:String?, consumeShare:()->Unit) {
                         Mdi("magnify",20.dp,Muted);Spacer(Modifier.width(8.dp));
                         androidx.compose.foundation.text.BasicTextField(value=query,onValueChange={query=it},singleLine=true,textStyle=androidx.compose.ui.text.TextStyle(color=Text,fontSize=14.sp),modifier=Modifier.weight(1f).focusRequester(focusRequester),decorationBox={inner->Box(Modifier.fillMaxWidth()){if(query.isEmpty())Text(ui("Пошук в історії"),color=Color(0xFF747D85),fontSize=14.sp);inner()}})
                     }
-                    Row(Modifier.fillMaxWidth().padding(horizontal=2.dp,vertical=6.dp),verticalAlignment=Alignment.CenterVertically){Text(ui("Останні додані або переглянуті — першими"),fontSize=10.sp,color=Muted);Spacer(Modifier.weight(1f));Text(if(q.isBlank())"${items.size}" else "${visible.size} з ${items.size}",fontSize=10.sp,fontWeight=FontWeight.Bold,color=Accent)}
+                    Row(Modifier.fillMaxWidth().padding(horizontal=2.dp,vertical=6.dp),verticalAlignment=Alignment.CenterVertically){Text(ui("Спільний каталог творів · перегляди окремі для пристроїв"),fontSize=10.sp,color=Muted,modifier=Modifier.weight(1f));Text(if(q.isBlank())"${items.size}" else "${visible.size} з ${items.size}",fontSize=10.sp,fontWeight=FontWeight.Bold,color=Accent)}
+                    if(error.isNotBlank())Text(error,fontSize=11.sp,color=Color(0xFFFF8A80),modifier=Modifier.padding(horizontal=4.dp,vertical=4.dp))
                 }
                 if(busy) Box(Modifier.fillMaxSize(),contentAlignment=Alignment.Center){CircularProgressIndicator(color=Accent,strokeWidth=2.dp,modifier=Modifier.size(28.dp))}
                 else LazyColumn(Modifier.weight(1f).fillMaxWidth().padding(horizontal=10.dp),contentPadding=PaddingValues(bottom=18.dp)){
-                    items(visible,key={historyKey(it).ifBlank{it.optString("title")}}){item->HistoryEditorRow(api,item,{scope.launch{runCatching{api.delete(mediaHistoryDeletePath(endpointId,item))};reload()} })}
+                    items(visible,key={historyKey(it).ifBlank{it.optString("title")}}){item->HistoryEditorRow(api,item,{scope.launch{runCatching{api.delete(canonicalVideoHistoryDeletePath(item))}.onSuccess{reload()}.onFailure{error=it.message?:"Не вдалося видалити твір"}} })}
                 }
             }
         }
@@ -2079,22 +2076,19 @@ private fun VideoScreen(api:HomeApi,active:Boolean,selectionRevision:Int,endpoin
     suspend fun loadHistoryForEndpoint():Boolean{
         if(api.server==null)return false
         historyLoading=true; setEndpointHistoryError("")
+        // Both dialogs read the same work membership, regardless of output device.
+        val saved=runCatching{savedVideoHistoryItemsWithRetry(api)}
         val watched=runCatching{api.get(mediaHistoryPath(endpoint.endpointId)).optJSONArray("items")?.objects().orEmpty()}
-        val saved=if(endpoint.adapterKind=="home_edge_tv")runCatching{savedVideoHistoryItemsWithRetry(api)} else null
-        val ok=if(endpoint.adapterKind=="home_edge_tv")saved?.isSuccess==true else watched.isSuccess
-        if(ok){
-            if(endpoint.adapterKind=="home_edge_tv"){
-                setEndpointHistory(historyItemsAfterRead(history,saved?.getOrNull(),watched.getOrNull(),true,savedHistory))
-                saved?.getOrNull()?.let{setEndpointSavedHistory(canonicalHistoryItems(it))}
-            }else{
-                setEndpointHistory(historyItemsAfterRead(history,null,watched.getOrNull(),false))
-            }
+        if(saved.isSuccess){
+            val catalog=canonicalHistoryItems(saved.getOrThrow())
+            setEndpointSavedHistory(catalog)
+            setEndpointHistory(historyItemsAfterRead(history,catalog,watched.getOrNull(),endpoint.adapterKind=="home_edge_tv"))
             setEndpointHistoryHydrated(true)
         }else{
-            setEndpointHistoryError((saved?.exceptionOrNull()?:watched.exceptionOrNull())?.message?:"Історія недоступна")
+            setEndpointHistoryError(saved.exceptionOrNull()?.message?:"Спільний каталог недоступний")
         }
         historyLoading=false
-        return ok
+        return saved.isSuccess
     }
     suspend fun confirmEndpointSelection(body:JSONObject):JSONObject{
         pendingSelectionIdentity=videoSelectionIdentity(body)
@@ -2239,8 +2233,8 @@ private fun VideoScreen(api:HomeApi,active:Boolean,selectionRevision:Int,endpoin
                         job!=null->cat.optString("title","Обраний твір")
                         else->"Оберіть збережений твір"
                     }
-                    val historyActionable=api.server!=null&&!historyLoading&&(history.isNotEmpty()||historyError.isNotBlank())
-                    HistoryPickerField(historyLabel,historyActionable,historyLoading,historyError.isNotBlank()){if(history.isNotEmpty())historyOpen=true else scope.launch{loadHistoryForEndpoint()}}
+                    val historyActionable=api.server!=null&&!historyLoading
+                    HistoryPickerField(historyLabel,historyActionable,historyLoading,historyError.isNotBlank()){scope.launch{if(loadHistoryForEndpoint()&&history.isNotEmpty())historyOpen=true}}
                     if(isSeries){
                         SeasonPickerField(season,seasonItems,loadedSeasons){seasonOpen=true}
                         SelectorField(ui("Серія"),"play",if(selectedIsTrailer)"Трейлер" else episode,if(selectedIsTrailer)listOf("Трейлер") else episodes,showCount=!selectedIsTrailer,trailing=if(selectedIsTrailer)"" else selectedDuration){if(!selectedIsTrailer)episode=it}
@@ -2294,7 +2288,7 @@ private fun VideoScreen(api:HomeApi,active:Boolean,selectionRevision:Int,endpoin
         historyOpen=false
         scope.launch{
             runCatching{
-                if(endpoint.adapterKind=="home_edge_tv"){
+                if(endpoint.adapterKind=="home_edge_tv"||item.cleanText("job_id").isBlank()||item.cleanText("source_id").isBlank()){
                     openSavedHistoryItem(item)
                 }else{
                     val preferred=historyPreferredSelection(endpoint.endpointId,item)
