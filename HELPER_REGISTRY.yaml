@@ -65,7 +65,9 @@ helpers:
     trust: operator_interface
     can:
       - show_pr_ready_cards
+      - show_scan_report_cards
       - receive_approve_reject_callback
+      - receive_scan_report_review_callbacks
       - send_notifications
     cannot:
       - autonomous_merge

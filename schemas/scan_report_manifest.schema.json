@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.scan_report_manifest.v1",
+  "type": "object",
+  "required": ["schema", "report_version", "manifest_id", "manifest_hash", "session_id", "scan_id", "created_at", "overall_status", "package_summary", "documents", "delivery", "audit"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {"const": "skeleton.scan_report_manifest.v1"},
+    "report_version": {"const": 1},
+    "manifest_id": {"type": "string"},
+    "manifest_hash": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "session_id": {"type": "string"},
+    "scan_id": {"type": "string"},
+    "created_at": {"type": "string"},
+    "overall_status": {"enum": ["success", "partial_success", "review_required", "error", "awaiting_additional_pass"]},
+    "package_summary": {
+      "type": "object",
+      "required": ["package_id", "physical_page_count", "logical_document_count", "completed_count", "review_required_count", "failed_count", "overall_status"],
+      "additionalProperties": false,
+      "properties": {
+        "package_id": {"type": "string"},
+        "physical_page_count": {"type": "integer", "minimum": 0},
+        "logical_document_count": {"type": "integer", "minimum": 0},
+        "completed_count": {"type": "integer", "minimum": 0},
+        "review_required_count": {"type": "integer", "minimum": 0},
+        "failed_count": {"type": "integer", "minimum": 0},
+        "overall_status": {"enum": ["success", "partial_success", "review_required", "error", "awaiting_additional_pass"]}
+      }
+    },
+    "documents": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["document_id", "pages", "page_range", "page_count", "title", "sender", "recipient_owner", "document_date", "country", "document_type", "topic", "classification_path", "confidence", "processing_status", "summary", "summary_reliability", "review_required", "human_storage_path", "artifacts", "actions"],
+        "additionalProperties": true,
+        "properties": {
+          "document_id": {"type": "string"},
+          "pages": {"type": "array", "items": {"type": "integer", "minimum": 1}},
+          "page_range": {"type": "string"},
+          "page_count": {"type": "integer", "minimum": 1},
+          "processing_status": {"enum": ["completed", "review_required", "failed", "awaiting_additional_pass"]},
+          "summary_reliability": {"enum": ["reliable", "unreliable"]},
+          "review_required": {"type": "boolean"},
+          "artifacts": {"type": "object"},
+          "actions": {"type": "array"}
+        }
+      }
+    },
+    "delivery": {"type": "object"},
+    "audit": {"type": "object"}
+  }
+}
