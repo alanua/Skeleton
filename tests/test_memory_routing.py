@@ -94,6 +94,17 @@ def test_fixuy_memory_routes_are_explicit_and_secrets_refuse_plain_storage() -> 
     assert "secrets_credentials" in routing["classification_required_for"]
 
 
+def test_public_review_route_blocks_private_book_media_customer_and_secret_entries() -> None:
+    routes = load_yaml("MEMORY_ROUTING.yaml")["routes"]
+
+    public_review = routes["public_safe_review_queue"]
+
+    assert public_review["target"] == "projects/skeleton/REVIEW_QUEUE.yaml"
+    assert "private_data" in public_review["forbids"]
+    assert "secrets" in public_review["forbids"]
+    assert public_review["canon_rule"] == "CANON_requires_approval_and_must_not_be_promoted_automatically"
+
+
 def test_fixuy_runtime_rule_is_not_chat_only() -> None:
     means = set(load_yaml("MEMORY_ROUTING.yaml")["fixuy_runtime_rule"]["means"])
 
