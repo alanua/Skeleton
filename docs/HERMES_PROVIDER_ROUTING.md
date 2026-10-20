@@ -9,7 +9,13 @@ or grant approval to send data to any external model.
 
 All provider names in this document are policy examples. They are not enabled live routes.
 
-## Routing Model
+## Canon Foundation
+
+The following sections are the operator-approved routing foundation for the
+public Skeleton repository. They define the static policy boundary only and do
+not implement runtime behavior.
+
+### Routing Model
 
 Hermes work should be routed by task shape, data sensitivity, and cost risk.
 
@@ -24,14 +30,14 @@ The bulk worker should receive only bounded, public-safe, sanitized chunks. The
 critic should receive only sanitized summaries, aggregate calibration notes, and
 claimed conclusions that need audit.
 
-## Troitsa-inspired pattern
+### Troitsa-inspired pattern
 
 The policy borrows the general shape of a three-role pattern: one model plans,
 one low-cost model does high-volume execution, and one independent model audits
 the result. Skeleton does not import, vendor, execute, or depend on any external
 repository, script, prompt pack, or routing implementation for this pattern.
 
-## Budget Gates
+### Budget Gates
 
 Provider routing remains blocked unless every budget gate is satisfied:
 
@@ -46,7 +52,7 @@ Provider routing remains blocked unless every budget gate is satisfied:
 - A route must prefer local/private Hermes handling when data sensitivity is
   higher than the approved provider route.
 
-## Privacy Gates
+### Privacy Gates
 
 No external provider route may receive private material unless an explicit
 private-provider approval route exists for the exact data and provider. Without
@@ -67,7 +73,7 @@ Sanitization must remove or replace private identifiers before any approved
 external route. Redaction is not sufficient if the remaining context can still
 identify a customer, project, drawing, Drive file, or private quantity.
 
-## Aufmass Routing
+### Aufmass Routing
 
 Aufmass work has a stricter boundary because raw artifacts and quantities are
 private by default.
@@ -85,7 +91,7 @@ private by default.
 - If there is any uncertainty about whether an Aufmass prompt is sanitized, the
   route stays private/local and the external provider route is blocked.
 
-## Failure Modes
+### Failure Modes
 
 Provider routing must explicitly account for these failure modes:
 
@@ -100,10 +106,36 @@ Provider routing must explicitly account for these failure modes:
 - Excessive retries that increase cost or leak more context without improving
   confidence.
 
-## Approval Boundary
+### Approval Boundary
 
 This policy is not an approval. A future live route must define the exact
 provider, data class, budget, token cap, retry cap, logging behavior, approval
 record, rollback behavior, and stop conditions before any external call is made.
 Provider routing that cannot be described in public-safe terms must remain
 private and unimplemented in the public repository.
+
+## Review Tracking
+
+This section is explicitly non-canon. It tracks material that still requires
+critique, deduplication, a PatchPlan, explicit operator approval, and a separate
+canon write before promotion.
+
+- Exact executor/model binding semantics across planner, bulk worker, and
+  critic roles.
+- Exact sanitized payload schema for any future external provider route.
+- Exact live-provider approval record, logging behavior, rollback behavior, and
+  stop-condition format.
+- Reconciliation with `docs/MODEL_ROUTING.md` and `docs/EXECUTION_FABRIC.md`
+  before any production route can be considered.
+
+## Backlog Tracking
+
+This section is explicitly non-canon. It records future work ideas only and does
+not create Runner work, provider calls, OpenRouter integration, OpenHands
+integration, secrets handling, deployment, or runtime behavior.
+
+- Optional model catalog discovery integration for public-safe challenger
+  identification.
+- Optional canary fixtures for sanitized public-safe routing examples.
+- Optional auditor-report format for critic outputs.
+- Optional Aufmass-specific sanitized delegation examples.
