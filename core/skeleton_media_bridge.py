@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 import importlib
 import importlib.util
 from types import ModuleType
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 SKELETON_MEDIA_REPOSITORY = "alanua/skeleton-media"
 SKELETON_MEDIA_REQUIRED_SHA = "7089b1ba37292aab0283cadb8ac85644cc3d28f8"
@@ -338,3 +338,135 @@ def _copy_state(state: EndpointState) -> EndpointState:
 def _require_capability(endpoint: MediaEndpoint, action: str) -> None:
     if action not in endpoint.capabilities:
         raise MediaEndpointError("endpoint_capability_unsupported")
+
+
+
+# Draft protected catalog/ingress contract for Skeleton #4788.
+# This is NOT a live gateway registration or a route to system execution.
+# Keep the existing 2-tool Skeleton Control MCP surface unchanged.
+GLOBAL_VIDEO_PROVIDER_ID = "skeleton.video_understanding.global"
+VIDEO_TRANSCRIPT_SOURCE_DEPENDENCY_PR = "alanua/skeleton-media#71"
+GLOBAL_VIDEO_OPERATIONS = (
+    "video_understand_url",
+    "video_import_urls",
+    "video_process_one",
+    "video_status",
+    "video_doctor",
+    "video_query",
+    "video_reprocess",
+    "video_attach_to_project",
+    "video_transcribe_url",
+)
+_VIDEO_TRANSCRIBE_HOSTS = frozenset(
+    {"youtube.com", "www.youtube.com", "youtu.be", "vimeo.com", "www.vimeo.com"}
+)
+
+
+class GlobalVideoIngressError(ValueError):
+    """A typed global video ingress request is invalid or unauthorized."""
+
+
+def global_video_provider_catalog() -> dict[str, Any]:
+    """Describe ONE source-only provider, never claim a live executor exists."""
+    return {
+        "schema": "skeleton.video_understanding.global_provider.v1",
+        "provider_id": GLOBAL_VIDEO_PROVIDER_ID,
+        "status": "SOURCE_ONLY_NOT_DEPLOYED",
+        "runtime_registered": False,
+        "live_runtime_execution": False,
+        "required_external_source_pr": VIDEO_TRANSCRIPT_SOURCE_DEPENDENCY_PR,
+        "control_mcp_tools_changed": False,
+        "shared_worker_policy": "ONE_EXISTING_VIDEO_WORKER",
+        "shared_queue_policy": "ONE_EXISTING_VIDEO_QUEUE",
+        "canonical_memory_policy": "EXISTING_MEMORY_GATEWAY_ONLY",
+        "dios_policy": "PRESERVE_LEGACY",
+        "operations": list(GLOBAL_VIDEO_OPERATIONS),
+    }
+
+
+def plan_global_video_transcribe_ingress(
+    payload: dict[str, Any],
+    *,
+    authenticated_caller: str | None,
+    trusted_gate_check: Callable[[str, str], bool] | None,
+) -> dict[str, Any]:
+    """Validate a proposed private plan; intentionally no executor/dispatch.
+
+    The caller identity and Gate callable MUST be supplied by an authenticated
+    host, never extracted from payload. This helper is NOT the Gate itself.
+    A trusted host still must verify external package pin, registered runtime,
+    unique queue authority and separate operator approval before execution.
+    """
+    from urllib.parse import urlsplit
+
+    if not isinstance(payload, dict):
+        raise GlobalVideoIngressError("VIDEO_INGRESS_PAYLOAD_INVALID")
+    allowed = frozenset({"operation", "url", "mode", "verify_with_independent_asr"})
+    if set(payload) - allowed:
+        raise GlobalVideoIngressError("VIDEO_INGRESS_FIELDS_FORBIDDEN")
+    if payload.get("operation") != "video_transcribe_url":
+        raise GlobalVideoIngressError("VIDEO_INGRESS_OPERATION_INVALID")
+    if not isinstance(authenticated_caller, str) or not (
+        1 <= len(authenticated_caller) <= 128
+        and all(ch.isascii() and (ch.isalnum() or ch in "-_.:") for ch in authenticated_caller)
+    ):
+        raise GlobalVideoIngressError("VIDEO_INGRESS_CALLER_REQUIRED")
+    if not callable(trusted_gate_check):
+        raise GlobalVideoIngressError("VIDEO_INGRESS_GATE_UNAVAILABLE")
+    # A false result or exception fails closed without exposing caller/private data.
+    try:
+        permitted = trusted_gate_check(authenticated_caller, "video_transcribe_url")
+    except Exception as exc:
+        raise GlobalVideoIngressError("VIDEO_INGRESS_GATE_DENIED") from exc
+    if permitted is not True:
+        raise GlobalVideoIngressError("VIDEO_INGRESS_GATE_DENIED")
+    mode = payload.get("mode", "QUICK")
+    if not isinstance(mode, str) or mode not in {"QUICK", "STANDARD"}:
+        raise GlobalVideoIngressError("VIDEO_INGRESS_MODE_UNSUPPORTED")
+    verify = payload.get("verify_with_independent_asr", False)
+    if not isinstance(verify, bool):
+        raise GlobalVideoIngressError("VIDEO_INGRESS_ASR_FLAG_INVALID")
+    url = payload.get("url")
+    if not isinstance(url, str) or not 1 <= len(url) <= 4096 or url != url.strip():
+        raise GlobalVideoIngressError("VIDEO_INGRESS_URL_INVALID")
+    try:
+        parsed = urlsplit(url)
+        safe_url = (
+            parsed.scheme == "https"
+            and parsed.hostname in _VIDEO_TRANSCRIBE_HOSTS
+            and parsed.port in (None, 443)
+            and parsed.username is None
+            and parsed.password is None
+            and not parsed.fragment
+            and bool(parsed.path and parsed.path != "/")
+            and not any(ord(ch) < 32 or ord(ch) == 127 for ch in url)
+        )
+    except ValueError as exc:
+        raise GlobalVideoIngressError("VIDEO_INGRESS_URL_INVALID") from exc
+    if not safe_url:
+        raise GlobalVideoIngressError("VIDEO_INGRESS_URL_INVALID")
+    return {
+        "private_plan": {
+            "schema": "skeleton.video_understanding.transcribe_ingress_plan.v1",
+            "provider_id": GLOBAL_VIDEO_PROVIDER_ID,
+            "operation": "video_transcribe_url",
+            "url": url,
+            "mode": mode,
+            "verify_with_independent_asr": verify,
+            "shared_worker_policy": "ONE_EXISTING_VIDEO_WORKER",
+            "runtime_registered": False,
+            "execution_requested": False,
+            "canonical_mutation": "NOT_USED",
+            "llm_policy": "NOT_USED",
+            "vision_policy": "NOT_USED",
+        },
+        "public_receipt": {
+            "schema": "skeleton.video_understanding.transcribe_ingress_receipt.v1",
+            "provider_id": GLOBAL_VIDEO_PROVIDER_ID,
+            "operation": "video_transcribe_url",
+            "status": "PLANNED_NOT_REGISTERED",
+            "runtime_registered": False,
+            "execution_performed": False,
+            "canonical_mutation_status": "NOT_USED",
+        },
+    }
