@@ -48,7 +48,13 @@ def _load_existing_index() -> dict[str, object]:
     if not ENCRYPTED_INDEX_PATH.is_file():
         raise ValueError("unsafe_index_path")
     result = subprocess.run(
-        [SYSTEMD_CREDS, "decrypt", str(ENCRYPTED_INDEX_PATH), "-"],
+        [
+            SYSTEMD_CREDS,
+            "decrypt",
+            f"--name={CREDENTIAL_NAME}",
+            str(ENCRYPTED_INDEX_PATH),
+            "-",
+        ],
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
