@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 import uuid
 
 
@@ -100,22 +102,42 @@ def _merged_index(payload: dict[str, object], reference_id: str) -> dict[str, ob
 
 def _encrypt_index(payload: dict[str, object]) -> None:
     serialized = json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n"
-    result = subprocess.run(
-        [
-            SYSTEMD_CREDS,
-            "encrypt",
-            f"--name={CREDENTIAL_NAME}",
-            "-",
-            str(ENCRYPTED_INDEX_PATH),
-        ],
-        input=serialized,
-        text=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=False,
+    ENCRYPTED_INDEX_PATH.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        dir=ENCRYPTED_INDEX_PATH.parent,
+        prefix=f".{ENCRYPTED_INDEX_PATH.name}.",
+        suffix=".new",
     )
-    if result.returncode != 0:
-        raise ValueError("encrypt_failed")
+    os.close(fd)
+    tmp_path = Path(tmp_name)
+    tmp_path.unlink()
+    try:
+        result = subprocess.run(
+            [
+                SYSTEMD_CREDS,
+                "encrypt",
+                f"--name={CREDENTIAL_NAME}",
+                "-",
+                str(tmp_path),
+            ],
+            input=serialized,
+            text=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        if result.returncode != 0 or not tmp_path.is_file():
+            raise ValueError("encrypt_failed")
+        os.chmod(tmp_path, 0o644)
+        os.replace(tmp_path, ENCRYPTED_INDEX_PATH)
+        dir_fd = os.open(ENCRYPTED_INDEX_PATH.parent, os.O_DIRECTORY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink()
 
 
 def main() -> int:
