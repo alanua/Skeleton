@@ -85,3 +85,21 @@ semantic records, metadata rows, current-state rows, or history rows. Reusing an
 fails after the semantic record is committed, retry recovers from the existing
 canonical event and finishes the SQLite rows without writing another semantic
 record.
+
+## Registered Operation: home_edge_root_audit_remediation_20260729_v1
+
+`home_edge_root_audit_remediation_20260729_v1` is the staged remediation plan
+for the full Home Edge root audit taken on July 29, 2026. The operation is a
+registry-visible plan, not a broad shell escape. It produces step-scoped Home
+Edge executor requests for the Brother Scan Key FD leak, registry refresh,
+Tailscale DNS diagnostics, portal-wlr/HyperHDR recovery, listener ownership
+mapping, firewall canary rollback, and bounded SMART monitoring.
+
+Each mutation requires an operator approval reference, a backup before the
+change, independent verification, and a rollback path. Device reconciliation
+must use stable identity such as registry ID, serial, MAC, hostname or
+Tailscale node identity; IP-only identity is explicitly insufficient.
+
+Router mutation, firmware updates, factory resets, external exposure changes,
+and destructive storage actions remain deferred until a separate explicit
+approval and backup exist.

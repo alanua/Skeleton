@@ -93,6 +93,44 @@ HOME_EDGE_AUDIT_PERSIST_OPERATION = {
     "last_failure": None,
 }
 
+HOME_EDGE_ROOT_AUDIT_REMEDIATION_OPERATION = {
+    "operation_id": "home_edge_root_audit_remediation_20260729_v1",
+    "device_id": "home_edge_01",
+    "execution_node": "home-edge-01",
+    "bounded_api_payload": {
+        "schema": "skeleton.home_edge.root_audit_remediation_plan.v1",
+        "audit_id": "home-device-root-audit-20260729T220114Z",
+        "audit_receipt": "a04f8ab09ac6082df86da20341a1da595ded094468ed60608bfb9197a5bf2ed7",
+    },
+    "run_as": "mixed_by_step",
+    "timeout_seconds": 900,
+    "risk": "high_staged",
+    "approval_gate": "per_mutation_operator_approval_required",
+    "preconditions": [
+        "backup_registry_and_configuration_before_each_mutation",
+        "confirm_no_active_playback_or_scanning_job",
+        "use_stable_device_identity_not_ip_only",
+        "confirm_runner_recovery_path",
+    ],
+    "independent_verification": [
+        "brother_socket_fd_count_below_100_for_two_refresh_cycles",
+        "physical_brother_scan_to_pc_succeeds",
+        "device_refresh_timer_success_and_registry_doctor_pass",
+        "portal_wlr_and_hyperhdr_capture_healthy_after_mode_transition",
+        "tailscale_dns_and_direct_runner_connection_classified",
+        "all_external_listeners_have_registered_owner",
+        "firewall_canary_probe_matrix_passes_before_commit",
+        "smart_monitoring_installed_without_destructive_disk_action",
+    ],
+    "rollback": {
+        "mode": "step_scoped_backup_restore_or_automatic_canary_rollback",
+        "firewall": "restore_previous_ruleset_on_probe_failure_or_timeout",
+        "router_firmware_storage_destructive": "deferred_without_separate_approval",
+    },
+    "last_success": None,
+    "last_failure": None,
+}
+
 
 @dataclass(frozen=True)
 class HomeEdgeProfile:
@@ -219,7 +257,10 @@ def synthetic_profile_mapping() -> dict[str, Any]:
             "no_raw_shell_from_issue_payload",
             "public_reports_aggregate_only",
         ],
-        "operations": [HOME_EDGE_AUDIT_PERSIST_OPERATION],
+        "operations": [
+            HOME_EDGE_AUDIT_PERSIST_OPERATION,
+            HOME_EDGE_ROOT_AUDIT_REMEDIATION_OPERATION,
+        ],
     }
 
 

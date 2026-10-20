@@ -7,6 +7,7 @@ import pytest
 
 from core.home_edge.profile import (
     HOME_EDGE_AUDIT_PERSIST_OPERATION,
+    HOME_EDGE_ROOT_AUDIT_REMEDIATION_OPERATION,
     load_home_edge_profile,
     synthetic_profile_mapping,
 )
@@ -33,7 +34,10 @@ def test_home_edge_profile_registers_universal_fixed_node() -> None:
     assert "home_automation" in profile.capabilities
     assert profile.primary_network["interface"] == "synthetic-lan"
     assert profile.is_template_identity
-    assert registry["operations"] == [HOME_EDGE_AUDIT_PERSIST_OPERATION]
+    assert registry["operations"] == [
+        HOME_EDGE_AUDIT_PERSIST_OPERATION,
+        HOME_EDGE_ROOT_AUDIT_REMEDIATION_OPERATION,
+    ]
     operation = registry["operations"][0]
     assert operation["operation_id"] == "home_edge_audit_persist_v1"
     assert operation["device_id"] == "home_edge_01"
@@ -43,7 +47,19 @@ def test_home_edge_profile_registers_universal_fixed_node() -> None:
     assert operation["approval_gate"] == "operator_approval_required"
     assert operation["last_success"] is None
     assert operation["last_failure"] is None
-    assert registry_file["operations"] == [HOME_EDGE_AUDIT_PERSIST_OPERATION]
+    remediation = registry["operations"][1]
+    assert remediation["operation_id"] == "home_edge_root_audit_remediation_20260729_v1"
+    assert remediation["risk"] == "high_staged"
+    assert remediation["approval_gate"] == "per_mutation_operator_approval_required"
+    assert "physical_brother_scan_to_pc_succeeds" in remediation["independent_verification"]
+    assert (
+        remediation["rollback"]["router_firmware_storage_destructive"]
+        == "deferred_without_separate_approval"
+    )
+    assert registry_file["operations"] == [
+        HOME_EDGE_AUDIT_PERSIST_OPERATION,
+        HOME_EDGE_ROOT_AUDIT_REMEDIATION_OPERATION,
+    ]
 
 
 def test_profile_rejects_changed_target_identity(tmp_path: Path) -> None:
