@@ -169,7 +169,6 @@ def test_invalid_mode_and_asr_type_fail_closed() -> None:
 def test_existing_media_route_and_mcp_boundary_remain_unchanged() -> None:
     assert media.SKELETON_MEDIA_REPOSITORY == "alanua/skeleton-media"
     assert media.SKELETON_MEDIA_REQUIRED_SHA == "7089b1ba37292aab0283cadb8ac85644cc3d28f8"
-    assert media.dependency_source("video_understanding.operations") == "unavailable" if (
-        not media.external_package_available()
-    ) else True
+    with pytest.raises(media.SkeletonMediaDependencyError, match="unsupported_skeleton_media_module"):
+        media.dependency_source("video_understanding.operations")
     assert "video_understanding.operations" not in media._SUPPORTED_MODULES
