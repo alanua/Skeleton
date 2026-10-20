@@ -46,6 +46,19 @@ Responses contain service id, alias, opaque reference, action, adapter, status, 
 
 There is intentionally no `get_secret`, generic shell, generic environment injection or arbitrary destination API.
 
+## Universal service status and credential classes
+
+Operator surfaces such as Home → Secrets must not invent service-specific secret APIs. They consume public-safe registration metadata and `credential_probe` receipts from the same canonical runtime.
+
+Registered credentials may declare a non-secret `credential_kind`:
+
+- `human`: an operator-login credential. It may be stored and rotated through the provider, but Skeleton runtime must not silently reuse it for normal machine API work.
+- `machine`: a service-to-service credential used only through its registered action and delivery target.
+
+The status model may expose service id, logical alias, credential kind, registered action/delivery class, availability and bounded reason class. It must not expose provider material, reference bootstrap names, plaintext values, environment variables or arbitrary destinations.
+
+A service may register both kinds. Home Assistant is the reference case: the owner login is `human-login`, while Home Edge uses a separate `machine-api` credential for REST/WebSocket automation. Compromise or rotation of one must not implicitly replace the other.
+
 ## Failure policy
 
 Required credential failures are `BLOCKED`. Optional credential absence/provider failure is `DEGRADED`. Provider exceptions are collapsed to stable reason classes such as `SECRET_MISSING`, `SECRET_REVOKED`, `SECRET_OUT_OF_SCOPE` and `SECRET_PROVIDER_UNAVAILABLE`; raw provider output is not propagated.

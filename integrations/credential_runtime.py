@@ -47,6 +47,7 @@ class RegisteredEnvironmentCredential:
     target_id: str
     environment_variable: str
     bootstrap_required: bool = False
+    credential_kind: str = "machine"
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,6 +59,7 @@ class RegisteredMaterialCredential:
     action_id: str
     target_id: str
     bootstrap_required: bool = False
+    credential_kind: str = "machine"
 
 
 _RUNNER_OPENHANDS = RegisteredEnvironmentCredential(
@@ -101,12 +103,43 @@ _GMAIL_SECONDARY = RegisteredMaterialCredential(
     target_id="mail-gmail-secondary-oauth-consumer",
 )
 
+_HOME_ASSISTANT_OWNER = RegisteredMaterialCredential(
+    service_id="home-assistant-brandenburg",
+    alias="human-login",
+    reference_credential_name="home-assistant-brandenburg-owner-password-ref",
+    context=SecretResolutionContext(
+        machine_identity="home-edge-01",
+        audience="home-assistant-operator-login",
+        task_kind="operator_login",
+    ),
+    action_id="use-home-assistant-owner-login",
+    target_id="home-assistant-brandenburg-owner-login-consumer",
+    bootstrap_required=True,
+    credential_kind="human",
+)
+
+_HOME_ASSISTANT_API = RegisteredMaterialCredential(
+    service_id="home-assistant-brandenburg",
+    alias="machine-api",
+    reference_credential_name="home-assistant-brandenburg-api-refresh-token-ref",
+    context=SecretResolutionContext(
+        machine_identity="home-edge-01",
+        audience="home-assistant-api",
+        task_kind="home_automation_control",
+    ),
+    action_id="use-home-assistant-api",
+    target_id="home-assistant-brandenburg-api-consumer",
+    bootstrap_required=True,
+)
+
 _REGISTERED_ENVIRONMENT_CREDENTIALS = {
     (_RUNNER_OPENHANDS.service_id, _RUNNER_OPENHANDS.alias): _RUNNER_OPENHANDS,
 }
 _REGISTERED_MATERIAL_CREDENTIALS = {
     (_GMAIL_PRIMARY.service_id, _GMAIL_PRIMARY.alias): _GMAIL_PRIMARY,
     (_GMAIL_SECONDARY.service_id, _GMAIL_SECONDARY.alias): _GMAIL_SECONDARY,
+    (_HOME_ASSISTANT_OWNER.service_id, _HOME_ASSISTANT_OWNER.alias): _HOME_ASSISTANT_OWNER,
+    (_HOME_ASSISTANT_API.service_id, _HOME_ASSISTANT_API.alias): _HOME_ASSISTANT_API,
 }
 
 
@@ -134,6 +167,126 @@ def _registered_material_credential(
     if action_id != spec.action_id:
         raise RegisteredCredentialRuntimeError("registered_credential_action_mismatch")
     return spec
+
+
+def _registered_credential(
+    service_id: str,
+    alias: str,
+) -> RegisteredEnvironmentCredential | RegisteredMaterialCredential:
+    spec = _REGISTERED_ENVIRONMENT_CREDENTIALS.get((service_id, alias))
+    if spec is None:
+        spec = _REGISTERED_MATERIAL_CREDENTIALS.get((service_id, alias))
+    if spec is None:
+        raise RegisteredCredentialRuntimeError("registered_credential_unavailable")
+    return spec
+
+
+def _resolve_registered_reference(
+    *,
+    service_id: str,
+    alias: str,
+    reference_credential_name: str,
+    bootstrap_required: bool,
+    authority_environment: Mapping[str, str],
+):
+    try:
+        return registered_bitwarden_reference_from_systemd_index(
+            authority_environment,
+            service_id=service_id,
+            alias=alias,
+            bootstrap_required=bootstrap_required,
+            fallback_credential_name=reference_credential_name,
+        )
+    except SecretProviderUnavailable:
+        return bitwarden_reference_from_systemd_credential(
+            authority_environment,
+            reference_credential_name,
+        )
+
+
+def probe_registered_credential(
+    *,
+    service_id: str,
+    alias: str,
+    authority_environment: Mapping[str, str],
+) -> dict[str, object]:
+    """Probe one registered credential without delivering secret material."""
+
+    spec = _registered_credential(service_id, alias)
+    try:
+        reference = _resolve_registered_reference(
+            service_id=spec.service_id,
+            alias=spec.alias,
+            reference_credential_name=spec.reference_credential_name,
+            bootstrap_required=spec.bootstrap_required,
+            authority_environment=authority_environment,
+        )
+        binding = ServiceCredentialBinding(
+            service_id=spec.service_id,
+            alias=spec.alias,
+            reference=reference,
+            context=spec.context,
+            action_id=spec.action_id,
+            adapter_id="in_process",
+            target_id=spec.target_id,
+            required=True,
+            reload_mode="per_use",
+        )
+        runtime = build_bitwarden_credential_runtime(
+            catalog=ServiceCredentialCatalog([binding]),
+            registrations=(CredentialRuntimeRegistration(spec.service_id, spec.context),),
+            adapters={},
+            authority_environment=authority_environment,
+        )
+        return runtime.control_for(spec.service_id).invoke(
+            "credential_probe",
+            {"alias": spec.alias},
+        )
+    except SecretReferenceRegistrationError as exc:
+        raise RegisteredCredentialRuntimeError(str(exc)) from None
+    except (
+        CredentialBrokerError,
+        CredentialRuntimeRegistrationError,
+        SecretResolutionError,
+        ServiceCredentialBindingError,
+    ):
+        raise RegisteredCredentialRuntimeError(
+            "registered_credential_resolution_failed"
+        ) from None
+
+
+def registered_service_credential_status(
+    *,
+    service_id: str,
+    authority_environment: Mapping[str, str],
+) -> dict[str, object]:
+    """Return a public-safe per-service status model for operator UIs."""
+
+    credentials: list[dict[str, object]] = []
+    for item in registered_credential_capabilities():
+        if item["service_id"] != service_id:
+            continue
+        alias = item["alias"]
+        try:
+            probe = probe_registered_credential(
+                service_id=service_id,
+                alias=alias,
+                authority_environment=authority_environment,
+            )
+            result = probe.get("result") if isinstance(probe, Mapping) else None
+            status = str(result.get("status") or "BLOCKED") if isinstance(result, Mapping) else "BLOCKED"
+            reason = str(result.get("reason_class") or "UNKNOWN") if isinstance(result, Mapping) else "UNKNOWN"
+        except RegisteredCredentialRuntimeError as exc:
+            status = "BLOCKED"
+            reason = str(exc)
+        credentials.append({**item, "status": status, "reason_class": reason})
+    if not credentials:
+        raise RegisteredCredentialRuntimeError("registered_service_unavailable")
+    return {
+        "schema": "skeleton.registered_service_credentials.status.v1",
+        "service_id": service_id,
+        "credentials": credentials,
+    }
 
 
 def bind_registered_environment_credential(
@@ -234,19 +387,13 @@ def _invoke_registered_binding(
     bootstrap_required: bool,
 ) -> dict[str, object]:
     try:
-        try:
-            reference = registered_bitwarden_reference_from_systemd_index(
-                authority_environment,
-                service_id=service_id,
-                alias=alias,
-                bootstrap_required=bootstrap_required,
-                fallback_credential_name=reference_credential_name,
-            )
-        except SecretProviderUnavailable:
-            reference = bitwarden_reference_from_systemd_credential(
-                authority_environment,
-                reference_credential_name,
-            )
+        reference = _resolve_registered_reference(
+            service_id=service_id,
+            alias=alias,
+            reference_credential_name=reference_credential_name,
+            bootstrap_required=bootstrap_required,
+            authority_environment=authority_environment,
+        )
         binding = ServiceCredentialBinding(
             service_id=service_id,
             alias=alias,
@@ -294,6 +441,7 @@ def registered_credential_capabilities() -> tuple[dict[str, str], ...]:
                 "alias": spec.alias,
                 "action_id": spec.action_id,
                 "delivery": "registered_environment",
+                "credential_kind": spec.credential_kind,
             }
         )
     for spec in _REGISTERED_MATERIAL_CREDENTIALS.values():
@@ -303,6 +451,7 @@ def registered_credential_capabilities() -> tuple[dict[str, str], ...]:
                 "alias": spec.alias,
                 "action_id": spec.action_id,
                 "delivery": "registered_in_process",
+                "credential_kind": spec.credential_kind,
             }
         )
     return tuple(sorted(values, key=lambda item: (item["service_id"], item["alias"])))
