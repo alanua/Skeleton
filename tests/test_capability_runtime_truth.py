@@ -250,6 +250,139 @@ def test_fresh_verified_runtime_overrides_stale_registry_text_with_drift() -> No
     assert planned["usable_interfaces"] == ["entrypoint"]
 
 
+def test_registered_tool_evidence_requires_runtime_registered_interface_identity() -> None:
+    # Retained regression originally found by Runner #4692.
+    source = {
+        "version": "1.0.0",
+        "capabilities": {
+            "registered_runtime_tool": {
+                "status": "available",
+                "module": "tool.py",
+                "entry": "tool.run",
+                "tested": True,
+            },
+        },
+    }
+    truth = reconcile_capability_runtime_truth(
+        source,
+        [
+            evidence(
+                "registered_runtime_tool",
+                runtime_bound=True,
+                source_runtime_parity=True,
+                source="synthetic_registered_tool_without_identity",
+                evidence_ref="registered_tool_missing_runtime_interface_identity",
+                evidence_kind="registered_tool",
+            ),
+        ],
+        now=NOW,
+    )
+    registered_tool = by_id(truth)["registered_runtime_tool"]
+    assert registered_tool["freshness"] == "FRESH"
+    assert registered_tool["evidence_kinds"] == ["registered_tool"]
+    assert registered_tool["usable_interfaces"] == []
+    assert registered_tool["effective_status"] != "LIVE"
+    assert "NO_USABLE_INTERFACES" in registered_tool["reason_codes"]
+    assert truth["summary"]["live_count"] == 0
+
+
+def test_registered_tool_is_live_with_explicit_runtime_interface_evidence() -> None:
+    source = {
+        "version": "1.0.0",
+        "capabilities": {
+            "registered_runtime_tool": {
+                "status": "available",
+                "module": "tool.py",
+                "entry": "tool.static_entry",
+                "tested": True,
+            },
+        },
+    }
+    truth = reconcile_capability_runtime_truth(
+        source,
+        [
+            evidence(
+                "registered_runtime_tool",
+                runtime_bound=True,
+                source_runtime_parity=True,
+                usable_interfaces=("tool.live_interface",),
+                evidence_kind="registered_tool",
+            )
+        ],
+        now=NOW,
+    )
+    registered_tool = by_id(truth)["registered_runtime_tool"]
+    assert registered_tool["usable_interfaces"] == ["tool.live_interface"]
+    assert registered_tool["effective_status"] == "LIVE"
+    assert truth["summary"]["live_count"] == 1
+
+
+def test_nonregistration_probe_cannot_supply_missing_registered_tool_interface() -> None:
+    source = {
+        "version": "1.0.0",
+        "capabilities": {
+            "registered_runtime_tool": {
+                "status": "available",
+                "module": "tool.py",
+                "entry": "tool.static_entry",
+                "tested": True,
+            },
+        },
+    }
+    truth = reconcile_capability_runtime_truth(
+        source,
+        [
+            evidence(
+                "registered_runtime_tool",
+                runtime_bound=True,
+                source_runtime_parity=True,
+                evidence_kind="registered_tool",
+            ),
+            evidence(
+                "registered_runtime_tool",
+                runtime_bound=True,
+                source_runtime_parity=True,
+                usable_interfaces=("tool.other_probe_only",),
+                evidence_kind="probe",
+            ),
+        ],
+        now=NOW,
+    )
+    registered_tool = by_id(truth)["registered_runtime_tool"]
+    assert registered_tool["usable_interfaces"] == []
+    assert registered_tool["effective_status"] != "LIVE"
+    assert "NO_USABLE_INTERFACES" in registered_tool["reason_codes"]
+
+
+def test_nonregistered_probe_preserves_static_entry_fallback() -> None:
+    source = {
+        "version": "1.0.0",
+        "capabilities": {
+            "legacy_capability": {
+                "status": "available",
+                "module": "legacy.py",
+                "entry": "legacy.entrypoint",
+                "tested": True,
+            },
+        },
+    }
+    truth = reconcile_capability_runtime_truth(
+        source,
+        [
+            evidence(
+                "legacy_capability",
+                runtime_bound=True,
+                source_runtime_parity=True,
+                evidence_kind="probe",
+            ),
+        ],
+        now=NOW,
+    )
+    legacy_capability = by_id(truth)["legacy_capability"]
+    assert legacy_capability["usable_interfaces"] == ["legacy.entrypoint"]
+    assert legacy_capability["effective_status"] == "LIVE"
+
+
 def test_future_observed_at_fails_closed_as_stale() -> None:
     truth = reconcile_capability_runtime_truth(
         registry(),
