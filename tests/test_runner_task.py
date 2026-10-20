@@ -93,8 +93,18 @@ def test_unknown_and_missing_fields_fail_closed() -> None:
     mapping["model"] = "vendor"
     assert reason(mapping) == "UNKNOWN_TASK_FIELD"
     mapping = valid_task()
-    mapping.pop("approval_reference")
+    mapping.pop("idempotency_key")
     assert reason(mapping) == "MISSING_TASK_FIELD"
+
+
+def test_approval_reference_is_optional_for_green_tasks() -> None:
+    mapping = valid_task()
+    mapping.pop("approval_reference")
+
+    task = RunnerTask.from_mapping(mapping)
+
+    assert task.approval_reference is None
+    assert task.to_mapping()["approval_reference"] is None
 
 
 @pytest.mark.parametrize(
