@@ -4,13 +4,27 @@ After=network-online.target
 
 [Service]
 Type=simple
+User=agent
+Group=agent
 EnvironmentFile=-/etc/skeleton-family-document-intake.env
-WorkingDirectory=/home/agent/agent-dev/Skeleton
-ExecStart=/usr/bin/python3 scripts/family_document_worker.py --inbox ${SKELETON_FAMILY_DOCUMENT_INBOX} --archive ${SKELETON_FAMILY_DOCUMENT_ARCHIVE} --outbox-db ${SKELETON_FAMILY_DOCUMENT_OUTBOX_DB}
+Environment=SKELETON_FAMILY_DOCUMENT_INBOX=/var/lib/skeleton/family-documents/inbox
+Environment=SKELETON_FAMILY_DOCUMENT_ARCHIVE=/var/lib/skeleton/family-documents/archive
+Environment=SKELETON_FAMILY_DOCUMENT_OUTBOX_DB=/var/lib/skeleton/family-documents/outbox/receipts.sqlite3
+Environment=SKELETON_SCHEDULER_DB=/var/lib/skeleton/scheduler/scheduler.sqlite3
+Environment=SKELETON_PRIVATE_MEMORY_ROOT=/home/agent/.local/share/skeleton-private-memory
+WorkingDirectory=/usr/local/lib/skeleton/family-document-runtime
+ExecStart=/usr/bin/python3 -m scripts.family_document_worker --inbox ${SKELETON_FAMILY_DOCUMENT_INBOX} --archive ${SKELETON_FAMILY_DOCUMENT_ARCHIVE} --outbox-db ${SKELETON_FAMILY_DOCUMENT_OUTBOX_DB}
 Restart=on-failure
 RestartSec=15
+TimeoutStopSec=30
 NoNewPrivileges=true
 PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/skeleton/family-documents/archive /var/lib/skeleton/family-documents/outbox /var/lib/skeleton/scheduler /home/agent/.local/share/skeleton-private-memory
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
 
 [Install]
 WantedBy=multi-user.target
