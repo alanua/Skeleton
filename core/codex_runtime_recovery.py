@@ -13,7 +13,7 @@ import tempfile
 
 TARGET_CODEX_VERSION = "0.163.0"
 TARGET_CODEX_PACKAGE = f"@openai/codex@{TARGET_CODEX_VERSION}"
-TARGET_CODEX_MODEL = "gpt-5.5"
+TARGET_CODEX_MODEL = "gpt-5.6-sol"
 CANONICAL_RUNNER_ROOT = Path("/home/agent/agent-dev/repos/Skeleton")
 RECOVERY_ENABLE_MARKER = Path("scripts/codex-runtime-recovery-0.144.4.enable")
 SYSTEMD_INVOCATION_ENV = "INVOCATION_ID"
