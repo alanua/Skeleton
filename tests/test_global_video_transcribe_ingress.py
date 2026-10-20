@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
-import jsonschema
 import pytest
 import yaml
 
@@ -58,22 +58,22 @@ def test_one_global_catalog_and_nine_semantic_actions_without_activation() -> No
 
 
 def test_schema_proves_no_user_controlled_gate_or_private_runtime_fields() -> None:
-    jsonschema.Draft202012Validator.check_schema(SCHEMA)
-    jsonschema.validate(_request(), SCHEMA)
-    jsonschema.validate(_request(mode="STANDARD", verify_with_independent_asr=True), SCHEMA)
-    for name in (
-        "operator_approval_ref", "authenticated_caller", "gate_decision",
-        "api_key", "cookie", "shell", "args", "output_path",
-        "memory_gateway", "worker", "queue", "model_path", "profile", "question",
-    ):
-        with pytest.raises(jsonschema.ValidationError):
-            jsonschema.validate(_request(**{name: "forged"}), SCHEMA)
-    for mode in ("DEEP", "TARGETED", "ARCHIVE", 1):
-        with pytest.raises(jsonschema.ValidationError):
-            jsonschema.validate(_request(mode=mode), SCHEMA)
-    for wrong in (1, 0, "true", None, [], {}):
-        with pytest.raises(jsonschema.ValidationError):
-            jsonschema.validate(_request(verify_with_independent_asr=wrong), SCHEMA)
+    assert SCHEMA["$schema"].endswith("/draft/2020-12/schema")
+    assert SCHEMA["type"] == "object"
+    assert SCHEMA["additionalProperties"] is False
+    assert set(SCHEMA["required"]) == {"operation", "url"}
+    props = SCHEMA["properties"]
+    assert set(props) == {"operation", "url", "mode", "verify_with_independent_asr"}
+    assert props["operation"]["const"] == "video_transcribe_url"
+    assert props["mode"]["enum"] == ["QUICK", "STANDARD"]
+    assert props["verify_with_independent_asr"]["type"] == "boolean"
+    pattern = re.compile(props["url"]["pattern"])
+    assert pattern.fullmatch(URL)
+    assert pattern.fullmatch("https://www.youtube.com/watch?v=AbCdEf12345")
+    for value in ("http://youtu.be/a", "https://evil.youtube.com/a", "https://127.0.0.1/a"):
+        assert pattern.fullmatch(value) is None
+    # Runtime preflight separately tests invalid modes, flags, fields and URLs,
+    # never relying on optional JSON Schema libraries in the production host.
 
 
 def test_cross_ancillary_is_same_provider_without_private_data_in_public_receipt() -> None:
