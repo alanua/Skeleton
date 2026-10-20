@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.skeleton.local/topology_fact.schema.json",
+  "title": "Skeleton Topology Fact",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "fact_id",
+    "fact_type",
+    "lookup_key",
+    "value_class",
+    "value_ref",
+    "source",
+    "provenance_ref",
+    "verified_revision",
+    "verified_at",
+    "freshness_class",
+    "fresh_until",
+    "authority",
+    "status",
+    "roles",
+    "public_fingerprints",
+    "supersedes",
+    "superseded_by"
+  ],
+  "properties": {
+    "schema": {"const": "skeleton.topology_fact.v1"},
+    "fact_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@/-]{1,127}$"},
+    "fact_type": {"enum": ["host", "repository", "runtime", "entrypoint"]},
+    "lookup_key": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@/-]{1,127}$"},
+    "value_class": {
+      "enum": [
+        "MACHINE_ID",
+        "PROJECT_ID",
+        "RUNTIME_ID",
+        "ENTRYPOINT_ID",
+        "PUBLIC_FINGERPRINT",
+        "OPAQUE_PRIVATE_REF"
+      ]
+    },
+    "value_ref": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@/+~=-]{2,255}$"},
+    "source": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@/-]{1,127}$"},
+    "provenance_ref": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@/+~=-]{2,255}$"},
+    "verified_revision": {"type": "integer", "minimum": 1},
+    "verified_at": {"type": "string", "format": "date-time"},
+    "freshness_class": {"enum": ["CURRENT", "STALE"]},
+    "fresh_until": {"type": ["string", "null"], "format": "date-time"},
+    "authority": {"type": "integer", "minimum": 0},
+    "status": {"enum": ["VERIFIED", "REVOKED"]},
+    "roles": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@/-]{1,127}$"}
+    },
+    "public_fingerprints": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@/+~=-]{2,255}$"}
+    },
+    "supersedes": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@/-]{1,127}$"}
+    },
+    "superseded_by": {"type": ["string", "null"], "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:@/-]{1,127}$"}
+  }
+}
