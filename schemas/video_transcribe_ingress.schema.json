@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.video_understanding.transcribe_ingress.v1",
+  "title": "Source-only typed video transcription ingress; runtime registration disabled",
+  "description": "Only caller-controlled semantic fields. The authenticated caller, Gate decision, private transport and operator approval MUST be injected out-of-band by a trusted host, never supplied in this payload. This schema does not authorize execution.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "operation",
+    "url"
+  ],
+  "properties": {
+    "operation": {
+      "type": "string",
+      "const": "video_transcribe_url"
+    },
+    "url": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^https://(?:(?:www\\.)?youtube\\.com|youtu\\.be|(?:www\\.)?vimeo\\.com)/[^\\s#]+$"
+    },
+    "mode": {
+      "type": "string",
+      "enum": [
+        "QUICK",
+        "STANDARD"
+      ],
+      "default": "QUICK"
+    },
+    "verify_with_independent_asr": {
+      "type": "boolean",
+      "default": false
+    }
+  }
+}
