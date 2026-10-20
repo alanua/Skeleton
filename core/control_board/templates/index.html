@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ snapshot.title }}</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='/control-board.css') }}">
+  </head>
+  <body>
+    <header class="board-header">
+      <div>
+        <p class="eyebrow">Read-only synthetic snapshot</p>
+        <h1>{{ snapshot.title }}</h1>
+        <p class="subtitle">{{ snapshot.subtitle }}</p>
+      </div>
+      <div class="timestamp" aria-label="Snapshot generated at">{{ snapshot.generated_at }}</div>
+    </header>
+
+    <main class="board-shell">
+      <section class="metrics" aria-label="Summary metrics">
+        {% for metric in metrics %}
+        <article class="metric metric--{{ metric.tone }}">
+          <span>{{ metric.label }}</span>
+          <strong>{{ metric.value }}</strong>
+        </article>
+        {% endfor %}
+      </section>
+
+      <section class="panel panel--wide" id="today" aria-labelledby="today-title">
+        <div class="section-heading">
+          <h2 id="today-title">Today</h2>
+        </div>
+        <div class="item-list">
+          {% for item in today %}
+          <article class="row-card">
+            <div>
+              <h3>{{ item.title }}</h3>
+              <p>{{ item.detail }}</p>
+            </div>
+            <div class="meta">
+              <span class="badge badge--{{ item.status }}">{{ item.status }}</span>
+              <span>{{ item.owner }}</span>
+            </div>
+          </article>
+          {% endfor %}
+        </div>
+      </section>
+
+      <section class="panel panel--wide" id="kanban" aria-labelledby="kanban-title">
+        <div class="section-heading">
+          <h2 id="kanban-title">Kanban</h2>
+        </div>
+        <div class="kanban">
+          {% for lane in kanban_lanes %}
+          <div class="lane">
+            <h3>{{ lane.name }}</h3>
+            {% for card in lane.cards %}
+            <article class="kanban-card">
+              <div class="card-title">
+                <strong>{{ card.title }}</strong>
+                <span class="badge badge--{{ card.status }}">{{ card.status }}</span>
+              </div>
+              <p>{{ card.detail }}</p>
+            </article>
+            {% endfor %}
+          </div>
+          {% endfor %}
+        </div>
+      </section>
+
+      <section class="panel" id="projects" aria-labelledby="projects-title">
+        <h2 id="projects-title">Projects</h2>
+        {% for item in projects %}
+        <article class="compact-row">
+          <div>
+            <h3>{{ item.name }}</h3>
+            <p>{{ item.summary }}</p>
+          </div>
+          <span class="badge badge--{{ item.status }}">{{ item.status }}</span>
+          <small>{{ item.updated }}</small>
+        </article>
+        {% endfor %}
+      </section>
+
+      <section class="panel" id="approvals" aria-labelledby="approvals-title">
+        <h2 id="approvals-title">Approvals</h2>
+        {% for item in approvals %}
+        <article class="compact-row">
+          <div>
+            <h3>{{ item.request }}</h3>
+            <p>{{ item.source }}</p>
+          </div>
+          <span class="badge badge--{{ item.status }}">{{ item.status }}</span>
+        </article>
+        {% endfor %}
+      </section>
+
+      <section class="panel" id="workflows" aria-labelledby="workflows-title">
+        <h2 id="workflows-title">Workflows</h2>
+        {% for item in workflows %}
+        <article class="compact-row">
+          <div>
+            <h3>{{ item.name }}</h3>
+            <p>{{ item.stage }} · {{ item.next_step }}</p>
+          </div>
+          <span class="badge badge--{{ item.status }}">{{ item.status }}</span>
+        </article>
+        {% endfor %}
+      </section>
+
+      <section class="panel" id="evidence" aria-labelledby="evidence-title">
+        <h2 id="evidence-title">Evidence</h2>
+        {% for item in evidence %}
+        <article class="compact-row">
+          <div>
+            <h3>{{ item.label }}</h3>
+            <p>{{ item.reference }}</p>
+          </div>
+          <span class="badge badge--{{ item.status }}">{{ item.status }}</span>
+        </article>
+        {% endfor %}
+      </section>
+
+      <section class="panel panel--wide" id="health" aria-labelledby="health-title">
+        <h2 id="health-title">Health</h2>
+        <div class="health-grid">
+          {% for item in health %}
+          <article class="health-card">
+            <span class="status-dot status-dot--{{ item.status }}" aria-hidden="true"></span>
+            <div>
+              <h3>{{ item.component }}</h3>
+              <p>{{ item.detail }}</p>
+            </div>
+            <span class="badge badge--{{ item.status }}">{{ item.status }}</span>
+          </article>
+          {% endfor %}
+        </div>
+      </section>
+    </main>
+
+    <script src="{{ url_for('static', path='/control-board.js') }}" defer></script>
+  </body>
+</html>
