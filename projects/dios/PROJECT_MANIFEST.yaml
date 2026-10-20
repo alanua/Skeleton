@@ -12,7 +12,25 @@ privacy_class: public_safe_code_project
 domain: construction/drawing-intelligence
 meaning: Drawing Intelligence Operating System for structured analysis of construction and technical drawings
 means: Drawing Intelligence Operating System for structured analysis of construction and technical drawings
+registration_contract: PUBLIC_SAFE_DOMAIN_REGISTRATION_ONLY
+routing_identity:
+  kind: project_namespace
+  namespace: dios
+  execution: delegated_to_skeleton_shared_core
+  review_gate: delegated_to_skeleton_shared_core
+  privacy_gate: delegated_to_skeleton_shared_core
+  storage_gate: delegated_to_skeleton_shared_core
 control_core: alanua/Skeleton
 domain_owner: alanua/DIOS
-route_note: Skeleton remains the shared control and execution core; DIOS owns drawing-intelligence domain functions. Real drawings, customer data, quantities, paths and outputs remain local or privately routed.
+route_note: Skeleton remains the shared control, execution, review, privacy and storage gate core; DIOS is only registered here as a public-safe project/namespace routing identity. Real drawings, customer data, quantities, paths and outputs remain local or privately routed.
 architecture_gate: Production Aufmass rebuild remains frozen until the DIOS architecture is reviewed and explicitly unfrozen.
+architecture_freeze:
+  parser_runtime_workstation_execution: forbidden
+  private_drawing_execution: forbidden
+  dios_specific_runner_scheduler_control_plane: forbidden
+  dios_specific_memory_store: forbidden
+child_modules:
+  - project_id: aufmass
+    role: child_module
+    implementation_route: alanua/Skeleton
+    schema_duplication: forbidden
