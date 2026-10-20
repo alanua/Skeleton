@@ -2,6 +2,8 @@ import java.net.URI
 
 val homeEdgeBaseUrls = providers.gradleProperty("homeEdgeBaseUrls").orElse("").get()
 val escapedHomeEdgeBaseUrls = homeEdgeBaseUrls.replace("\\", "\\\\").replace("\"", "\\\"")
+val homeEdgeSecretBaseUrl = providers.gradleProperty("homeEdgeSecretBaseUrl").orElse("").get().trim()
+val escapedHomeEdgeSecretBaseUrl = homeEdgeSecretBaseUrl.replace("\\", "\\\\").replace("\"", "\\\"")
 
 fun validateHomeEdgeReleaseBaseUrls(raw: String) {
     val urls = raw.split(",").map { it.trim() }.filter { it.isNotEmpty() }
@@ -19,6 +21,10 @@ fun validateHomeEdgeReleaseBaseUrls(raw: String) {
 gradle.taskGraph.whenReady {
     if (allTasks.any { it.name == "assembleRelease" }) {
         validateHomeEdgeReleaseBaseUrls(homeEdgeBaseUrls)
+        val secretUrl = runCatching { URI(homeEdgeSecretBaseUrl) }.getOrNull()
+        require(secretUrl != null && secretUrl.scheme == "https" && !secretUrl.host.isNullOrBlank()) {
+            "assembleRelease requires -PhomeEdgeSecretBaseUrl with one valid HTTPS base URL"
+        }
     }
 }
 
@@ -30,9 +36,10 @@ android {
         applicationId = "com.skeleton.home"
         minSdk = 26
         targetSdk = 34
-        versionCode = 155
-        versionName = "1.4.39"
+        versionCode = 160
+        versionName = "1.4.44"
         buildConfigField("String", "HOME_EDGE_BASE_URLS", "\"$escapedHomeEdgeBaseUrls\"")
+        buildConfigField("String", "HOME_EDGE_SECRET_BASE_URL", "\"$escapedHomeEdgeSecretBaseUrl\"")
     }
     buildFeatures { compose = true; buildConfig = true }
     composeOptions { kotlinCompilerExtensionVersion = "1.5.14" }
