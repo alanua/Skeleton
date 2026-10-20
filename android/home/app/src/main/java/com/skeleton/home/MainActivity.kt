@@ -445,6 +445,21 @@ internal fun mergedReadyJobHasLoadedSeasonSources(job:JSONObject?):Boolean{
     val loaded=loadedMetadataSeasons(job)
     return sources.isNotEmpty() && (loaded.isEmpty() || sourceSeasons(sources).containsAll(loaded))
 }
+// Only compare source identity/choices, never URL tokens or active playback state.
+// Native video selection can stay unchanged while the resolver adds episodes.
+internal fun nativeVideoSourceRevision(job:JSONObject?):Set<String> =
+    job?.optJSONArray("sources")?.objects().orEmpty().map{source->
+        listOf("source_id","season","episode","quality","group","translation").joinToString("|"){key->
+            source.optString(key,"").let{value->"${value.length}:$value"}
+        }
+    }.toSet()
+
+internal fun shouldRefreshNativeVideoSources(current:JSONObject?,candidate:JSONObject?,expectedJobId:String):Boolean{
+    if(expectedJobId.isBlank()||current?.optString("job_id")!=expectedJobId)return false
+    if(candidate?.optString("job_id")!=expectedJobId||candidate.optString("status")!="ready")return false
+    if(!mergedReadyJobHasLoadedSeasonSources(candidate))return false
+    return nativeVideoSourceRevision(current)!=nativeVideoSourceRevision(candidate)
+}
 private fun historyEpisodeLabel(item:JSONObject):String{
     val episodeKey=item.cleanText("episode_key").lowercase(Locale.ROOT)
     val m=Regex("""s(\d+)e(\d+)""").find(episodeKey)
@@ -2149,12 +2164,32 @@ private fun VideoScreen(api:HomeApi,active:Boolean,selectionRevision:Int,endpoin
         if(api.server!=null)while(true){if(loadHistoryForEndpoint())break;delay(1500)}
     }
     LaunchedEffect(api.server,active,endpoint.endpointId){
-        if(api.server!=null&&active)while(true){
-            delay(2500)
-            runCatching{endpointVideoSelection(api,endpoint.endpointId)}.onSuccess{latest->
-                val latestIdentity=videoSelectionIdentity(latest)
-                if(shouldApplyPolledVideoSelection(latest,endpoint.endpointId,selectionIdentity,pendingSelectionIdentity)){
-                    if(latestIdentity!=selectionIdentity)applyEndpointSelection(latest,true)
+        if(api.server!=null&&active){
+            var sourcePolls=0
+            while(true){
+                delay(2500)
+                runCatching{endpointVideoSelection(api,endpoint.endpointId)}.onSuccess{latest->
+                    val latestIdentity=videoSelectionIdentity(latest)
+                    if(shouldApplyPolledVideoSelection(latest,endpoint.endpointId,selectionIdentity,pendingSelectionIdentity)){
+                        if(latestIdentity!=selectionIdentity)applyEndpointSelection(latest,true)
+                    }
+                }
+                // A release-monitor/season scan can update sources without changing
+                // job_id or the endpoint selection. Refresh only this Compose state,
+                // never send a playback, resume, mode or selection command.
+                sourcePolls++
+                if(sourcePolls==1||sourcePolls%6==0){
+                    val expectedId=jobId
+                    val expectedIdentity=selectionIdentity
+                    if(expectedId.isNotBlank()&&!loading&&pendingSelectionIdentity.isBlank()){
+                        runCatching{api.get("/api/jobs/${Uri.encode(expectedId)}")}.onSuccess{fresh->
+                            if(jobId==expectedId&&selectionIdentity==expectedIdentity
+                                &&shouldRefreshNativeVideoSources(job,fresh,expectedId)){
+                                job=fresh
+                                sources=fresh.optJSONArray("sources")?.objects().orEmpty()
+                            }
+                        }
+                    }
                 }
             }
         }
