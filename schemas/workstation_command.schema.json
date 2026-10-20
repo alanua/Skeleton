@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/alanua/Skeleton/blob/main/schemas/workstation_command.schema.json",
+  "title": "Skeleton bounded workstation command",
+  "description": "Only registered, authenticated Skeleton workstation-control adapters may supply these commands. This schema is not an authorization mechanism.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "command_id", "idempotency_key", "node_id", "node_session_id",
+    "application_session_id", "lease_id", "workspace_id", "operation",
+    "issued_at", "expires_at", "expected_revision", "payload"
+  ],
+  "properties": {
+    "command_id": {"$ref": "#/$defs/identifier"},
+    "idempotency_key": {"$ref": "#/$defs/identifier"},
+    "node_id": {"$ref": "#/$defs/identifier"},
+    "node_session_id": {"$ref": "#/$defs/identifier"},
+    "application_session_id": {"$ref": "#/$defs/identifier"},
+    "lease_id": {"$ref": "#/$defs/identifier"},
+    "workspace_id": {"$ref": "#/$defs/identifier"},
+    "operation": {"enum": ["INSPECT", "SNAPSHOT", "PROPOSE", "APPLY", "CHECKPOINT", "ROLLBACK"]},
+    "issued_at": {"type": "number"},
+    "expires_at": {"type": "number"},
+    "expected_revision": {"type": "integer", "minimum": 0},
+    "payload": {"type": "object", "maxProperties": 20}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"operation": {"const": "SNAPSHOT"}}},
+      "then": {"properties": {"payload": {"maxProperties": 0}}}
+    },
+    {
+      "if": {"properties": {"operation": {"enum": ["APPLY", "PROPOSE"]}}},
+      "then": {"properties": {"payload": {
+        "required": ["entity_id", "properties"], "additionalProperties": false,
+        "properties": {"entity_id": {"type": "string", "minLength": 1, "maxLength": 80}, "properties": {"type": "object", "maxProperties": 20}}
+      }}}
+    },
+    {
+      "if": {"properties": {"operation": {"enum": ["CHECKPOINT", "ROLLBACK"]}}},
+      "then": {"properties": {"payload": {
+        "required": ["checkpoint_id"], "additionalProperties": false,
+        "properties": {"checkpoint_id": {"type": "string", "minLength": 1, "maxLength": 80}}
+      }}}
+    },
+    {
+      "if": {"properties": {"operation": {"const": "INSPECT"}}},
+      "then": {"properties": {"payload": {
+        "required": ["entity_id"], "additionalProperties": false,
+        "properties": {"entity_id": {"type": "string", "minLength": 1, "maxLength": 80}}
+      }}}
+    }
+  ],
+  "$defs": {
+    "identifier": {
+      "type": "string", "minLength": 1, "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$"
+    }
+  }
+}
