@@ -594,12 +594,13 @@ class SchedulerStore:
             separators=(",", ":"), sort_keys=True,
         )
         with self._transaction() as connection:
-            connection.execute(
+            result_insert = connection.execute(
                 """
-                INSERT OR IGNORE INTO dispatch_receipts(
+                INSERT INTO dispatch_receipts(
                     receipt_id, occurrence_id, attempt, idempotency_key, status, reason,
                     evidence_ref, result_json, created_at, parent_receipt_id
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(idempotency_key) DO NOTHING
                 """,
                 (
                     receipt_id,
@@ -614,6 +615,28 @@ class SchedulerStore:
                     parent_receipt_id,
                 ),
             )
+            if result_insert.rowcount == 1:
+                return receipt_id
+            row = connection.execute(
+                "SELECT * FROM dispatch_receipts WHERE idempotency_key = ?",
+                (idempotency_key,),
+            ).fetchone()
+            if row is None:
+                raise SchedulerStoreError("DISPATCH_RECEIPT_IDEMPOTENCY_CONFLICT")
+            if (
+                str(row["receipt_id"]) != receipt_id
+                or str(row["occurrence_id"]) != occurrence_id
+                or int(row["attempt"]) != attempt
+                or str(row["status"]) != status
+                or str(row["reason"]) != reason
+                or str(row["evidence_ref"]) != evidence_ref
+                or str(row["result_json"]) != result_json
+                or (
+                    None if row["parent_receipt_id"] is None else str(row["parent_receipt_id"])
+                )
+                != parent_receipt_id
+            ):
+                raise SchedulerStoreError("DISPATCH_RECEIPT_IDEMPOTENCY_CONFLICT")
         return receipt_id
 
     def list_dispatch_receipts(self, occurrence_id: str) -> tuple[dict[str, Any], ...]:
