@@ -183,3 +183,86 @@ def test_skeleton_core_contains_no_media_implementation_copies() -> None:
         root / ".github/workflows/video-understanding-runtime-launch.yml",
     )
     assert all(not path.exists() for path in forbidden)
+
+
+
+def test_global_video_source_catalog_is_one_inactive_provider() -> None:
+    import json
+    from pathlib import Path
+
+    import yaml
+
+    root = Path(__file__).resolve().parents[1]
+    registry = yaml.safe_load((root / "CAPABILITY_REGISTRY.yaml").read_text("utf-8"))
+    schema = json.loads((root / "schemas/video_transcribe_ingress.schema.json").read_text("utf-8"))
+    declared = registry["capabilities"]["video_understanding_global"]
+    catalog = bridge.global_video_provider_catalog()
+
+    assert declared["provider_count"] == 1
+    assert declared["provider_id"] == catalog["provider_id"]
+    assert declared["operation_ids"] == catalog["operations"]
+    assert len(catalog["operations"]) == 9
+    assert "video_transcribe_url" in catalog["operations"]
+    assert catalog["runtime_registered"] is False
+    assert catalog["live_runtime_execution"] is False
+    assert catalog["status"] == "SOURCE_ONLY_NOT_DEPLOYED"
+    assert declared["status"] == "stage1_dry_run"
+    assert declared["live_runtime_execution"] is False
+    assert declared["runtime_registered"] is False
+    assert declared["deployment_state"] == "NOT_DEPLOYED"
+    assert declared["external_transcription_dependency"] == "alanua/skeleton-media#71"
+    assert schema["additionalProperties"] is False
+    assert set(schema["required"]) == {"operation", "url"}
+    assert schema["properties"]["operation"]["const"] == "video_transcribe_url"
+    assert schema["properties"]["mode"]["enum"] == ["QUICK", "STANDARD"]
+    assert schema["properties"]["verify_with_independent_asr"]["type"] == "boolean"
+    assert "video_understanding.operations" not in bridge._SUPPORTED_MODULES
+
+
+def test_global_video_ingress_is_gate_injected_and_public_receipt_is_private_safe() -> None:
+    payload = {
+        "operation": "video_transcribe_url",
+        "url": "https://youtu.be/Synthetic123",
+        "mode": "QUICK",
+        "verify_with_independent_asr": True,
+    }
+    calls = []
+
+    def trusted_gate(caller, operation):
+        calls.append((caller, operation))
+        return caller in {"synthetic-alpha", "synthetic-beta"} and operation == "video_transcribe_url"
+
+    for caller in ("synthetic-alpha", "synthetic-beta"):
+        response = bridge.plan_global_video_transcribe_ingress(
+            payload, authenticated_caller=caller, trusted_gate_check=trusted_gate,
+        )
+        assert response["private_plan"]["runtime_registered"] is False
+        assert response["private_plan"]["execution_requested"] is False
+        assert response["private_plan"]["canonical_mutation"] == "NOT_USED"
+        assert response["public_receipt"]["status"] == "PLANNED_NOT_REGISTERED"
+        assert response["public_receipt"]["execution_performed"] is False
+        assert payload["url"] not in repr(response["public_receipt"])
+        assert caller not in repr(response["public_receipt"])
+        assert response["public_receipt"]["provider_id"] == bridge.GLOBAL_VIDEO_PROVIDER_ID
+    assert len(calls) == 2
+
+    for attacker in (None, "unknown-actor"):
+        with pytest.raises(bridge.GlobalVideoIngressError):
+            bridge.plan_global_video_transcribe_ingress(
+                payload, authenticated_caller=attacker, trusted_gate_check=trusted_gate,
+            )
+    for forbidden_payload in (
+        {**payload, "operator_approval_ref": "forged"},
+        {**payload, "gate_decision": True},
+        {**payload, "mode": "DEEP"},
+        {**payload, "verify_with_independent_asr": "true"},
+        {**payload, "url": "https://127.0.0.1/private"},
+    ):
+        with pytest.raises(bridge.GlobalVideoIngressError):
+            bridge.plan_global_video_transcribe_ingress(
+                forbidden_payload, authenticated_caller="synthetic-alpha", trusted_gate_check=trusted_gate,
+            )
+    with pytest.raises(bridge.GlobalVideoIngressError):
+        bridge.plan_global_video_transcribe_ingress(
+            payload, authenticated_caller="synthetic-alpha", trusted_gate_check=None,
+        )
