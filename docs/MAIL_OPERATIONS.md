@@ -50,5 +50,32 @@ Invoice mail and technical mail are explicit policy categories:
 - `mail.technical.v1` routes incident/outage/error mail to operator review.
 - general important/deadline mail routes through `mail.important.v1`.
 
+## Security Triage
+
+`core.mail_security` adds a provider-neutral, side-effect-free risk assessment
+layer. It evaluates only normalized envelope text hints and optional metadata
+from adapters, then emits typed public-safe categories:
+`ORDINARY`, `ACTIONABLE`, `INVOICE_PAYMENT`, `TECHNICAL`, `SPAM`, `PHISHING`,
+`SCAM`, `PSEUDO_INKASSO`, `IDENTITY_MISUSE_SUSPECTED`, and
+`OFFICIAL_LEGAL_NOTICE`.
+
+Authentication results are evidence only. SPF/DKIM/DMARC `PASS` never marks a
+sender trustworthy by itself. When metadata is available, the layer compares
+sender, display, reply-to, contact, and payment domains and records only stable
+reason codes, not the private values. Claimed contracts, orders, payments, and
+identity misuse generate a bounded private evidence-search request over existing
+case/correspondence/document history. Known-risk hooks are represented as a
+bounded evidence request contract; the mail worker receives no browser or
+arbitrary web authority.
+
+Suspicious phishing, scam, fake-Inkasso, identity-abuse, and official legal
+notice findings route through the existing `NEEDS_OPERATOR` flow with a private
+case update containing evidence refs only. Those packets intentionally expose
+investigation actions instead of reply approval, so the worker never clicks
+links, pays, replies, acknowledges debt, accepts/cancels contracts, mutates the
+mailbox, or files police/regulator/DSGVO submissions. Routine low-risk spam is
+ignored and produces no Telegram handoff. Genuine official/legal uncertainty is
+priority operator work and is never silently treated as spam.
+
 All receipts are public-safe and assert that no live external side effects were
 executed.

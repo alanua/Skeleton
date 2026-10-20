@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 import base64
+from email.utils import parseaddr
+import re
 from typing import Any
 
 from adapters.gmail_oauth_client import GmailOAuthBundle, GmailOAuthClient, GmailOAuthError, Transport
@@ -71,6 +73,7 @@ class GmailMailProvider:
                 "deadline_hint": snippet,
                 "sender_ref": _opaque_sender_ref(sender),
                 "thread_ref": None if thread_ref is None else str(thread_ref),
+                "security_metadata": _security_metadata(headers),
             }
         )
 
@@ -123,8 +126,40 @@ def _headers(value: Mapping[str, Any]) -> dict[str, str]:
         if not isinstance(item, Mapping):
             continue
         name = str(item.get("name") or "").lower()
-        if name in {"subject", "from"}:
+        if name in {"subject", "from", "reply-to", "authentication-results"}:
             output[name] = str(item.get("value") or "")
+    return output
+
+
+def _security_metadata(headers: Mapping[str, str]) -> dict[str, object]:
+    metadata: dict[str, object] = {}
+    sender_domain = _address_domain(headers.get("from"))
+    reply_to_domain = _address_domain(headers.get("reply-to"))
+    if sender_domain is not None:
+        metadata["sender_domain"] = sender_domain
+    if reply_to_domain is not None:
+        metadata["reply_to_domain"] = reply_to_domain
+    auth = _authentication_status(headers.get("authentication-results", ""))
+    if auth:
+        metadata["authentication"] = auth
+    return metadata
+
+
+def _address_domain(value: object) -> str | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    _name, address = parseaddr(value)
+    candidate = address.rsplit("@", 1)[-1].strip().lower() if "@" in address else ""
+    return candidate if re.fullmatch(r"[a-z0-9][a-z0-9.-]{0,252}\.[a-z]{2,63}", candidate) else None
+
+
+def _authentication_status(value: str) -> dict[str, str]:
+    lowered = value.lower()
+    output: dict[str, str] = {}
+    for key in ("spf", "dkim", "dmarc"):
+        match = re.search(rf"\b{key}\s*=\s*(pass|fail|neutral|softfail|none|temperror|permerror)\b", lowered)
+        if match is not None:
+            output[key] = match.group(1).upper()
     return output
 
 
