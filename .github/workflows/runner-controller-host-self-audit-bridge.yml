@@ -1,0 +1,107 @@
+name: Runner Controller Host Self Audit Bridge
+
+"on":
+  pull_request:
+    types: [labeled]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: runner-controller-host-self-audit-bridge
+  cancel-in-progress: false
+
+jobs:
+  audit-runner-controller-host:
+    name: Audit runner-controller host trust anchors
+    if: >-
+      github.repository == 'alanua/Skeleton' &&
+      github.event.action == 'labeled' &&
+      github.event.label.name == 'host:self-audit' &&
+      github.event.pull_request.state == 'open' &&
+      github.event.pull_request.base.ref == 'main' &&
+      github.event.pull_request.base.sha == '8f29994bcdcde3891a545cc39dcaab1dde7f3d92' &&
+      github.event.pull_request.user.login == 'alanua'
+    runs-on:
+      - self-hosted
+      - Linux
+      - X64
+    timeout-minutes: 8
+    env:
+      CANONICAL_REPOSITORY: alanua/Skeleton
+      EXPECTED_CANONICAL_MAIN_SHA: 8f29994bcdcde3891a545cc39dcaab1dde7f3d92
+      EVENT_ACTION: ${{ github.event.action }}
+      TARGET_CHECKOUT: /home/agent/agent-dev/repos/Skeleton
+    steps:
+      - name: Read-only trust-anchor audit
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          repository_verified=false
+          event_verified=false
+          checkout_verified=false
+          remote_verified=false
+          branch_verified=false
+          head_verified=false
+          origin_verified=false
+          clean_state_verified=false
+          mutation_performed=false
+          status=BLOCKED
+
+          write_summary() {
+            {
+              echo "semantic_matrix_01_trigger=pull_request_labeled"
+              echo "semantic_matrix_02_repository=${repository_verified}"
+              echo "semantic_matrix_03_event=${event_verified}"
+              echo "semantic_matrix_04_permissions=contents_read"
+              echo "semantic_matrix_05_runner=self_hosted_linux_x64"
+              echo "semantic_matrix_06_checkout=${checkout_verified}"
+              echo "semantic_matrix_07_remote=${remote_verified}"
+              echo "semantic_matrix_08_canonical_sha=head:${head_verified},origin:${origin_verified}"
+              echo "semantic_matrix_09_clean_state=${clean_state_verified}"
+              echo "semantic_matrix_10_no_live_side_effects=$([[ "${mutation_performed}" = false ]] && echo true || echo false)"
+              echo "expected_canonical_main_sha=${EXPECTED_CANONICAL_MAIN_SHA}"
+              echo "status=${status}"
+            } >> "${GITHUB_STEP_SUMMARY}"
+          }
+          trap write_summary EXIT
+
+          test "${GITHUB_REPOSITORY}" = "${CANONICAL_REPOSITORY}"
+          repository_verified=true
+
+          test "${GITHUB_EVENT_NAME}" = "pull_request"
+          test "${EVENT_ACTION}" = "labeled"
+          event_verified=true
+
+          test "${TARGET_CHECKOUT}" = "/home/agent/agent-dev/repos/Skeleton"
+          test -d "${TARGET_CHECKOUT}/.git"
+          checkout_verified=true
+
+          origin_url="$(git -C "${TARGET_CHECKOUT}" remote get-url origin)"
+          case "${origin_url}" in
+            https://github.com/alanua/Skeleton|https://github.com/alanua/Skeleton.git)
+              remote_verified=true
+              ;;
+            *)
+              exit 1
+              ;;
+          esac
+
+          current_branch="$(git -C "${TARGET_CHECKOUT}" rev-parse --abbrev-ref HEAD)"
+          test "${current_branch}" = "main"
+          branch_verified=true
+
+          checkout_head_sha="$(git -C "${TARGET_CHECKOUT}" rev-parse HEAD)"
+          test "${checkout_head_sha}" = "${EXPECTED_CANONICAL_MAIN_SHA}"
+          head_verified=true
+
+          checkout_origin_main_sha="$(git -C "${TARGET_CHECKOUT}" rev-parse refs/remotes/origin/main)"
+          test "${checkout_origin_main_sha}" = "${EXPECTED_CANONICAL_MAIN_SHA}"
+          origin_verified=true
+
+          clean_status="$(git -C "${TARGET_CHECKOUT}" status --porcelain --untracked-files=all)"
+          test -z "${clean_status}"
+          clean_state_verified=true
+
+          status=DONE
