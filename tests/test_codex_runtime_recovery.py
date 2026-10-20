@@ -84,7 +84,7 @@ def test_recovery_installs_exact_target_smokes_and_marks_success(tmp_path: Path,
     assert result == recovery.CodexRuntimeRecoveryResult(True, "ready")
     assert recovery.ensure_pinned_codex_runtime(env)
     assert installs == [recovery.TARGET_CODEX_VERSION]
-    assert (tmp_path / "ok").read_text(encoding="utf-8") == "version=0.145.0\n"
+    assert (tmp_path / "ok").read_text(encoding="utf-8") == "version=0.163.0\n"
 
 
 def test_recovery_keeps_exact_target_when_smoke_reaches_provider_quota(tmp_path: Path, monkeypatch) -> None:
@@ -93,7 +93,7 @@ def test_recovery_keeps_exact_target_when_smoke_reaches_provider_quota(tmp_path:
     assert result == recovery.CodexRuntimeRecoveryResult(True, "ready_provider_unavailable")
     assert installs == [recovery.TARGET_CODEX_VERSION]
     assert installed["version"] == recovery.TARGET_CODEX_VERSION
-    assert (tmp_path / "ok").read_text(encoding="utf-8") == "version=0.145.0\n"
+    assert (tmp_path / "ok").read_text(encoding="utf-8") == "version=0.163.0\n"
 
 
 def test_recovery_reports_metadata_failure_and_rolls_back(tmp_path: Path, monkeypatch) -> None:
