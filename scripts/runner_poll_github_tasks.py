@@ -188,9 +188,13 @@ from core.private_static_site_runtime import (
 )
 from core.project_tree import get_project, get_project_by_repo, load_project_tree
 from core.runner_child_environment import (
+    CODEX_AUTH_MODE_OPENAI_API,
+    prepare_primary_codex_environment,
     sanitize_codegen_child_environment,
     sanitize_validation_child_environment,
+    selected_primary_codex_auth_mode,
 )
+from integrations.credential_runtime import RegisteredCredentialRuntimeError
 from core.runner_process_observer import (
     build_spawn_trace_command,
     parse_first_denied_filesystem_event,
@@ -792,6 +796,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "artifact_id",
         "actions_executed",
         "auth_binding_present",
+        "auth_mode",
         "audit_id",
         "audit_persist_status",
         "audit_receipt_hash",
@@ -5713,9 +5718,11 @@ def _codex_executor(argv: list[str], stdin_text: str, env: Mapping[str, str]) ->
         **os.environ,
         **{key: value for key, value in env.items() if isinstance(value, str)},
     }
-    token = _RUN_COMMAND_ENV_OVERRIDE.set(
-        sanitize_codegen_child_environment(child_environment)
-    )
+    try:
+        prepared_environment = prepare_primary_codex_environment(child_environment)
+    except RegisteredCredentialRuntimeError:
+        return 1, _primary_codex_credential_blocked_output()
+    token = _RUN_COMMAND_ENV_OVERRIDE.set(prepared_environment)
     try:
         command = list(argv)
         model = selected_codex_model()
@@ -5741,6 +5748,13 @@ def _primary_codex_codegen_timeout_output() -> str:
         "SKELETON_CODEGEN_PRIMARY_FAILURE=PRIMARY_CODEGEN_TIMEOUT\n"
         f"primary_codegen_timeout_seconds={RUNNER_CODEX_PRIMARY_CODEGEN_TIMEOUT_SECONDS}\n"
         "retained_worktree_status=preserved_for_operator_review\n"
+    )
+
+
+def _primary_codex_credential_blocked_output() -> str:
+    return (
+        "RESULT: BLOCKED\n"
+        "SKELETON_CODEGEN_PRIMARY_FAILURE=PRIMARY_API_CREDENTIAL_UNAVAILABLE\n"
     )
 
 
@@ -5774,9 +5788,12 @@ def run_codex_task(
             _write_codegen_manifest(codegen_state_dir, workdir)
         except RuntimeError as exc:
             return 1, _codegen_manifest_blocked_output(str(exc))
+        try:
+            primary_environment = prepare_primary_codex_environment(os.environ)
+        except RegisteredCredentialRuntimeError:
+            return 1, _primary_codex_credential_blocked_output()
         base_codegen_environment = _codegen_environment_with_bookkeeping(
-            sanitize_codegen_child_environment(os.environ),
-            codegen_state_dir,
+            primary_environment, codegen_state_dir
         )
         token = _RUN_COMMAND_ENV_OVERRIDE.set(base_codegen_environment)
         try:
@@ -5794,6 +5811,10 @@ def run_codex_task(
         except RuntimeError as exc:
             return 1, _codegen_manifest_blocked_output(str(exc))
 
+        # API-route activation is terminal: never silently hand its failure to the
+        # historical OpenRouter-backed secondary route.
+        if "OPENAI_API_KEY" in base_codegen_environment:
+            return codex_code, codex_output
         if not codex_failure_allows_secondary(codex_code, codex_output):
             return codex_code, codex_output
         if not task_contract_allows_cloud_secondary(task_content):
@@ -8236,6 +8257,7 @@ def _runner_codex_primary_health_report(
     checkout_clean: bool = False,
     executable_available: bool = False,
     auth_binding_present: bool = False,
+    auth_mode: str = "chatgpt",
     selected_model: str | None = None,
     retry_at: str | None = None,
     mutation_performed: bool = False,
@@ -8249,6 +8271,7 @@ def _runner_codex_primary_health_report(
         f"checkout_clean={str(checkout_clean).lower()}",
         f"executable_available={str(executable_available).lower()}",
         f"auth_binding_present={str(auth_binding_present).lower()}",
+        f"auth_mode={auth_mode}",
     ]
     if selected_model is not None:
         status_lines.append(f"selected_model={selected_model}")
@@ -8393,29 +8416,47 @@ def runner_codex_primary_health_probe(body: str = "") -> str:
             expected_current_sha_equal=True,
             checkout_clean=True,
         )
-    auth_home = _runner_codex_primary_auth_home(authority_environment)
-    if auth_home is None:
+    try:
+        selected_model = selected_codex_model()
+        auth_mode = selected_primary_codex_auth_mode(authority_environment)
+        if auth_mode == CODEX_AUTH_MODE_OPENAI_API:
+            child_environment = prepare_primary_codex_environment(
+                authority_environment,
+                authority_environment=authority_environment,
+            )
+        else:
+            auth_home = _runner_codex_primary_auth_home(authority_environment)
+            if auth_home is None:
+                return _runner_codex_primary_health_report(
+                    "CODEX_AUTH_FAILURE",
+                    expected_current_sha_equal=True,
+                    checkout_clean=True,
+                    executable_available=True,
+                    auth_mode=auth_mode,
+                    selected_model=selected_model,
+                )
+            child_environment = sanitize_codegen_child_environment(
+                authority_environment,
+                authority_environment={},
+            )
+            child_environment["CODEX_HOME"] = str(auth_home)
+    except RegisteredCredentialRuntimeError:
         return _runner_codex_primary_health_report(
             "CODEX_AUTH_FAILURE",
             expected_current_sha_equal=True,
             checkout_clean=True,
             executable_available=True,
+            auth_mode="openai_api",
+            selected_model=selected_model,
         )
-
-    try:
-        child_environment = sanitize_codegen_child_environment(
-            authority_environment,
-            authority_environment={},
-        )
-        child_environment["CODEX_HOME"] = str(auth_home)
-        selected_model = selected_codex_model()
-    except (OSError, ValueError):
+    except (OSError, RuntimeError, ValueError):
         return _runner_codex_primary_health_report(
             "CODEX_ROUTE_UNAVAILABLE",
             expected_current_sha_equal=True,
             checkout_clean=True,
             executable_available=True,
-            auth_binding_present=True,
+            auth_mode=locals().get("auth_mode", "unknown"),
+            selected_model=locals().get("selected_model"),
         )
 
     environment_token = _RUN_COMMAND_ENV_OVERRIDE.set(child_environment)
@@ -8519,6 +8560,7 @@ def runner_codex_primary_health_probe(body: str = "") -> str:
         checkout_clean=final_clean,
         executable_available=True,
         auth_binding_present=True,
+        auth_mode=auth_mode,
         selected_model=selected_model,
         retry_at=retry_at,
         mutation_performed=mutation_performed,

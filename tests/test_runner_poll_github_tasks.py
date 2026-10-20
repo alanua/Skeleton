@@ -854,6 +854,7 @@ def test_codex_primary_health_exact_registration_command_and_receipt(
         "checkout_clean",
         "executable_available",
         "auth_binding_present",
+        "auth_mode",
         "selected_model",
         "verdict",
         "retry_at",
@@ -29959,3 +29960,46 @@ privacy_boundary: PUBLIC_SAFE_REPOSITORY_ONLY
     )
     assert "retained_worktree_status=preserved_for_operator_review" in output
     assert calls == [["codex"]]
+
+
+def test_codex_primary_health_openai_api_mode_uses_registered_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checkout, _state, _executable, auth_probe, _sanitizer = _codex_health_fakes(
+        monkeypatch
+    )
+    monkeypatch.setattr(
+        runner,
+        "selected_primary_codex_auth_mode",
+        lambda _env: runner.CODEX_AUTH_MODE_OPENAI_API,
+    )
+    api_prepare = mock.Mock(
+        return_value={
+            "HOME": "/canonical",
+            "PATH": "/usr/bin",
+            "OPENAI_API_KEY": "synthetic-never-report",
+        }
+    )
+    monkeypatch.setattr(runner, "prepare_primary_codex_environment", api_prepare)
+    seen_envs: list[dict[str, str]] = []
+    monkeypatch.setattr(
+        runner,
+        "run_command",
+        mock.Mock(side_effect=_codex_health_run(seen_envs=seen_envs)),
+    )
+
+    report = runner.runner_codex_primary_health_probe(
+        _codex_primary_health_issue_body()
+    )
+
+    assert runner.maintenance_report_status(report) == "DONE"
+    assert "verdict=CODEX_HEALTHY" in report
+    assert "auth_mode=openai_api" in report
+    assert "synthetic-never-report" not in report
+    auth_probe.assert_not_called()
+    api_prepare.assert_called_once()
+    assert api_prepare.call_args.kwargs == {
+        "authority_environment": mock.ANY,
+    }
+    assert all(env.get("OPENAI_API_KEY") == "synthetic-never-report" for env in seen_envs)
+    assert checkout.checkout_path

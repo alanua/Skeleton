@@ -16,6 +16,7 @@ from core.codex_runtime_recovery import (
     pinned_codex_runtime_path,
     should_attempt_codex_runtime_recovery,
 )
+from integrations.credential_runtime import bind_registered_environment_credential
 
 
 HOME_EDGE_ENV_PREFIX = "SKELETON_HOME_EDGE_01_"
@@ -24,6 +25,9 @@ _FALLBACK_BIN_ENV = "SKELETON_CODEGEN_FALLBACK_BIN"
 _REAL_CODEX_ENV = "SKELETON_REAL_CODEX_BIN"
 _ORIGINAL_PATH_ENV = "SKELETON_CODEGEN_ORIGINAL_PATH"
 _CODEX_HOME_ENV = "CODEX_HOME"
+CODEX_AUTH_MODE_ENV = "SKELETON_CODEX_AUTH_MODE"
+CODEX_AUTH_MODE_CHATGPT = "chatgpt"
+CODEX_AUTH_MODE_OPENAI_API = "openai_api"
 _VALIDATION_SECRET_ENV = frozenset(
     {
         "SKELETON_OPENROUTER_FALLBACK_API_KEY",
@@ -31,11 +35,13 @@ _VALIDATION_SECRET_ENV = frozenset(
         "BWS_ACCESS_TOKEN",
         "CREDENTIALS_DIRECTORY",
         "LLM_API_KEY",
+        "OPENAI_API_KEY",
     }
 )
 _PROVIDER_OVERRIDE_ENV = frozenset(
     {
         "OPENROUTER_API_KEY",
+        "OPENAI_API_KEY",
         "BWS_ACCESS_TOKEN",
         "CREDENTIALS_DIRECTORY",
         "LLM_API_KEY",
@@ -335,3 +341,38 @@ def sanitize_codegen_child_environment(
     except OSError:
         pass
     return sanitized
+
+
+def selected_primary_codex_auth_mode(
+    authority_environment: Mapping[str, str] | None = None,
+) -> str:
+    authority = os.environ if authority_environment is None else authority_environment
+    mode = authority.get(CODEX_AUTH_MODE_ENV, CODEX_AUTH_MODE_CHATGPT).strip()
+    if not mode:
+        mode = CODEX_AUTH_MODE_CHATGPT
+    if mode not in {CODEX_AUTH_MODE_CHATGPT, CODEX_AUTH_MODE_OPENAI_API}:
+        raise ValueError("unsupported_codex_auth_mode")
+    return mode
+
+
+def prepare_primary_codex_environment(
+    environment: Mapping[str, str],
+    *,
+    authority_environment: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Sanitize caller input and bind API material only for the explicit API route."""
+
+    authority = os.environ if authority_environment is None else authority_environment
+    prepared = sanitize_codegen_child_environment(
+        environment,
+        authority_environment=authority,
+    )
+    if selected_primary_codex_auth_mode(authority) == CODEX_AUTH_MODE_OPENAI_API:
+        bind_registered_environment_credential(
+            service_id="runner-codex-openai",
+            alias="api-key",
+            action_id="bind-openai-api-key",
+            environment=prepared,
+            authority_environment=authority,
+        )
+    return prepared
