@@ -14,6 +14,7 @@ from integrations import credential_runtime
 
 
 SYNTHETIC_SECRET = "synthetic-openrouter-value"
+OPENAI_SECRET = "synthetic-openai-value"
 GMAIL_SECRET = "synthetic-gmail-oauth-bundle"
 
 
@@ -84,6 +85,25 @@ def test_runner_openhands_uses_registered_broker_binding(monkeypatch) -> None:
     assert store.calls[0][1].audience == "openhands-openrouter"
     assert store.calls[0][1].task_kind == "code_generation"
     assert SYNTHETIC_SECRET not in json.dumps(receipt, sort_keys=True)
+
+
+def test_runner_codex_openai_uses_bootstrap_required_registered_binding(monkeypatch) -> None:
+    store, reference_calls = _install_fake_provider(monkeypatch, value=OPENAI_SECRET)
+    environment = {"OPENAI_API_KEY": "caller-must-not-win", "UNRELATED": "keep"}
+
+    receipt = credential_runtime.bind_registered_environment_credential(
+        service_id="runner-codex-openai",
+        alias="api-key",
+        action_id="bind-openai-api-key",
+        environment=environment,
+        authority_environment={},
+    )
+
+    assert receipt["result"]["status"] == "USED"
+    assert environment == {"OPENAI_API_KEY": OPENAI_SECRET, "UNRELATED": "keep"}
+    assert reference_calls == ["direct:runner-codex-openai-api-key-ref"]
+    assert store.calls[0][1].audience == "runner-codex-openai"
+    assert OPENAI_SECRET not in json.dumps(receipt, sort_keys=True)
 
 
 def test_gmail_material_is_consumed_in_process_and_not_returned(monkeypatch) -> None:

@@ -74,6 +74,21 @@ _RUNNER_OPENHANDS = RegisteredEnvironmentCredential(
     environment_variable="SKELETON_OPENROUTER_FALLBACK_API_KEY",
 )
 
+_RUNNER_CODEX_OPENAI = RegisteredEnvironmentCredential(
+    service_id="runner-codex-openai",
+    alias="api-key",
+    reference_credential_name="runner-codex-openai-api-key-ref",
+    context=SecretResolutionContext(
+        machine_identity="hetzner-agent-runner-1",
+        audience="runner-codex-openai",
+        task_kind="code_generation",
+    ),
+    action_id="bind-openai-api-key",
+    target_id="runner-codex-openai-environment",
+    environment_variable="OPENAI_API_KEY",
+    bootstrap_required=True,
+)
+
 _GMAIL_PRIMARY = RegisteredMaterialCredential(
     service_id="mail-gmail",
     alias="acct:gmail-primary",
@@ -103,6 +118,7 @@ _GMAIL_SECONDARY = RegisteredMaterialCredential(
 
 _REGISTERED_ENVIRONMENT_CREDENTIALS = {
     (_RUNNER_OPENHANDS.service_id, _RUNNER_OPENHANDS.alias): _RUNNER_OPENHANDS,
+    (_RUNNER_CODEX_OPENAI.service_id, _RUNNER_CODEX_OPENAI.alias): _RUNNER_CODEX_OPENAI,
 }
 _REGISTERED_MATERIAL_CREDENTIALS = {
     (_GMAIL_PRIMARY.service_id, _GMAIL_PRIMARY.alias): _GMAIL_PRIMARY,
