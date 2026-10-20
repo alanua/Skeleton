@@ -3,6 +3,10 @@ from __future__ import annotations
 import pytest
 
 from core.runner_vnext_leases import Lane, LaneLeaseStore, LeaseError
+from core.runner_vnext_ledger import LedgerError, OperationIdentity, OperationLedger
+
+
+SCOPE_HASH = "a" * 64
 
 
 class Clock:
@@ -35,6 +39,52 @@ def test_expired_lease_reclaim_increments_fence_and_rejects_stale_writer() -> No
     assert second.fence_token == first.fence_token + 1
     with pytest.raises(LeaseError, match="STALE_FENCE_TOKEN"):
         store.heartbeat(lane=Lane.PUBLISH, scope_key="branch:x", owner="w1", fence_token=first.fence_token)
+
+
+def test_expired_owner_cannot_mutate_retained_newer_lease() -> None:
+    clock = Clock()
+    store = LaneLeaseStore(clock=clock)
+    first = store.acquire(task_id="t1", lane=Lane.CODEGEN, owner="w1", scope_key="repo", ttl_seconds=10, target_state_ref="git:old")
+    clock.now = 111.0
+    second = store.acquire(task_id="t2", lane=Lane.CODEGEN, owner="w2", scope_key="repo", ttl_seconds=10, target_state_ref="git:new")
+
+    with pytest.raises(LeaseError, match="STALE_FENCE_TOKEN"):
+        store.release(lane=Lane.CODEGEN, scope_key="repo", owner="w1", fence_token=first.fence_token)
+    with pytest.raises(LeaseError, match="LEASE_OWNER_MISMATCH"):
+        store.heartbeat(lane=Lane.CODEGEN, scope_key="repo", owner="w1", fence_token=second.fence_token)
+    with pytest.raises(LeaseError, match="LEASE_CONFLICT_ACTIVE_OWNER"):
+        store.acquire(task_id="t1", lane=Lane.CODEGEN, owner="w1", scope_key="repo", ttl_seconds=10, target_state_ref="git:old")
+
+    current = store.current(lane=Lane.CODEGEN, scope_key="repo")
+    assert current is not None
+    assert current.task_id == "t2"
+    assert current.owner == "w2"
+    assert current.fence_token == second.fence_token
+    assert current.target_state_ref == "git:new"
+
+
+def test_stale_interrupted_task_cannot_finish_rebound_operation_or_newer_task() -> None:
+    clock = Clock()
+    lease_store = LaneLeaseStore(clock=clock)
+    ledger = OperationLedger()
+    stale = OperationIdentity("op:old", "idem:old", "git:old")
+    newer = OperationIdentity("op:new", "idem:new", "git:new")
+
+    first = lease_store.acquire(task_id="task:old", lane=Lane.CODEGEN, owner="node:old", scope_key="repo", ttl_seconds=5, target_state_ref="git:old")
+    ledger.reserve(stale, fence_token=first.fence_token, reservation_scope_hash=SCOPE_HASH)
+    clock.now = 106.0
+    second = lease_store.acquire(task_id="task:new", lane=Lane.CODEGEN, owner="node:new", scope_key="repo", ttl_seconds=5, target_state_ref="git:new")
+    ledger.rebind_fence(stale, expected_fence_token=first.fence_token, new_fence_token=second.fence_token)
+    ledger.reserve(newer, fence_token=second.fence_token, reservation_scope_hash=SCOPE_HASH)
+
+    with pytest.raises(LedgerError, match="STALE_FENCE_TOKEN"):
+        ledger.finish(stale, fence_token=first.fence_token, success=True, reason_code="PASS", touched_resource_refs=("repo:file.py",), before_state_ref="git:old", after_state_ref="git:old-done", validation_status="PASS")
+    with pytest.raises(LedgerError, match="IDEMPOTENCY_TARGET_STATE_MISMATCH"):
+        ledger.finish(OperationIdentity("op:old", "idem:new", "git:old"), fence_token=second.fence_token, success=True, reason_code="PASS", touched_resource_refs=("repo:file.py",), before_state_ref="git:new", after_state_ref="git:new-done", validation_status="PASS")
+
+    assert ledger.status("idem:old") == "RESERVED"
+    assert ledger.status("idem:new") == "RESERVED"
+    assert lease_store.current(lane=Lane.CODEGEN, scope_key="repo").task_id == "task:new"
 
 
 def test_heartbeat_extends_live_lease_but_not_expired_one() -> None:
