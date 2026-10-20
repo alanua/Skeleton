@@ -125,3 +125,38 @@ def test_openai_reference_bootstrap_preserves_unrelated_registrations() -> None:
             "reference_id": "99999999-8888-7777-6666-555555555555",
         },
     ]
+
+
+def test_openai_reference_bootstrap_replaces_existing_encrypted_index_atomically(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    target = tmp_path / "skeleton-secret-reference-index.cred"
+    target.write_text("old", encoding="utf-8")
+    monkeypatch.setattr(bootstrap, "ENCRYPTED_INDEX_PATH", target)
+
+    def fake_run(command, **_kwargs):
+        import subprocess
+
+        output = Path(command[-1])
+        assert output != target
+        assert not output.exists()
+        output.write_text("new", encoding="utf-8")
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(bootstrap.subprocess, "run", fake_run)
+    bootstrap._encrypt_index(
+        {
+            "schema": bootstrap.SCHEMA,
+            "registrations": [
+                {
+                    "service_id": bootstrap.SERVICE_ID,
+                    "alias": bootstrap.ALIAS,
+                    "provider": bootstrap.PROVIDER,
+                    "reference_id": "99999999-8888-7777-6666-555555555555",
+                }
+            ],
+        }
+    )
+    assert target.read_text(encoding="utf-8") == "new"
+    assert not list(tmp_path.glob("*.new"))
