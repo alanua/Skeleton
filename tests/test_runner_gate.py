@@ -230,6 +230,21 @@ def test_protected_target_requires_protected_approval() -> None:
     assert allowed.allowed
 
 
+def test_unexpected_protected_runtime_scope_is_denied() -> None:
+    selected = task(files=("tests/test_runner_gate.py",))
+    runtime = context(
+        selected,
+        files=("core/action_gate.py",),
+        protected_approvals=(),
+        patch=plan(("core/action_gate.py",)),
+    )
+
+    decision = RunnerGate().evaluate(selected, runtime)
+
+    assert "TARGET_FILES_MISMATCH" in decision.reason_codes
+    assert "PROTECTED_RESOURCE_APPROVAL_MISSING" in decision.reason_codes
+
+
 def publish_task() -> RunnerTask:
     return task(
         "publish",
@@ -261,6 +276,41 @@ def test_publish_passes_patch_and_action_gates() -> None:
     assert decision.action_gate_decision.status == "allowed"
 
 
+@pytest.mark.parametrize(
+    ("action", "head_sha", "expected_code"),
+    [
+        (
+            publish_action(),
+            "b" * 40,
+            "ACTION_HEAD_SHA_MISMATCH",
+        ),
+        (
+            replace(publish_action(), pr_number=1518),
+            HEAD_SHA,
+            "ACTION_PR_MISMATCH",
+        ),
+        (
+            replace(publish_action(), repo="alanua/Other"),
+            HEAD_SHA,
+            "ACTION_REPOSITORY_MISMATCH",
+        ),
+    ],
+)
+def test_publish_approval_is_bound_to_runtime_repo_pr_and_exact_head(
+    action: ActionGateRequest,
+    head_sha: str,
+    expected_code: str,
+) -> None:
+    selected = publish_task()
+
+    decision = RunnerGate().evaluate(
+        selected,
+        context(selected, action=action, head_sha=head_sha),
+    )
+
+    assert expected_code in decision.reason_codes
+
+
 def test_publish_requires_action_request_and_current_head() -> None:
     selected = publish_task()
     missing_action = RunnerGate().evaluate(selected, context(selected))
@@ -270,6 +320,23 @@ def test_publish_requires_action_request_and_current_head() -> None:
         context(selected, action=publish_action()),
     )
     assert "CURRENT_HEAD_SHA_REQUIRED" in missing_head.reason_codes
+
+
+def test_successful_ci_evidence_is_not_merge_authorization() -> None:
+    selected = task(
+        "publish",
+        payload={
+            "issue_number": 1516,
+            "pr_number": 1517,
+            "ci_status": "success",
+        },
+    )
+    runtime = context(selected, head_sha=HEAD_SHA)
+
+    decision = RunnerGate().evaluate(selected, runtime)
+
+    assert "ACTION_GATE_REQUIRED" in decision.reason_codes
+    assert decision.action_gate_decision is None
 
 
 def test_action_gate_and_cross_contract_mismatches_fail_closed() -> None:

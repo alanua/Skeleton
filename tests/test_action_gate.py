@@ -41,6 +41,17 @@ def test_blocks_unapproved_request() -> None:
     assert decision.reasons == ("user_approved must be true.",)
 
 
+def test_approval_is_bound_to_allowlisted_repo_pr_and_head_shape() -> None:
+    wrong_repo = validate_action_request(valid_request(repo="alanua/Skeleton-Fork"))
+    wrong_pr = validate_action_request(valid_request(pr_number=0))
+    wrong_head = validate_action_request(valid_request(expected_head_sha="a" * 39))
+
+    assert wrong_repo.reasons == ("repo is not allowlisted.",)
+    assert wrong_pr.reasons == ("pr_number must be a positive integer.",)
+    assert wrong_pr.pr_number is None
+    assert wrong_head.reasons == ("expected_head_sha must be a 40-character Git SHA.",)
+
+
 def test_blocks_invalid_action_repo_pr_sha_and_file_list() -> None:
     decision = validate_action_request(
         valid_request(
@@ -88,3 +99,6 @@ def test_schema_documents_stage_1_request_shape() -> None:
     assert schema["properties"]["action_type"]["enum"] == ["merge_pull_request"]
     assert schema["properties"]["repo"]["enum"] == ["alanua/Skeleton"]
     assert schema["properties"]["user_approved"]["const"] is True
+    assert schema["additionalProperties"] is False
+    assert "ci_status" not in schema["properties"]
+    assert "branch" not in schema["properties"]
