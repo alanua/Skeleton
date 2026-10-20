@@ -160,3 +160,34 @@ def test_openai_reference_bootstrap_replaces_existing_encrypted_index_atomically
     )
     assert target.read_text(encoding="utf-8") == "new"
     assert not list(tmp_path.glob("*.new"))
+
+
+def test_openai_reference_bootstrap_decrypts_with_explicit_credential_name(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    import json
+    import subprocess
+
+    target = tmp_path / "skeleton-secret-reference-index.cred"
+    target.write_text("encrypted", encoding="utf-8")
+    monkeypatch.setattr(bootstrap, "ENCRYPTED_INDEX_PATH", target)
+
+    payload = {"schema": bootstrap.SCHEMA, "registrations": []}
+
+    def fake_run(command, **_kwargs):
+        assert command == [
+            bootstrap.SYSTEMD_CREDS,
+            "decrypt",
+            f"--name={bootstrap.CREDENTIAL_NAME}",
+            str(target),
+            "-",
+        ]
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=json.dumps(payload),
+        )
+
+    monkeypatch.setattr(bootstrap.subprocess, "run", fake_run)
+    assert bootstrap._load_existing_index() == payload
