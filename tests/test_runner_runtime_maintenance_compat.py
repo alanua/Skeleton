@@ -2,6 +2,7 @@ from core.runner_runtime_maintenance_compat import (
     RUNNER_CONTROLLER_REPAIR_CODEX_STATE_MOUNT_V1,
     extract_fenced_runtime_maintenance_operation,
 )
+from scripts import runner_poll_github_tasks as runner
 
 
 def _task(operation: str, *, task_kind: str = "runtime_maintenance") -> str:
@@ -60,3 +61,22 @@ def test_missing_or_wrong_schema_fails_closed() -> None:
 
 def test_malformed_yaml_fails_closed() -> None:
     assert extract_fenced_runtime_maintenance_operation("payload: [") is None
+
+
+def test_runner_report_status_honors_terminal_done_before_benign_firmware_text() -> None:
+    report = """RESULT: DONE
+
+Changed files:
+- tests/test_synthetic.py
+
+Draft PR: https://github.com/alanua/Skeleton/pull/4757
+
+Codex output:
+```
+The task did not need device work; no firmware was built.
+RESULT: DONE
+```
+"""
+
+    assert runner.classify_codex_task_result(report, 0).status == "DONE"
+    assert runner.runner_report_status(report) == "DONE"
