@@ -4,7 +4,12 @@ import json
 
 import pytest
 
-from core.secret_store import ResolvedSecret, SecretReference, SecretResolutionContext
+from core.secret_store import (
+    ResolvedSecret,
+    SecretProviderUnavailable,
+    SecretReference,
+    SecretResolutionContext,
+)
 from core.secret_reference import (
     REFERENCE_BOOTSTRAP_REQUIRED,
     registered_bitwarden_reference_from_systemd_index,
@@ -20,8 +25,14 @@ GMAIL_SECRET = "synthetic-gmail-oauth-bundle"
 class FakeStore:
     provider = "bitwarden"
 
-    def __init__(self, value: str = SYNTHETIC_SECRET) -> None:
+    def __init__(
+        self,
+        value: str = SYNTHETIC_SECRET,
+        *,
+        failure: Exception | None = None,
+    ) -> None:
         self.value = value
+        self.failure = failure
         self.calls: list[tuple[str, SecretResolutionContext]] = []
 
     def resolve(
@@ -30,6 +41,8 @@ class FakeStore:
         context: SecretResolutionContext,
     ) -> ResolvedSecret:
         self.calls.append((reference.reference_id, context))
+        if self.failure is not None:
+            raise self.failure
         return ResolvedSecret(self.value)
 
 
@@ -334,6 +347,68 @@ def test_unregistered_gmail_alias_rejected_before_provider_resolution(monkeypatc
         )
 
     assert provider_calls == []
+
+
+def test_cross_domain_registered_credential_reuse_is_denied_before_provider(
+    monkeypatch,
+) -> None:
+    provider_calls: list[bool] = []
+    monkeypatch.setattr(
+        credential_runtime,
+        "registered_bitwarden_reference_from_systemd_index",
+        lambda *_args, **_kwargs: provider_calls.append(True),
+    )
+
+    with pytest.raises(
+        credential_runtime.RegisteredCredentialRuntimeError,
+        match="registered_credential_unavailable",
+    ):
+        credential_runtime.bind_registered_environment_credential(
+            service_id="runner-openhands",
+            alias="acct:gmail-primary",
+            action_id="use-gmail-readonly-oauth",
+            environment={},
+            authority_environment={},
+        )
+
+    with pytest.raises(
+        credential_runtime.RegisteredCredentialRuntimeError,
+        match="registered_credential_unavailable",
+    ):
+        credential_runtime.consume_registered_material_credential(
+            service_id="mail-gmail",
+            alias="openrouter-api",
+            action_id="bind-openrouter-fallback",
+            consumer=lambda _value: None,
+            authority_environment={},
+        )
+
+    assert provider_calls == []
+
+
+def test_provider_failure_does_not_leak_token_or_metadata(monkeypatch) -> None:
+    leaked_token = "synthetic-access-token-must-not-leak"
+    provider_detail = f"metadata BWS_ACCESS_TOKEN={leaked_token} value={SYNTHETIC_SECRET}"
+    store, _reference_calls = _install_fake_provider(
+        monkeypatch,
+        value=SYNTHETIC_SECRET,
+    )
+    store.failure = SecretProviderUnavailable(provider_detail)
+
+    receipt = credential_runtime.bind_registered_environment_credential(
+        service_id="runner-openhands",
+        alias="openrouter-api",
+        action_id="bind-openrouter-fallback",
+        environment={},
+        authority_environment={},
+    )
+    serialized = json.dumps(receipt, sort_keys=True)
+
+    assert receipt["result"]["status"] == "BLOCKED"
+    assert receipt["result"]["reason_class"] == "SECRET_PROVIDER_UNAVAILABLE"
+    assert leaked_token not in serialized
+    assert provider_detail not in serialized
+    assert SYNTHETIC_SECRET not in serialized
 
 
 def test_registration_metadata_is_public_safe() -> None:

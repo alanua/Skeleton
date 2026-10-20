@@ -81,6 +81,35 @@ def test_mcp_probe_and_use_return_only_public_receipts() -> None:
     assert "other" not in serialized
 
 
+def test_mcp_rejects_authorization_and_metadata_without_echoing_values() -> None:
+    adapter = _mcp()
+    leaked_token = "synthetic-authorization-token-must-not-leak"
+    rejected = adapter.call_tool(
+        "credential_use",
+        {
+            "alias": "api",
+            "action_id": "use-api",
+            "authorization": f"Bearer {leaked_token}",
+            "metadata": {"token": leaked_token, "value": SYNTHETIC_SECRET},
+        },
+    )
+    unsupported = adapter.call_tool(
+        f"credential_use_{leaked_token}",
+        {"alias": "api"},
+    )
+    serialized = json.dumps([rejected, unsupported], sort_keys=True)
+
+    assert rejected["result"]["status"] == "BLOCKED"
+    assert rejected["result"]["reason_class"] == "UNKNOWN_FIELDS"
+    assert unsupported["result"]["status"] == "BLOCKED"
+    assert unsupported["result"]["reason_class"] == "UNSUPPORTED_TOOL"
+    assert leaked_token not in serialized
+    assert SYNTHETIC_SECRET not in serialized
+    assert "Bearer" not in serialized
+    assert "metadata" not in serialized
+    assert "authorization" not in serialized
+
+
 def test_chatgpt_registration_descriptor_is_fail_closed() -> None:
     path = (
         Path(__file__).resolve().parents[1]
