@@ -20,17 +20,27 @@ produce a next bounded step, but that step is persisted as a new `pending`
 occurrence and must be claimed and dispatched again through the same boundary.
 
 Operational state is SQLite-backed and non-canonical. Occurrence lineage,
-attempt number, idempotency key, parent receipt, dispatch receipt, and evidence
-reference are durable and queryable. Durable learned or project facts remain
-outside this store and must continue through MemoryGateway.
+attempt number, idempotency key, parent receipt, dispatch receipt, evidence
+reference, retry eligibility, and dependency observation are durable and
+queryable. Durable learned or project facts remain outside this store and must
+continue through MemoryGateway.
 
 Automatic recovery is policy-driven:
 
-- stale `running` attempts return to `pending` while attempts remain;
-- recoverable dispatch failures retry up to the configured attempt limit;
+- stale `running` attempts return to `pending` while attempts remain, with the
+  next claim blocked until the stored retry time;
+- recoverable dispatch failures retry up to the configured attempt limit with
+  bounded durable backoff;
 - dependency waits move to `waiting_dependency` and resume automatically when
-  the dependency occurrence reaches `done`;
+  the dependency occurrence changes state to `done`;
 - exhausted automatic paths become `needs_operator` with one receipt/evidence
   reason;
 - routine done, retry, blocked, and progress states stay internal and do not
   trigger Telegram notification.
+
+Duplicate ticks are idempotent because occurrence IDs are stable per schedule
+version and scheduled time, terminal states have no implicit transition back to
+runnable states, and a pending retry is not claimable until `retry_after_at`.
+Waiting dependencies persist the observed dependency ID/state/update time so a
+restart or duplicate tick can distinguish an unchanged wait from a dependency
+state change that should resume work.
