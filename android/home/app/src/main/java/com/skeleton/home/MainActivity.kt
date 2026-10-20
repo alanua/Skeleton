@@ -85,6 +85,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.Popup
@@ -234,8 +235,26 @@ private class HomeApi {
     }
     suspend fun get(path: String) = json("GET", path)
     suspend fun post(path: String, body: JSONObject = JSONObject()) = json("POST", path, body)
+    suspend fun patch(path: String, body: JSONObject = JSONObject()) = json("PATCH", path, body)
     suspend fun put(path: String, body: JSONObject = JSONObject()) = json("PUT", path, body)
     suspend fun delete(path: String) = json("DELETE", path)
+    private suspend fun secretJson(path:String,body:JSONObject):JSONObject=withContext(Dispatchers.IO){
+        val base=BuildConfig.HOME_EDGE_SECRET_BASE_URL.trim().trimEnd('/')
+        if(!base.startsWith("https://"))throw IllegalStateException("Захищений канал Secrets недоступний")
+        val c=URL(base+path).openConnection() as HttpURLConnection
+        c.connectTimeout=5000;c.readTimeout=95000;c.requestMethod="POST";c.doOutput=true
+        c.setRequestProperty("Accept","application/json");c.setRequestProperty("Content-Type","application/json")
+        c.outputStream.use{it.write(body.toString().toByteArray(Charsets.UTF_8))}
+        val code=c.responseCode;val input=if(code>=400)c.errorStream else c.inputStream
+        val text=input?.bufferedReader(Charsets.UTF_8)?.use(BufferedReader::readText).orEmpty();c.disconnect()
+        val obj=if(text.isBlank())JSONObject() else JSONObject(text)
+        if(code>=400)throw IllegalStateException(obj.optString("error","HTTP $code"))
+        obj
+    }
+    suspend fun postGenericSecret(service:String,alias:String,type:String,values:JSONObject)=secretJson(
+        "/api/native/home-edge/secrets/generic",
+        JSONObject().put("service",service).put("alias",alias).put("type",type).put("values",values)
+    )
     suspend fun uploadCamera(context:Context,uri:Uri):JSONObject=withContext(Dispatchers.IO){
         val base=server?:throw IllegalStateException("Home Edge недоступний")
         val boundary="SkeletonCamera${System.currentTimeMillis()}"
@@ -251,7 +270,8 @@ private class HomeApi {
         val obj=if(text.isBlank())JSONObject() else JSONObject(text);if(code>=400)throw IllegalStateException(obj.optString("error","HTTP $code"));obj
     }
     suspend fun uploadSecretFile(context:Context,uri:Uri):JSONObject=withContext(Dispatchers.IO){
-        val base=server?:throw IllegalStateException("Home Edge недоступний")
+        val base=BuildConfig.HOME_EDGE_SECRET_BASE_URL.trim().trimEnd('/').takeIf{it.startsWith("https://")}
+            ?:throw IllegalStateException("Захищений канал Secrets недоступний")
         val boundary="SkeletonSecret${System.currentTimeMillis()}"
         val c=URL(base+"/api/native/home-edge/secrets/file").openConnection() as HttpURLConnection
         c.connectTimeout=5000;c.readTimeout=20000;c.requestMethod="POST";c.doOutput=true;c.setRequestProperty("Accept","application/json");c.setRequestProperty("Content-Type","multipart/form-data; boundary=$boundary")
@@ -312,6 +332,8 @@ private fun endpointMutation(endpointId:String,vararg pairs:Pair<String,Any?>):J
 private fun endpointPath(endpointId:String,suffix:String):String="/api/media/endpoints/${Uri.encode(endpointId)}$suffix"
 internal fun savedVideoHistoryPath():String="/api/video/history"
 private fun mediaHistoryPath(endpointId:String):String="/api/media/history?endpoint=${Uri.encode(endpointId)}"
+// The library is shared across devices; only the watched progress belongs to an endpoint.
+internal fun canonicalVideoHistoryDeletePath(item:JSONObject):String="/api/video/history/${Uri.encode(historyKey(item))}"
 // One saved work must have one stable card identity; legacy history_id is only a fallback.
 internal fun historyKey(item:JSONObject):String=item.cleanText("history_key",item.cleanText("content_key",item.cleanText("history_id")))
 private fun mediaHistoryDeletePath(endpointId:String,item:JSONObject):String="/api/media/history/${Uri.encode(historyKey(item))}?endpoint=${Uri.encode(endpointId)}"
@@ -360,20 +382,14 @@ private fun watchedHistoryForSavedLibrary(savedLibrary:List<JSONObject>,watchedH
     if(savedKeys.isEmpty())return emptyList()
     return watchedHistory.filter{historyKey(it) in savedKeys}
 }
+// The saved work catalog is the only membership authority on every endpoint.
+// Endpoint watch rows only enrich matching works with device-scoped progress.
+// Even a stale watch record cannot resurrect a deleted catalog entry.
+@Suppress("UNUSED_PARAMETER")
 internal fun historyItemsAfterRead(previous:List<JSONObject>,savedLibrary:List<JSONObject>?,watchedHistory:List<JSONObject>?,homeEdgeTv:Boolean,previousSavedLibrary:List<JSONObject>? = null):List<JSONObject>{
-    return if(homeEdgeTv){
-        val canonicalSaved=savedLibrary?.let(::canonicalHistoryItems)
-        val savedBase=canonicalSaved ?: previousSavedLibrary?.takeIf{it.isNotEmpty()} ?: previous
-        if(savedLibrary==null&&watchedHistory==null)previous
-        else{
-            val watchedBase=watchedHistory?.let{
-                if(canonicalSaved!=null||previousSavedLibrary!=null)watchedHistoryForSavedLibrary(savedBase,it) else it
-            } ?: emptyList()
-            canonicalHistoryItems(mergedHistoryItems(savedBase,watchedBase))
-        }
-    }else{
-        watchedHistory?.let(::canonicalHistoryItems) ?: previous
-    }
+    val savedBase=savedLibrary?.let(::canonicalHistoryItems) ?: previousSavedLibrary?.let(::canonicalHistoryItems) ?: return previous
+    val watchedBase=watchedHistory?.let{watchedHistoryForSavedLibrary(savedBase,it)}.orEmpty()
+    return canonicalHistoryItems(mergedHistoryItems(savedBase,watchedBase))
 }
 private val VideoSelectionIdentityFields=listOf("job_id","source_id","season","episode","voice")+listOf("endpoint_id")
 private fun videoSelectionIdentity(selection:JSONObject):String=
@@ -536,6 +552,8 @@ private suspend fun downloadHomeUpdate(context:Context,api:HomeApi,info:HomeUpda
 }
 
 private fun mdi(name: String): Int = when(name) {
+    "eye-outline" -> R.drawable.eye_outline
+    "eye-off-outline" -> R.drawable.eye_off_outline
     "home" -> R.drawable.home
     "movie-open" -> R.drawable.movie_open
     "devices" -> R.drawable.devices
@@ -1224,11 +1242,11 @@ private fun HomeComposeApp(sharedUrl:String?, consumeShare:()->Unit) {
 }
 
 @Composable private fun HistoryEditorDialog(api:HomeApi,endpointId:String,onDismiss:()->Unit){
-    val scope=rememberCoroutineScope();var items by remember{mutableStateOf(emptyList<JSONObject>())};var query by remember{mutableStateOf("")};var busy by remember{mutableStateOf(false)};val focusRequester=remember{FocusRequester()};val keyboard=LocalSoftwareKeyboardController.current
-    suspend fun reload(){if(api.server==null)return;busy=true;items=runCatching{canonicalHistoryItems(api.get(mediaHistoryPath(endpointId)).optJSONArray("items")?.objects().orEmpty())}.getOrElse{emptyList()};busy=false}
+    val scope=rememberCoroutineScope();var items by remember{mutableStateOf(emptyList<JSONObject>())};var query by remember{mutableStateOf("")};var busy by remember{mutableStateOf(false)};var error by remember{mutableStateOf("")};var visibilityFilter by remember{mutableStateOf("all")};val focusRequester=remember{FocusRequester()};val keyboard=LocalSoftwareKeyboardController.current
+    suspend fun reload(){if(api.server==null)return;busy=true;runCatching{canonicalHistoryItems(savedVideoHistoryItemsWithRetry(api))}.onSuccess{items=it;error=""}.onFailure{error=it.message?:"Спільний каталог недоступний"};busy=false}
     LaunchedEffect(api.server,endpointId){reload()}
     val q=query.trim().lowercase(Locale.ROOT)
-    val visible=if(q.isBlank())items else items.filter{ x -> listOf(x.optString("title"),x.optString("year"),x.optString("content_type"),x.optString("overview")).joinToString(" ").lowercase(Locale.ROOT).contains(q) }
+    val visible=items.filter{ x -> (visibilityFilter=="all" || (visibilityFilter=="hidden")==x.optBoolean("hidden",false)) && (q.isBlank() || listOf(x.optString("title"),x.optString("year"),x.optString("content_type"),x.optString("overview")).joinToString(" ").lowercase(Locale.ROOT).contains(q)) }
     Dialog(onDismissRequest=onDismiss,properties=DialogProperties(usePlatformDefaultWidth=false)){
         Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha=.72f)).clickable(onClick=onDismiss),contentAlignment=Alignment.BottomCenter){
             Column(Modifier.fillMaxWidth().widthIn(max=500.dp).fillMaxHeight(.92f).clip(RoundedCornerShape(topStart=18.dp,topEnd=18.dp)).background(Input).border(1.dp,Line,RoundedCornerShape(topStart=18.dp,topEnd=18.dp)).clickable(enabled=false){}){
@@ -1241,23 +1259,25 @@ private fun HomeComposeApp(sharedUrl:String?, consumeShare:()->Unit) {
                         Mdi("magnify",20.dp,Muted);Spacer(Modifier.width(8.dp));
                         androidx.compose.foundation.text.BasicTextField(value=query,onValueChange={query=it},singleLine=true,textStyle=androidx.compose.ui.text.TextStyle(color=Text,fontSize=14.sp),modifier=Modifier.weight(1f).focusRequester(focusRequester),decorationBox={inner->Box(Modifier.fillMaxWidth()){if(query.isEmpty())Text(ui("Пошук в історії"),color=Color(0xFF747D85),fontSize=14.sp);inner()}})
                     }
-                    Row(Modifier.fillMaxWidth().padding(horizontal=2.dp,vertical=6.dp),verticalAlignment=Alignment.CenterVertically){Text(ui("Останні додані або переглянуті — першими"),fontSize=10.sp,color=Muted);Spacer(Modifier.weight(1f));Text(if(q.isBlank())"${items.size}" else "${visible.size} з ${items.size}",fontSize=10.sp,fontWeight=FontWeight.Bold,color=Accent)}
+                    Row(Modifier.fillMaxWidth().padding(top=8.dp),horizontalArrangement=Arrangement.spacedBy(8.dp)){listOf("all" to "Усі","visible" to "Видимі","hidden" to "Приховані").forEach{(key,label)->Text(ui(label),fontSize=12.sp,color=if(visibilityFilter==key)Accent else Muted,modifier=Modifier.clickable{visibilityFilter=key}.padding(7.dp))}}
+                    Row(Modifier.fillMaxWidth().padding(horizontal=2.dp,vertical=6.dp),verticalAlignment=Alignment.CenterVertically){Text(ui("Спільний каталог творів · перегляди окремі для пристроїв"),fontSize=10.sp,color=Muted,modifier=Modifier.weight(1f));Text(if(q.isBlank())"${items.size}" else "${visible.size} з ${items.size}",fontSize=10.sp,fontWeight=FontWeight.Bold,color=Accent)}
+                    if(error.isNotBlank())Text(error,fontSize=11.sp,color=Color(0xFFFF8A80),modifier=Modifier.padding(horizontal=4.dp,vertical=4.dp))
                 }
                 if(busy) Box(Modifier.fillMaxSize(),contentAlignment=Alignment.Center){CircularProgressIndicator(color=Accent,strokeWidth=2.dp,modifier=Modifier.size(28.dp))}
                 else LazyColumn(Modifier.weight(1f).fillMaxWidth().padding(horizontal=10.dp),contentPadding=PaddingValues(bottom=18.dp)){
-                    items(visible,key={historyKey(it).ifBlank{it.optString("title")}}){item->HistoryEditorRow(api,item,{scope.launch{runCatching{api.delete(mediaHistoryDeletePath(endpointId,item))};reload()} })}
+                    items(visible,key={historyKey(it).ifBlank{it.optString("title")}}){item->HistoryEditorRow(api,item,{scope.launch{runCatching{api.delete(canonicalVideoHistoryDeletePath(item))}.onSuccess{reload()}.onFailure{error=it.message?:"Не вдалося видалити твір"}} },{scope.launch{runCatching{api.patch("/api/video/history/${Uri.encode(historyKey(item))}/visibility",JSONObject().put("hidden",!item.optBoolean("hidden",false)))}.onSuccess{reload()}.onFailure{error=it.message?:"Не вдалося змінити видимість"}} })}
                 }
             }
         }
     }
 }
 
-@Composable private fun HistoryEditorRow(api:HomeApi,item:JSONObject,onDelete:()->Unit){
+@Composable private fun HistoryEditorRow(api:HomeApi,item:JSONObject,onDelete:()->Unit,onVisibility:()->Unit){
     val poster=item.optString("poster");val bm=remoteBitmap(if(poster.isBlank())null else if(poster.startsWith("http"))poster else api.server+poster,192,288)
     Row(Modifier.fillMaxWidth().heightIn(min=112.dp).border(width=0.dp,color=Color.Transparent).padding(horizontal=3.dp,vertical=9.dp),verticalAlignment=Alignment.CenterVertically){
         Box(Modifier.width(64.dp).height(96.dp).clip(RoundedCornerShape(8.dp)).background(Bg),contentAlignment=Alignment.Center){if(bm!=null)Image(bm,null,Modifier.fillMaxSize(),contentScale=ContentScale.Crop)else Mdi("movie-open",30.dp,Muted)}
         Column(Modifier.weight(1f).padding(start=11.dp,end=6.dp)){Text(item.optString("title","Твір"),fontSize=15.sp,lineHeight=19.sp,fontWeight=FontWeight.SemiBold,color=Text,maxLines=2,overflow=TextOverflow.Ellipsis);val meta=listOf(historyKindLabel(item),historyEpisodeLabel(item),item.optString("year"),historyRuntimeLabel(item)).filter{it.isNotBlank()}.joinToString(" · ");if(meta.isNotBlank())Text(meta,fontSize=10.sp,fontWeight=FontWeight.Bold,color=Accent,modifier=Modifier.padding(top=4.dp));val ov=item.optString("overview");if(ov.isNotBlank())Text(ov,fontSize=11.sp,lineHeight=15.sp,color=Muted,maxLines=3,overflow=TextOverflow.Ellipsis,modifier=Modifier.padding(top=7.dp))}
-        Box(Modifier.size(32.dp).clip(CircleShape).background(Color(0xFF241A1A)).border(1.dp,Color(0xFF4A3434),CircleShape).clickable(onClick=onDelete),contentAlignment=Alignment.Center){Text("×",fontSize=24.sp,color=Color(0xFFFFB8B8),modifier=Modifier.offset(y=(-1).dp))}
+        Column(verticalArrangement=Arrangement.spacedBy(8.dp),horizontalAlignment=Alignment.CenterHorizontally){Box(Modifier.size(32.dp).clip(CircleShape).background(Color(0xFF241A1A)).border(1.dp,Color(0xFF4A3434),CircleShape).clickable(onClick=onDelete),contentAlignment=Alignment.Center){Text("×",fontSize=24.sp,color=Color(0xFFFFB8B8),modifier=Modifier.offset(y=(-1).dp))};Mdi(if(item.optBoolean("hidden",false))"eye-off-outline" else "eye-outline",26.dp,if(item.optBoolean("hidden",false))Muted else Accent,Modifier.clickable(onClick=onVisibility))}
     }
 }
 
@@ -2001,7 +2021,7 @@ private fun trackDisplayLabel(t:JSONObject,index:Int):String{val bits=listOf(t.o
 
 @Composable private fun HistoryPickerField(value:String,enabled:Boolean,loading:Boolean,error:Boolean,onClick:()->Unit){Row(Modifier.fillMaxWidth().heightIn(min=56.dp),verticalAlignment=Alignment.Bottom){Box(Modifier.width(28.dp).height(39.dp).padding(bottom=9.dp),contentAlignment=Alignment.BottomCenter){Mdi("history",20.dp,Color(0xFFD8DDE2))};Spacer(Modifier.width(8.dp));Column(Modifier.weight(1f)){Text(ui("Історія"),fontSize=10.sp,color=Color(0xFFC4CAD0),modifier=Modifier.padding(bottom=3.dp));Row(Modifier.fillMaxWidth().height(39.dp).clip(RoundedCornerShape(9.dp)).background(Input).border(1.dp,Line,RoundedCornerShape(9.dp)).clickable(enabled=enabled,onClick=onClick).padding(start=10.dp,end=9.dp),verticalAlignment=Alignment.CenterVertically){Text(value,fontSize=14.sp,color=if(enabled)Text else Text.copy(alpha=.55f),modifier=Modifier.weight(1f),maxLines=1,overflow=TextOverflow.Ellipsis);when{loading->CircularProgressIndicator(Modifier.size(15.dp),strokeWidth=2.dp,color=Accent);error->Mdi("refresh",16.dp,Accent);else->Mdi("chevron-down",16.dp,Muted.copy(alpha=if(enabled)1f else .55f))}}}}}
 @Composable private fun HistoryPickerDialog(api:HomeApi,items:List<JSONObject>,onSelect:(JSONObject)->Unit,onDismiss:()->Unit){
-    var query by remember{mutableStateOf("")};val canonical=remember(items){canonicalHistoryItems(items)};val q=query.trim().lowercase(Locale.ROOT);val visible=if(q.isBlank())canonical else canonical.filter{x->listOf(x.optString("title"),x.optString("year"),x.optString("content_type"),x.optString("overview")).joinToString(" ").lowercase(Locale.ROOT).contains(q)}
+    var query by remember{mutableStateOf("")};val canonical=remember(items){canonicalHistoryItems(items).filter{!it.optBoolean("hidden",false)}};val q=query.trim().lowercase(Locale.ROOT);val visible=if(q.isBlank())canonical else canonical.filter{x->listOf(x.optString("title"),x.optString("year"),x.optString("content_type"),x.optString("overview")).joinToString(" ").lowercase(Locale.ROOT).contains(q)}
     val focusRequester=remember{FocusRequester()};val keyboard=LocalSoftwareKeyboardController.current
     Dialog(onDismissRequest=onDismiss,properties=DialogProperties(usePlatformDefaultWidth=false)){
         Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha=.72f)),contentAlignment=Alignment.BottomCenter){Box(Modifier.matchParentSize().clickable(onClick=onDismiss));Column(Modifier.fillMaxWidth().widthIn(max=500.dp).fillMaxHeight(.92f).clip(RoundedCornerShape(topStart=18.dp,topEnd=18.dp)).background(Input).border(1.dp,Line,RoundedCornerShape(topStart=18.dp,topEnd=18.dp)).clickable(enabled=false){}){
@@ -2079,22 +2099,19 @@ private fun VideoScreen(api:HomeApi,active:Boolean,selectionRevision:Int,endpoin
     suspend fun loadHistoryForEndpoint():Boolean{
         if(api.server==null)return false
         historyLoading=true; setEndpointHistoryError("")
+        // Both dialogs read the same work membership, regardless of output device.
+        val saved=runCatching{savedVideoHistoryItemsWithRetry(api)}
         val watched=runCatching{api.get(mediaHistoryPath(endpoint.endpointId)).optJSONArray("items")?.objects().orEmpty()}
-        val saved=if(endpoint.adapterKind=="home_edge_tv")runCatching{savedVideoHistoryItemsWithRetry(api)} else null
-        val ok=if(endpoint.adapterKind=="home_edge_tv")saved?.isSuccess==true else watched.isSuccess
-        if(ok){
-            if(endpoint.adapterKind=="home_edge_tv"){
-                setEndpointHistory(historyItemsAfterRead(history,saved?.getOrNull(),watched.getOrNull(),true,savedHistory))
-                saved?.getOrNull()?.let{setEndpointSavedHistory(canonicalHistoryItems(it))}
-            }else{
-                setEndpointHistory(historyItemsAfterRead(history,null,watched.getOrNull(),false))
-            }
+        if(saved.isSuccess){
+            val catalog=canonicalHistoryItems(saved.getOrThrow())
+            setEndpointSavedHistory(catalog)
+            setEndpointHistory(historyItemsAfterRead(history,catalog,watched.getOrNull(),endpoint.adapterKind=="home_edge_tv"))
             setEndpointHistoryHydrated(true)
         }else{
-            setEndpointHistoryError((saved?.exceptionOrNull()?:watched.exceptionOrNull())?.message?:"Історія недоступна")
+            setEndpointHistoryError(saved.exceptionOrNull()?.message?:"Спільний каталог недоступний")
         }
         historyLoading=false
-        return ok
+        return saved.isSuccess
     }
     suspend fun confirmEndpointSelection(body:JSONObject):JSONObject{
         pendingSelectionIdentity=videoSelectionIdentity(body)
@@ -2239,8 +2256,8 @@ private fun VideoScreen(api:HomeApi,active:Boolean,selectionRevision:Int,endpoin
                         job!=null->cat.optString("title","Обраний твір")
                         else->"Оберіть збережений твір"
                     }
-                    val historyActionable=api.server!=null&&!historyLoading&&(history.isNotEmpty()||historyError.isNotBlank())
-                    HistoryPickerField(historyLabel,historyActionable,historyLoading,historyError.isNotBlank()){if(history.isNotEmpty())historyOpen=true else scope.launch{loadHistoryForEndpoint()}}
+                    val historyActionable=api.server!=null&&!historyLoading
+                    HistoryPickerField(historyLabel,historyActionable,historyLoading,historyError.isNotBlank()){scope.launch{if(loadHistoryForEndpoint()&&history.isNotEmpty())historyOpen=true}}
                     if(isSeries){
                         SeasonPickerField(season,seasonItems,loadedSeasons){seasonOpen=true}
                         SelectorField(ui("Серія"),"play",if(selectedIsTrailer)"Трейлер" else episode,if(selectedIsTrailer)listOf("Трейлер") else episodes,showCount=!selectedIsTrailer,trailing=if(selectedIsTrailer)"" else selectedDuration){if(!selectedIsTrailer)episode=it}
@@ -2294,7 +2311,7 @@ private fun VideoScreen(api:HomeApi,active:Boolean,selectionRevision:Int,endpoin
         historyOpen=false
         scope.launch{
             runCatching{
-                if(endpoint.adapterKind=="home_edge_tv"){
+                if(endpoint.adapterKind=="home_edge_tv"||item.cleanText("job_id").isBlank()||item.cleanText("source_id").isBlank()){
                     openSavedHistoryItem(item)
                 }else{
                     val preferred=historyPreferredSelection(endpoint.endpointId,item)
@@ -2527,9 +2544,10 @@ private fun openProviderApp(context:Context,trakt:Boolean,pkg:String?,ext:JSONOb
     if(!ok)Toast.makeText(context,"Moviebase не зміг відкрити сторінку цього твору",Toast.LENGTH_LONG).show()
 }
 
-private data class NativeDeviceUi(val id:String,val name:String,val role:String,val adapter:String,val online:Boolean,val location:String,val dependencies:List<String>,val controller:String,val domain:String,val connection:String)
+private data class NativeDeviceUi(val id:String,val name:String,val role:String,val adapter:String,val online:Boolean,val location:String,val dependencies:List<String>,val controller:String,val domain:String,val connection:String,val parentId:String="",val medium:String="")
 private val deviceDomainOrder=listOf("Житло","Мережа","Керування","Документи","Київ / поза домом")
 private fun nativeDeviceDomain(id:String,role:String,location:String):String{
+    if(id=="hetzner_runner"||location=="hetzner_cloud")return "Віддалені сервери"
     if(id.startsWith("kyiv_")||location.startsWith("kyiv_"))return "Київ / поза домом"
     return when(role){
         "gateway_router_modem","secondary_router","media_pc","virtualization_host"->"Мережа"
@@ -2583,11 +2601,36 @@ private fun nativeDeviceIcon(role:String)=when(role){
 @Composable private fun DeviceDomainCard(title:String,items:List<NativeDeviceUi>,onSharp:()->Unit,onMfp:()->Unit,onHomeEdge:()->Unit){
     Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(Card)){
         Row(Modifier.fillMaxWidth().padding(horizontal=15.dp,vertical=12.dp),verticalAlignment=Alignment.CenterVertically){Text(title,fontSize=15.sp,fontWeight=FontWeight.Bold,color=Text,modifier=Modifier.weight(1f));Text(ui("${items.count{it.online}}/${items.size} на зв’язку"),fontSize=10.sp,color=Muted)}
-        items.forEachIndexed{index,d->
+        val byId=items.associateBy{it.id}
+        val children=items.groupBy{it.parentId}
+        val visited=mutableSetOf<String>()
+        val ordered=mutableListOf<Pair<NativeDeviceUi,Int>>()
+        fun visit(d:NativeDeviceUi,depth:Int){
+            if(!visited.add(d.id))return
+            ordered.add(d to depth)
+            children[d.id].orEmpty().sortedBy{it.name}.forEach{visit(it,(depth+1).coerceAtMost(5))}
+        }
+        items.filter{it.parentId !in byId}.sortedWith(compareBy<NativeDeviceUi>{it.role!="gateway_router_modem"}.thenBy{it.name}).forEach{visit(it,0)}
+        items.filter{it.id !in visited}.sortedBy{it.name}.forEach{visit(it,0)}
+        ordered.forEachIndexed{index,pair->
+            val d=pair.first
+            val depth=pair.second
             if(index>0)Box(Modifier.fillMaxWidth().height(1.dp).background(Line))
             Row(Modifier.fillMaxWidth().heightIn(min=76.dp).clickable(enabled=d.id=="sharp_tv_living_room"||d.id=="brother_printer"||d.id=="home_edge_01"){when(d.id){"sharp_tv_living_room"->onSharp();"brother_printer"->onMfp();"home_edge_01"->onHomeEdge()}}.padding(horizontal=14.dp,vertical=10.dp),verticalAlignment=Alignment.CenterVertically){
+                val linkColor=when(d.medium){"ethernet"->Color(0xFF41A9EA);"wifi"->Color(0xFF4AC67F);"usb"->Color(0xFFF5A746);"bluetooth"->Color(0xFFAB85F5);"hdmi"->Color(0xFFE97092);"virtual_machine"->Color(0xFF859EB2);"tailscale"->Color(0xFF42C6CF);else->Color(0xFF4E5863)}
+                Canvas(Modifier.width((18+depth*18).dp).height(72.dp)){
+                    val step=18.dp.toPx()
+                    val x=9.dp.toPx()+depth*step
+                    val mid=size.height/2f
+                    val sw=2.5.dp.toPx()
+                    if(depth>0){
+                        val parentX=x-step
+                        drawLine(linkColor,Offset(parentX,0f),Offset(parentX,size.height),strokeWidth=sw)
+                        drawLine(linkColor,Offset(parentX,mid),Offset(x,mid),strokeWidth=sw)
+                    }else drawCircle(Color(0xFF4E5863),radius=3.dp.toPx(),center=Offset(x,mid))
+                }
                 Box(Modifier.size(42.dp).clip(RoundedCornerShape(12.dp)).background(Action),contentAlignment=Alignment.Center){Mdi(nativeDeviceIcon(d.role),23.dp,if(d.online)Text else Muted)}
-                Column(Modifier.weight(1f).padding(start=12.dp)){Text(d.name,fontSize=17.sp,lineHeight=22.sp,fontWeight=FontWeight.SemiBold,color=Text,maxLines=2,overflow=TextOverflow.Ellipsis);Text(d.connection,fontSize=10.sp,lineHeight=14.sp,color=Muted,maxLines=3,overflow=TextOverflow.Ellipsis,modifier=Modifier.padding(top=4.dp))}
+                Column(Modifier.weight(1f).padding(start=12.dp)){Text(d.name,fontSize=17.sp,lineHeight=22.sp,fontWeight=FontWeight.SemiBold,color=Text,maxLines=2,overflow=TextOverflow.Ellipsis);Text((if(d.medium.isNotBlank())when(d.medium){"usb"->"USB";"ethernet"->"LAN";"wifi"->"Wi-Fi";"virtual_machine"->"VM";"bluetooth"->"Bluetooth";"hdmi"->"HDMI";else->d.medium}+" · " else "")+d.connection,fontSize=10.sp,lineHeight=14.sp,color=Muted,maxLines=3,overflow=TextOverflow.Ellipsis,modifier=Modifier.padding(top=4.dp))}
                 Column(horizontalAlignment=Alignment.End){Box(Modifier.size(8.dp).clip(CircleShape).background(if(d.online)Green else Muted));Text(if(d.online)"На зв’язку" else "Не на зв’язку",fontSize=9.sp,color=if(d.online)Green else Muted,modifier=Modifier.padding(top=4.dp));if(d.id=="sharp_tv_living_room"||d.id=="brother_printer"||d.id=="home_edge_01")Mdi("chevron-right",18.dp,Muted,Modifier.padding(top=5.dp))}
             }
         }
@@ -2944,7 +2987,14 @@ private fun shareMfpPdf(context:Context,api:HomeApi,doc:JSONObject){
     var trackingBackgroundGranted by remember{mutableStateOf(LocationTrackingService.hasBackgroundLocation(context))}
     var trackingRestartNeeded by remember{mutableStateOf(LocationTrackingService.isRestartNeeded(context))}
     var trackingStatus by remember{mutableStateOf("")}
-    var secretText by rememberSaveable{mutableStateOf("")};var gmailCallbackUrl by rememberSaveable{mutableStateOf("")};var gmailExpectedState by rememberSaveable{mutableStateOf("")};var status by remember{mutableStateOf("")};var busy by remember{mutableStateOf(false)};var gmailConfigured by remember{mutableStateOf(false)};var gmailAuthorized by remember{mutableStateOf(false)};var bitwardenBackup by remember{mutableStateOf("not_needed")}
+    var secretService by remember{mutableStateOf("")}
+    var secretAlias by remember{mutableStateOf("")}
+    var secretType by remember{mutableStateOf("api_key")}
+    var secretTypeMenu by remember{mutableStateOf(false)}
+    var secretValue by remember{mutableStateOf("")}
+    var secretLogin by remember{mutableStateOf("")}
+    var secretPassword by remember{mutableStateOf("")}
+    var gmailCallbackUrl by remember{mutableStateOf("")};var gmailExpectedState by remember{mutableStateOf("")};var status by remember{mutableStateOf("")};var busy by remember{mutableStateOf(false)};var gmailConfigured by remember{mutableStateOf(false)};var gmailAuthorized by remember{mutableStateOf(false)};var bitwardenBackup by remember{mutableStateOf("not_needed")}
     var telegramApiConfigured by remember{mutableStateOf(false)}
     var telegramSessionConfigured by remember{mutableStateOf(false)}
     var telegramAuthorized by remember{mutableStateOf(false)}
@@ -3190,14 +3240,37 @@ private fun shareMfpPdf(context:Context,api:HomeApi,doc:JSONObject){
                 if(telegramStatus.isNotBlank())Text(telegramStatus,fontSize=11.sp,lineHeight=16.sp,color=if(telegramAuthorized||telegramStatus.contains("збережено")||telegramStatus.contains("додано"))Green else if(telegramStatus.contains("зачекати"))Warn else Muted,modifier=Modifier.padding(top=9.dp))
             }}
             item{Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(Card).border(1.dp,Line,RoundedCornerShape(16.dp)).padding(16.dp)){
-                Text("Додати інший секрет",fontSize=16.sp,fontWeight=FontWeight.Bold,color=Text)
-                Text("Імпорт із файлу або ручне додавання підтримуваного JSON/секрету. Значення не показуються у відповідях чи журналах.",fontSize=10.sp,lineHeight=15.sp,color=Muted,modifier=Modifier.padding(top=5.dp,bottom=10.dp))
-                Button(onClick={filePicker.launch(arrayOf("*/*"))},enabled=!busy,shape=RoundedCornerShape(12.dp),colors=ButtonDefaults.buttonColors(containerColor=Accent),modifier=Modifier.fillMaxWidth().height(48.dp)){Text("Завантажити секрет з файлу",fontWeight=FontWeight.Bold,color=Color.White)}
-                Text("або вставити вручну",fontSize=10.sp,color=Muted,modifier=Modifier.padding(top=14.dp,bottom=6.dp))
-                OutlinedTextField(value=secretText,onValueChange={if(it.length<=131072)secretText=it},enabled=!busy,label={Text("JSON / секрет")},placeholder={Text("Вставте вміст сюди")},minLines=5,maxLines=10,modifier=Modifier.fillMaxWidth(),colors=OutlinedTextFieldDefaults.colors(focusedTextColor=Text,unfocusedTextColor=Text,focusedBorderColor=Accent,unfocusedBorderColor=Line,focusedLabelColor=Accent,unfocusedLabelColor=Muted,cursorColor=Accent))
-                Button(onClick={scope.launch{busy=true;status="Перевіряю…";runCatching{api.post("/api/native/home-edge/secrets/text",JSONObject().put("label","Home app input").put("value",secretText))}.onSuccess{status="Секрет прийнято · ${it.optString("label","готово")}";secretText="";refresh()}.onFailure{status=it.message?:"Не вдалося додати секрет"};busy=false}},enabled=!busy&&secretText.isNotBlank(),shape=RoundedCornerShape(12.dp),colors=ButtonDefaults.buttonColors(containerColor=Action),modifier=Modifier.fillMaxWidth().height(46.dp).padding(top=8.dp)){Text("Додати введений секрет",fontWeight=FontWeight.SemiBold,color=Text)}
-                if(status.isNotBlank())Text(status,fontSize=11.sp,lineHeight=16.sp,color=if(status.startsWith("Секрет прийнято"))Green else Muted,modifier=Modifier.padding(top=10.dp))
-                Text("Розпізнаються Google OAuth Desktop JSON та Telegram MTProto API JSON. Самі значення секретів у відповідях і журналах не показуються.",fontSize=10.sp,lineHeight=15.sp,color=Muted,modifier=Modifier.padding(top=12.dp))
+                Text("Додати або оновити секрет",fontSize=16.sp,fontWeight=FontWeight.Bold,color=Text)
+                Text("Універсальна форма: API key, token, пароль, логін+пароль, JSON або інший текст. Значення одразу йде через HTTPS у Bitwarden; Home зберігає тільки посилання.",fontSize=10.sp,lineHeight=15.sp,color=Muted,modifier=Modifier.padding(top=5.dp,bottom=10.dp))
+                OutlinedTextField(value=secretService,onValueChange={if(it.length<=80)secretService=it},enabled=!busy,label={Text("Сервіс")},placeholder={Text("Напр. OpenAI")},singleLine=true,modifier=Modifier.fillMaxWidth(),colors=OutlinedTextFieldDefaults.colors(focusedTextColor=Text,unfocusedTextColor=Text,focusedBorderColor=Accent,unfocusedBorderColor=Line,focusedLabelColor=Accent,unfocusedLabelColor=Muted,cursorColor=Accent))
+                OutlinedTextField(value=secretAlias,onValueChange={if(it.length<=80)secretAlias=it},enabled=!busy,label={Text("Назва / alias")},placeholder={Text("Напр. Skeleton GPT-6")},singleLine=true,modifier=Modifier.fillMaxWidth().padding(top=8.dp),colors=OutlinedTextFieldDefaults.colors(focusedTextColor=Text,unfocusedTextColor=Text,focusedBorderColor=Accent,unfocusedBorderColor=Line,focusedLabelColor=Accent,unfocusedLabelColor=Muted,cursorColor=Accent))
+                val secretTypeLabels=mapOf("api_key" to "API key","token" to "Token","password" to "Пароль","login_password" to "Логін + пароль","json" to "JSON","text" to "Текст","other" to "Інше")
+                Box(Modifier.fillMaxWidth().padding(top=8.dp)){
+                    OutlinedButton(onClick={secretTypeMenu=true},enabled=!busy,modifier=Modifier.fillMaxWidth(),shape=RoundedCornerShape(12.dp),border=BorderStroke(1.dp,Line)){Text("Тип: ${secretTypeLabels[secretType]?:secretType}",color=Text,modifier=Modifier.weight(1f));Mdi("chevron-down",18.dp,Muted)}
+                    DropdownMenu(expanded=secretTypeMenu,onDismissRequest={secretTypeMenu=false}){secretTypeLabels.forEach{(key,label)->DropdownMenuItem(text={Text(label)},onClick={secretType=key;secretTypeMenu=false;secretValue="";secretLogin="";secretPassword=""})}}
+                }
+                if(secretType=="login_password"){
+                    OutlinedTextField(value=secretLogin,onValueChange={if(it.length<=4096)secretLogin=it},enabled=!busy,label={Text("Логін")},singleLine=true,modifier=Modifier.fillMaxWidth().padding(top=8.dp),colors=OutlinedTextFieldDefaults.colors(focusedTextColor=Text,unfocusedTextColor=Text,focusedBorderColor=Accent,unfocusedBorderColor=Line,focusedLabelColor=Accent,unfocusedLabelColor=Muted,cursorColor=Accent))
+                    OutlinedTextField(value=secretPassword,onValueChange={if(it.length<=131072)secretPassword=it},enabled=!busy,label={Text("Пароль")},singleLine=true,visualTransformation=PasswordVisualTransformation(),modifier=Modifier.fillMaxWidth().padding(top=8.dp),colors=OutlinedTextFieldDefaults.colors(focusedTextColor=Text,unfocusedTextColor=Text,focusedBorderColor=Accent,unfocusedBorderColor=Line,focusedLabelColor=Accent,unfocusedLabelColor=Muted,cursorColor=Accent))
+                }else{
+                    val visible=secretType=="json"||secretType=="text"
+                    OutlinedTextField(value=secretValue,onValueChange={if(it.length<=131072)secretValue=it},enabled=!busy,label={Text(if(secretType=="json")"JSON" else "Значення")},placeholder={Text("Вставте значення сюди")},singleLine=!visible,minLines=if(visible)4 else 1,maxLines=if(visible)10 else 1,visualTransformation=if(visible)VisualTransformation.None else PasswordVisualTransformation(),modifier=Modifier.fillMaxWidth().padding(top=8.dp),colors=OutlinedTextFieldDefaults.colors(focusedTextColor=Text,unfocusedTextColor=Text,focusedBorderColor=Accent,unfocusedBorderColor=Line,focusedLabelColor=Accent,unfocusedLabelColor=Muted,cursorColor=Accent))
+                }
+                val secretReady=secretService.isNotBlank()&&secretAlias.isNotBlank()&&if(secretType=="login_password")secretLogin.isNotBlank()&&secretPassword.isNotBlank() else secretValue.isNotBlank()
+                Button(onClick={scope.launch{
+                    busy=true;status="Зберігаю у Bitwarden…"
+                    val service=secretService.trim();val alias=secretAlias.trim();val type=secretType
+                    val values=JSONObject()
+                    if(type=="login_password"){values.put("login",secretLogin).put("password",secretPassword);secretLogin="";secretPassword=""}else{values.put("value",secretValue);secretValue=""}
+                    runCatching{api.postGenericSecret(service,alias,type,values)}
+                        .onSuccess{status="Збережено · ${it.optString("canonical_id","готово")}";refresh()}
+                        .onFailure{status=it.message?:"Не вдалося безпечно зберегти секрет"}
+                    busy=false
+                }},enabled=!busy&&secretReady,shape=RoundedCornerShape(12.dp),colors=ButtonDefaults.buttonColors(containerColor=Accent),modifier=Modifier.fillMaxWidth().height(48.dp).padding(top=10.dp)){Text("Зберегти секрет",fontWeight=FontWeight.Bold,color=Color.White)}
+                if(status.isNotBlank())Text(status,fontSize=11.sp,lineHeight=16.sp,color=if(status.startsWith("Збережено"))Green else Muted,modifier=Modifier.padding(top=10.dp))
+                Text("Файл / готовий OAuth JSON",fontSize=10.sp,color=Muted,modifier=Modifier.padding(top=14.dp,bottom=6.dp))
+                OutlinedButton(onClick={filePicker.launch(arrayOf("*/*"))},enabled=!busy,shape=RoundedCornerShape(12.dp),border=BorderStroke(1.dp,Line),modifier=Modifier.fillMaxWidth().height(46.dp)){Text("Імпортувати з файлу",fontWeight=FontWeight.SemiBold,color=Text)}
+                Text("Секретні значення не зберігаються у стані Android, відповідях API чи журналах.",fontSize=10.sp,lineHeight=15.sp,color=Muted,modifier=Modifier.padding(top=10.dp))
             }}
         }
     }
@@ -3217,12 +3290,13 @@ private fun orderNativeDevices(items:List<NativeDeviceUi>,prefs:android.content.
     var sharpRemoteOpen by rememberSaveable{mutableStateOf(false)}; var mfpOpen by rememberSaveable{mutableStateOf(false)}; var homeEdgeOpen by rememberSaveable{mutableStateOf(false)}; var devices by remember{mutableStateOf(emptyList<NativeDeviceUi>())}; var loaded by remember{mutableStateOf(false)}
     val context=LocalContext.current; val devicePrefs=remember(context){context.getSharedPreferences("home_ui",Context.MODE_PRIVATE)}
     LaunchedEffect(Unit){if(deviceOrderIds(devicePrefs).isEmpty())devicePrefs.edit().putString(DEVICE_ORDER_PREF,"brother_printer").apply()}
-    LaunchedEffect(api.server,active){if(api.server!=null){suspend fun pull():Boolean{var ok=false;runCatching{api.get("/api/native/devices")}.onSuccess{j->devices=j.optJSONArray("items")?.objects().orEmpty().map{d->val id=d.cleanText("device_id");val role=d.cleanText("role");val adapter=d.cleanText("adapter");val location=d.cleanText("location");val deps=d.optJSONArray("dependency_names")?.strings().orEmpty();val controller=d.cleanText("controller_name",d.cleanText("controller"));NativeDeviceUi(id,d.cleanText("name",id),role,adapter,d.optBoolean("online"),location,deps,controller,nativeDeviceDomain(id,role,location),nativeDeviceConnection(id,role,adapter,location,deps,controller))};loaded=true;ok=true};return ok};while(!loaded){if(pull())break;delay(1500)};if(active)while(true){delay(15000);pull()}}}
+    LaunchedEffect(api.server,active){if(api.server!=null){suspend fun pull():Boolean{var ok=false;runCatching{api.get("/api/native/devices")}.onSuccess{j->devices=j.optJSONArray("items")?.objects().orEmpty().map{d->val id=d.cleanText("device_id");val role=d.cleanText("role");val adapter=d.cleanText("adapter");val location=d.cleanText("location");val deps=d.optJSONArray("dependency_names")?.strings().orEmpty();val controller=d.cleanText("controller_name",d.cleanText("controller"));NativeDeviceUi(id,d.cleanText("name",id),role,adapter,d.optBoolean("online"),location,deps,controller,nativeDeviceDomain(id,role,location),nativeDeviceConnection(id,role,adapter,location,deps,controller),d.cleanText("physical_parent_id"),d.cleanText("physical_medium"))};loaded=true;ok=true};return ok};while(!loaded){if(pull())break;delay(1500)};if(active)while(true){delay(15000);pull()}}}
     if(homeEdgeOpen){HomeEdgeScreen(api,endpointId,endpoints,onEndpoint,onMenu){homeEdgeOpen=false};return}
     Column(Modifier.fillMaxSize().background(Bg)){
         LazyColumn(Modifier.weight(1f).padding(horizontal=13.dp),contentPadding=PaddingValues(top=6.dp,bottom=18.dp),verticalArrangement=Arrangement.spacedBy(10.dp)){
             if(!loaded)item{SimpleSection("Домашня схема","Читаю актуальний список пристроїв…")}
-            val ordered=orderNativeDevices(devices,devicePrefs);ordered.map{it.domain}.distinct().forEach{domain->val group=ordered.filter{it.domain==domain};if(group.isNotEmpty())item(key=domain){DeviceDomainCard(domain,group,{sharpRemoteOpen=true},{mfpOpen=true},{homeEdgeOpen=true})}}
+            val ordered=orderNativeDevices(devices,devicePrefs)
+            if(ordered.isNotEmpty())item(key="physical_topology"){DeviceDomainCard("Пристрої та підтверджені з’єднання",ordered,{sharpRemoteOpen=true},{mfpOpen=true},{homeEdgeOpen=true})}
         }
         if(mfpOpen&&api.server!=null)MfpDialog(api){mfpOpen=false}
         if(sharpRemoteOpen&&api.server!=null)SharpRemoteDialog("${api.server}/ir/sharp"){sharpRemoteOpen=false}
