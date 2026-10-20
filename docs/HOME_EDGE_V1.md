@@ -26,6 +26,15 @@ Tasks route by capability, not by hardcoded host.
 
 The Device Registry is the source of truth for home capabilities. Discovery tools update the registry; they are not the source of truth.
 
+`core/exo_device_control_plane.py` is the canonical EXO device-control plane for this rule. It keeps the real stable registry identities already used by Home Edge, such as `home_edge_01`, `samsung_tv` and `sharp_tv_living_room`, with dotted migration names retained only as aliases. The registry, not a fixed device list, drives the N-device control plane: adapters are selected by each device capability and adapter kind, and each registry device with transports gets its own transport supervisor. A device with no configured supervisor fails closed before transport. Home Edge bootstrap imports EXO devices from the supplied registry, preserves capability risk, and resolves explicit node, service or device targets before falling back to general capability routing. The Home Edge adapter delegates to the existing Home Edge executor gateway; it does not introduce a second executor.
+
+Verification states are intentionally truthful:
+
+- `dry_run` means no transport was called.
+- `verified` means the selected transport returned a successful result.
+- `recovering` means a transport is still inside a bounded recovery path.
+- `blocked` means approval, capability, transport or recovery-budget checks stopped execution.
+
 ## Safety
 
 Green tasks may run in dry-run or approved safe mode.
