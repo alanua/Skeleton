@@ -52,6 +52,19 @@ def test_cron_supports_ranges_lists_and_steps() -> None:
     )
 
 
+def test_cron_due_times_include_dst_repeated_hour_once_per_utc_minute() -> None:
+    spec = ScheduleSpec.from_mapping(
+        _cron(cron_expression="30 2 * * *", timezone="Europe/Berlin")
+    )
+    start = int(datetime(2026, 10, 25, 0, 0, tzinfo=timezone.utc).timestamp())
+    end = int(datetime(2026, 10, 25, 2, 0, tzinfo=timezone.utc).timestamp())
+
+    assert iter_due_times(spec, after_exclusive=start, until_inclusive=end) == (
+        int(datetime(2026, 10, 25, 0, 30, tzinfo=timezone.utc).timestamp()),
+        int(datetime(2026, 10, 25, 1, 30, tzinfo=timezone.utc).timestamp()),
+    )
+
+
 def test_occurrence_identity_is_stable_and_versioned() -> None:
     first = stable_occurrence_id("test.cron", 1, 100)
     assert first == stable_occurrence_id("test.cron", 1, 100)

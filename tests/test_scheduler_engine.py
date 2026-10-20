@@ -516,6 +516,44 @@ def test_due_schedule_dispatches_to_loop_and_finishes_without_manual_nudge(tmp_p
     assert receipts[0]["idempotency_key"].endswith(":attempt:1")
 
 
+def test_duplicate_due_tick_does_not_redeliver_finished_occurrence(tmp_path) -> None:
+    store = SchedulerStore(tmp_path / "scheduler.sqlite3")
+    store.initialize()
+    store.register(_loop_once("test.duplicate.delivery", 100, _loop_packet("create")), now=50)
+
+    class CountingDispatcher:
+        calls = 0
+
+        def dispatch(self, request: SharedDispatchRequest) -> SharedDispatchResult:
+            self.calls += 1
+            return SharedDispatchResult(
+                "done",
+                "SYNTHETIC_DONE",
+                {
+                    "status": "DONE",
+                    "accepted": True,
+                    "reason": "SYNTHETIC_DONE",
+                    "public_safe": True,
+                    "external_side_effects_executed": False,
+                },
+                "synthetic:done",
+            )
+
+    dispatcher = CountingDispatcher()
+    first = SchedulerEngine(store).tick(now=100, dispatcher=dispatcher)
+    second = SchedulerEngine(store).tick(now=100, dispatcher=dispatcher)
+    occurrences = store.list_occurrences("test.duplicate.delivery")
+
+    assert first["created_occurrences"] == 1
+    assert first["dispatch"]["done"] == 1
+    assert second["created_occurrences"] == 0
+    assert second["replayed_occurrences"] == 0
+    assert second["dispatch"]["claimed"] == 0
+    assert dispatcher.calls == 1
+    assert len(occurrences) == 1
+    assert len(store.list_dispatch_receipts(occurrences[0].occurrence_id)) == 1
+
+
 def test_synthetic_multi_step_chain_activates_second_step(tmp_path) -> None:
     store = SchedulerStore(tmp_path / "scheduler.sqlite3")
     loop_db = tmp_path / "loop.sqlite3"
