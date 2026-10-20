@@ -181,6 +181,8 @@ def _commit_and_readback(gateway: MemoryGateway, record: Mapping[str, Any]) -> d
     read_payload = read_response.get("payload")
     if not isinstance(read_payload, Mapping) or read_payload.get("authoritative") is not True:
         raise FamilyDocumentArchiveError("MemoryGateway exact readback not authoritative")
+    if read_payload.get("canonical_ref") != canonical_ref:
+        raise FamilyDocumentArchiveError("MemoryGateway exact readback ref mismatch")
     value = read_payload.get("value")
     if not isinstance(value, Mapping):
         raise FamilyDocumentArchiveError("MemoryGateway exact readback value missing")
@@ -188,6 +190,8 @@ def _commit_and_readback(gateway: MemoryGateway, record: Mapping[str, Any]) -> d
         raise FamilyDocumentArchiveError("MemoryGateway exact readback mismatch")
     if content_hash(value) != content_hash(record):
         raise FamilyDocumentArchiveError("MemoryGateway exact readback hash mismatch")
+    if read_payload.get("value_hash") != content_hash(record):
+        raise FamilyDocumentArchiveError("MemoryGateway exact readback value hash mismatch")
     return {
         "schema": FAMILY_DOCUMENT_ARCHIVE_RECEIPT_SCHEMA,
         "status": "DONE",

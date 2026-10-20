@@ -29,6 +29,50 @@ OCRMY_PDF = "/usr/bin/ocrmypdf"
 LIBREOFFICE = "/usr/bin/libreoffice"
 
 
+def local_ocr_dependency_status(
+    *,
+    suffixes: Sequence[str] | None = None,
+) -> dict[str, object]:
+    requested = {suffix.lower() for suffix in (suffixes or ())}
+    if not requested:
+        requested = {
+            ".pdf",
+            ".png",
+            ".jpg",
+            ".jpeg",
+            ".tif",
+            ".tiff",
+            ".doc",
+            ".docx",
+            ".odt",
+            ".rtf",
+            ".txt",
+        }
+    required: dict[str, str] = {}
+    if ".pdf" in requested:
+        required.update({"pdftotext": PDFTOTEXT, "pdfinfo": PDFINFO, "ocrmypdf": OCRMY_PDF})
+    if requested & {".png", ".jpg", ".jpeg", ".tif", ".tiff"}:
+        required["tesseract"] = TESSERACT
+    if requested & {".doc", ".docx", ".odt", ".rtf"}:
+        required.update({"libreoffice": LIBREOFFICE, "pdftotext": PDFTOTEXT, "pdfinfo": PDFINFO})
+    available = {name: Path(path).is_file() and os.access(path, os.X_OK) for name, path in required.items()}
+    missing = sorted(name for name, present in available.items() if not present)
+    return {
+        "schema": "skeleton.local_document_ocr_dependencies.v1",
+        "status": "READY" if not missing else "MISSING",
+        "required": required,
+        "available": available,
+        "missing": missing,
+    }
+
+
+def require_local_ocr_dependencies(*, suffixes: Sequence[str] | None = None) -> dict[str, object]:
+    status = local_ocr_dependency_status(suffixes=suffixes)
+    if status["missing"]:
+        raise LocalDocumentOcrError("local OCR dependencies missing: " + ",".join(status["missing"]))
+    return status
+
+
 def _run(argv: Sequence[str], *, timeout: int = 120, max_output: int = 2_000_000) -> str:
     if not argv or not Path(argv[0]).is_absolute():
         raise LocalDocumentOcrError("local OCR executable is not absolute")
