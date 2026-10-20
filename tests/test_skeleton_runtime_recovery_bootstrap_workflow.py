@@ -38,31 +38,27 @@ def run_script() -> str:
 
 
 AUTHORIZATION_MARKER = "Authorization Marker: EXPLICIT_RUNTIME_RECOVERY_BOOTSTRAP_20260802"
-CLEANUP_AUTHORIZATION_MARKER = (
-    "Authorization Marker: EXPLICIT_RUNTIME_RECOVERY_CLEANUP_TRIGGER_20260803"
-)
 
 
 def expected_triggers() -> dict:
     return {
         "issues": {"types": ["labeled"]},
-        "schedule": [{"cron": "*/5 * * * *"}],
-        "pull_request": {"types": ["opened", "reopened", "synchronize"]},
     }
 
 
-def test_workflow_yaml_parses_and_triggers_are_exact_issues_schedule_pull_request() -> None:
+def test_workflow_yaml_parses_and_triggers_are_exact_issues_only() -> None:
     workflow = load_workflow()
     triggers = workflow_on(workflow)
 
     assert triggers == expected_triggers()
     assert triggers["issues"] == {"types": ["labeled"]}
-    assert triggers["schedule"] == [{"cron": "*/5 * * * *"}]
-    assert triggers["pull_request"] == {"types": ["opened", "reopened", "synchronize"]}
-    assert len(triggers["schedule"]) == 1
-    assert set(triggers) == {"issues", "schedule", "pull_request"}
+    assert set(triggers) == {"issues"}
+    assert "schedule" not in triggers
+    assert "pull_request" not in triggers
+    assert "pull_request_target" not in triggers
     assert "workflow_dispatch" not in triggers
     assert "repository_dispatch" not in triggers
+    assert "inputs" not in triggers
     assert "push" not in triggers
     assert "inputs" not in workflow_text()
 
@@ -80,28 +76,22 @@ def test_runner_labels_repository_issue_gate_and_source_base_constant_are_fixed(
         "github.event.issue.user.login == 'alanua' && "
         f"contains(github.event.issue.body, '{AUTHORIZATION_MARKER}')"
     )
-    pull_request_authorization = (
-        "github.event_name == 'pull_request' && "
-        "(github.event.action == 'opened' || "
-        "github.event.action == 'reopened' || "
-        "github.event.action == 'synchronize') && "
-        "github.event.pull_request.base.ref == 'main' && "
-        "github.event.pull_request.head.ref == 'runner/issue-2145' && "
-        "github.event.pull_request.user.login == 'alanua' && "
-        f"contains(github.event.pull_request.body, '{CLEANUP_AUTHORIZATION_MARKER}')"
-    )
     assert job["if"] == (
         "github.repository == 'alanua/Skeleton' && "
-        f"(github.event_name == 'schedule' || ({issue_authorization}) || "
-        f"({pull_request_authorization}))"
+        f"{issue_authorization}"
     )
     assert job["if"].startswith("github.repository == 'alanua/Skeleton' &&")
+    assert workflow["permissions"] == {"contents": "read"}
+    assert workflow["concurrency"] == {
+        "group": "skeleton-runtime-recovery-bootstrap",
+        "cancel-in-progress": False,
+    }
     assert job["runs-on"] == ["self-hosted", "Linux", "X64"]
+    assert job["timeout-minutes"] == 15
     assert OLD_RUNNER_NAME not in workflow_text()
     assert job["env"] == {
         "CANONICAL_REPOSITORY": "alanua/Skeleton",
         "EXPECTED_SOURCE_BASE_SHA": EXPECTED_SOURCE_BASE_SHA,
-        "PR_BASE_SHA": "${{ github.event.pull_request.base.sha }}",
         "TARGET_CHECKOUT": "/home/agent/agent-dev/repos/Skeleton",
         "RECOVERY_ROOT": "/home/agent/agent-dev/private-recovery/skeleton",
     }
@@ -113,30 +103,47 @@ def test_runner_labels_repository_issue_gate_and_source_base_constant_are_fixed(
     assert 'origin_main_sha="$(git -C "${TARGET_CHECKOUT}" rev-parse origin/main)"' in script
     assert '[[ ! "${origin_main_sha}" =~ ^[0-9a-f]{40}$ ]]' in script
     assert 'test "${GITHUB_SHA}" = "${origin_main_sha}"' in script
+    assert 'target_sha="${origin_main_sha}"' in script
     assert 'rev-list --first-parent "${target_sha}"' in script
     assert 'grep -Fx "${EXPECTED_SOURCE_BASE_SHA}" >/dev/null' in script
     assert "EXPECTED_TARGET_SHA" not in script
 
 
-def test_pull_request_trigger_and_condition_are_exactly_reserved_cleanup_route() -> None:
+def test_temporary_trigger_surfaces_and_pr_fields_are_absent() -> None:
     workflow = load_workflow()
+    triggers = workflow_on(workflow)
     job_if = workflow["jobs"]["recover-runtime-checkout"]["if"]
+    text = workflow_text()
+    script = run_script()
 
-    assert workflow_on(workflow)["pull_request"] == {
-        "types": ["opened", "reopened", "synchronize"]
-    }
-    for required in [
-        "github.repository == 'alanua/Skeleton'",
-        "github.event_name == 'pull_request'",
-        "github.event.action == 'opened'",
-        "github.event.action == 'reopened'",
-        "github.event.action == 'synchronize'",
-        "github.event.pull_request.base.ref == 'main'",
-        "github.event.pull_request.head.ref == 'runner/issue-2145'",
-        "github.event.pull_request.user.login == 'alanua'",
-        f"contains(github.event.pull_request.body, '{CLEANUP_AUTHORIZATION_MARKER}')",
+    assert triggers == {"issues": {"types": ["labeled"]}}
+    for absent_trigger in [
+        "schedule",
+        "pull_request",
+        "pull_request_target",
+        "workflow_dispatch",
+        "repository_dispatch",
+        "inputs",
     ]:
-        assert required in job_if
+        assert absent_trigger not in triggers
+
+    for rejected in [
+        "github.event_name == 'schedule'",
+        "github.event_name == 'pull_request'",
+        "github.event.pull_request",
+        "EXPLICIT_RUNTIME_RECOVERY_CLEANUP_TRIGGER_20260803",
+        "PR_BASE_SHA",
+        "case \"${GITHUB_EVENT_NAME}\"",
+        "pull_request)",
+        "github.base_ref",
+        "github.head_ref",
+        "github.sha",
+        "github.ref",
+        "refs/pull",
+        "pull/",
+    ]:
+        assert rejected not in text
+        assert rejected not in script
 
     for rejected in [
         "runner/issue-2146",
@@ -150,20 +157,25 @@ def test_pull_request_trigger_and_condition_are_exactly_reserved_cleanup_route()
         assert rejected not in job_if
 
 
-def test_job_condition_rejects_wrong_repository_action_base_branch_author_or_marker() -> None:
+def test_job_condition_rejects_wrong_repository_action_issue_author_or_marker() -> None:
     job_if = workflow_text()
 
     assert "github.repository == 'alanua/Skeleton' &&" in job_if
-    assert "github.event.pull_request.base.ref == 'main'" in job_if
-    assert "github.event.pull_request.head.ref == 'runner/issue-2145'" in job_if
-    assert "github.event.pull_request.user.login == 'alanua'" in job_if
-    assert CLEANUP_AUTHORIZATION_MARKER in job_if
+    assert "github.event_name == 'issues'" in job_if
+    assert "github.event.action == 'labeled'" in job_if
+    assert "github.event.issue.number == 2124" in job_if
+    assert "github.event.issue.state == 'open'" in job_if
+    assert "github.event.label.name == 'risk:green'" in job_if
+    assert "github.event.issue.user.login == 'alanua'" in job_if
+    assert AUTHORIZATION_MARKER in job_if
+    assert "github.event_name == 'schedule'" not in job_if
+    assert "github.event_name == 'pull_request'" not in job_if
     assert "github.event.action == 'closed'" not in job_if
     assert "github.event.action == 'edited'" not in job_if
-    assert "github.event.pull_request.base.ref !=" not in job_if
-    assert "github.event.pull_request.head.ref !=" not in job_if
-    assert "github.event.pull_request.user.login !=" not in job_if
-    assert "pull_request.body" in job_if
+    assert "github.event.issue.number !=" not in job_if
+    assert "github.event.label.name !=" not in job_if
+    assert "github.event.issue.user.login !=" not in job_if
+    assert "pull_request.body" not in job_if
 
 
 def test_no_arbitrary_issue_input_consumption_or_command_parsing() -> None:
@@ -212,22 +224,18 @@ def test_target_checkout_origin_and_origin_main_are_verified_before_mutation() -
     assert first_stash < first_checkout
 
 
-def test_pull_request_target_is_only_fixed_base_sha_and_must_equal_origin_main() -> None:
-    workflow = load_workflow()
+def test_target_sha_is_exact_fetched_origin_main_and_must_equal_github_sha() -> None:
     script = run_script()
 
-    assert workflow["jobs"]["recover-runtime-checkout"]["env"]["PR_BASE_SHA"] == (
-        "${{ github.event.pull_request.base.sha }}"
-    )
-    assert 'case "${GITHUB_EVENT_NAME}" in' in script
-    assert "pull_request)" in script
-    assert '[[ ! "${PR_BASE_SHA}" =~ ^[0-9a-f]{40}$ ]]' in script
-    assert 'test "${PR_BASE_SHA}" = "${origin_main_sha}"' in script
-    assert 'target_sha="${PR_BASE_SHA}"' in script
+    assert 'git -C "${TARGET_CHECKOUT}" fetch --quiet --prune origin main' in script
+    assert 'origin_main_sha="$(git -C "${TARGET_CHECKOUT}" rev-parse origin/main)"' in script
+    assert '[[ ! "${origin_main_sha}" =~ ^[0-9a-f]{40}$ ]]' in script
+    assert '[[ -z "${GITHUB_SHA:-}" ]]' in script
     assert 'test "${GITHUB_SHA}" = "${origin_main_sha}"' in script
-    assert 'target_sha="${GITHUB_SHA}"' in script
-    assert script.index('test "${PR_BASE_SHA}" = "${origin_main_sha}"') < script.index(
-        'target_sha="${PR_BASE_SHA}"'
+    assert 'target_sha="${origin_main_sha}"' in script
+    assert 'target_sha="${GITHUB_SHA}"' not in script
+    assert script.index('test "${GITHUB_SHA}" = "${origin_main_sha}"') < script.index(
+        'target_sha="${origin_main_sha}"'
     )
 
 
