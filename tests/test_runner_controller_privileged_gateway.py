@@ -252,7 +252,13 @@ def _make_synthetic_repo(tmp_path: Path) -> tuple[Path, Path, str]:
 
 
 def _run_installer(repo: Path, destdir: Path, sha: str, *extra: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
-    child_env = {"PATH": os.environ.get("PATH", ""), "SKELETON_GATEWAY_ALLOW_SYNTHETIC_ORIGIN": "1"}
+    tmpdir = destdir.parent / "tmp"
+    tmpdir.mkdir(exist_ok=True)
+    child_env = {
+        "PATH": os.environ.get("PATH", ""),
+        "SKELETON_GATEWAY_ALLOW_SYNTHETIC_ORIGIN": "1",
+        "TMPDIR": str(tmpdir),
+    }
     if env:
         child_env.update(env)
     return subprocess.run(
@@ -330,6 +336,83 @@ def test_bounded_input_blocks_before_runner(override: dict[str, object], reason:
     receipt = gateway.execute_gateway_request(_request(**override), now=NOW, runner=runner)
     assert receipt["reason"] == reason
     assert calls == 0
+
+
+@pytest.mark.parametrize(
+    "action_id",
+    (
+        maintenance.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALL_TASK_ID,
+        gateway.RUNNER_CONTROLLER_REPAIR_CODEX_STATE_MOUNT_TASK_ID,
+        gateway.SKELETON_CONTROL_MCP_HETZNER_ACTIVATE_TASK_ID,
+        gateway.RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_TASK_ID,
+    ),
+)
+def test_registered_actions_require_their_exact_operator_approval_before_runner(
+    action_id: str,
+) -> None:
+    calls = 0
+
+    def runner(_request: object, _action: object) -> tuple[int, str]:
+        nonlocal calls
+        calls += 1
+        raise AssertionError("runner must not be reached")
+
+    receipt = gateway.execute_gateway_request(
+        _request(
+            action_id=action_id,
+            operator_approval="EXPLICIT_APPROVAL_FOR_ANOTHER_CHAT_OR_ACTION",
+        ),
+        now=NOW,
+        runner=runner,
+    )
+
+    assert receipt["status"] == "NEEDS_OPERATOR"
+    assert receipt["reason"] == "OPERATOR_APPROVAL_MISMATCH"
+    assert receipt["mutation_started"] is False
+    assert receipt["mutation_performed"] is False
+    assert receipt["external_side_effects_executed"] is False
+    assert calls == 0
+
+
+def test_idempotency_key_reuse_across_distinct_capability_request_blocks_before_runner(
+    tmp_path: Path,
+) -> None:
+    ledger = tmp_path / "privileged-gateway-ledger.jsonl"
+    calls = 0
+
+    def runner(_request: object, _action: object) -> tuple[int, str]:
+        nonlocal calls
+        calls += 1
+        return 0, maintenance._protected_result(
+            "NEEDS_OPERATOR",
+            maintenance._protected_receipt("NEEDS_OPERATOR", "SYNTHETIC"),
+        )
+
+    first = gateway.execute_gateway_request(
+        _request(request_id="req-chat-a", idempotency_key="shared-cross-chat-key"),
+        now=NOW,
+        replay_ledger_path=ledger,
+        runner=runner,
+    )
+    second = gateway.execute_gateway_request(
+        _request(
+            request_id="req-chat-b",
+            idempotency_key="shared-cross-chat-key",
+            action_id=gateway.RUNNER_CONTROLLER_REPAIR_CODEX_STATE_MOUNT_TASK_ID,
+            operator_approval=gateway.RUNNER_CONTROLLER_REPAIR_CODEX_STATE_MOUNT_OPERATOR_APPROVAL,
+        ),
+        now=NOW,
+        replay_ledger_path=ledger,
+        runner=runner,
+    )
+
+    assert first["reason"] == "SYNTHETIC"
+    assert second["status"] == "NEEDS_OPERATOR"
+    assert second["reason"] == "IDEMPOTENCY_KEY_REPLAY"
+    assert second["mutation_started"] is False
+    assert second["mutation_performed"] is False
+    assert second["external_side_effects_executed"] is False
+    assert calls == 1
 
 
 def test_replay_blocks_same_canonical_request_before_runner() -> None:
