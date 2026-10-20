@@ -111,6 +111,11 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.net.ServerSocket
 import java.net.InetAddress
+import java.net.InetSocketAddress
+import java.net.Socket
+import java.io.ByteArrayOutputStream
+import javax.net.ssl.SSLSocket
+import javax.net.ssl.SSLSocketFactory
 import java.time.LocalDate
 import java.util.Locale
 import kotlin.math.min
@@ -238,18 +243,74 @@ private class HomeApi {
     suspend fun patch(path: String, body: JSONObject = JSONObject()) = json("PATCH", path, body)
     suspend fun put(path: String, body: JSONObject = JSONObject()) = json("PUT", path, body)
     suspend fun delete(path: String) = json("DELETE", path)
-    private suspend fun secretJson(path:String,body:JSONObject):JSONObject=withContext(Dispatchers.IO){
+    private fun directSecretRequest(path:String,contentType:String,payload:ByteArray):JSONObject{
         val base=BuildConfig.HOME_EDGE_SECRET_BASE_URL.trim().trimEnd('/')
         if(!base.startsWith("https://"))throw IllegalStateException("Захищений канал Secrets недоступний")
-        val c=URL(base+path).openConnection() as HttpURLConnection
-        c.connectTimeout=5000;c.readTimeout=95000;c.requestMethod="POST";c.doOutput=true
-        c.setRequestProperty("Accept","application/json");c.setRequestProperty("Content-Type","application/json")
-        c.outputStream.use{it.write(body.toString().toByteArray(Charsets.UTF_8))}
-        val code=c.responseCode;val input=if(code>=400)c.errorStream else c.inputStream
-        val text=input?.bufferedReader(Charsets.UTF_8)?.use(BufferedReader::readText).orEmpty();c.disconnect()
-        val obj=if(text.isBlank())JSONObject() else JSONObject(text)
-        if(code>=400)throw IllegalStateException(obj.optString("error","HTTP $code"))
-        obj
+        val endpoint=URL(base)
+        val tlsHost=endpoint.host.takeIf{it.isNotBlank()}?:throw IllegalStateException("Некоректний Secrets host")
+        val fixedIp=BuildConfig.HOME_EDGE_SECRET_TAILSCALE_IP.trim()
+        if(fixedIp.isBlank())throw IllegalStateException("Secrets Tailscale IP не налаштований")
+        val raw=Socket()
+        try{
+            raw.connect(InetSocketAddress(fixedIp,443),5000)
+            raw.soTimeout=95000
+            val factory=SSLSocketFactory.getDefault() as SSLSocketFactory
+            val ssl=factory.createSocket(raw,tlsHost,443,true) as SSLSocket
+            val params=ssl.sslParameters
+            params.endpointIdentificationAlgorithm="HTTPS"
+            if(android.os.Build.VERSION.SDK_INT>=29)params.applicationProtocols=arrayOf("http/1.1")
+            ssl.sslParameters=params
+            ssl.soTimeout=95000
+            ssl.startHandshake()
+            val header=buildString{
+                append("POST ").append(path).append(" HTTP/1.1\r\n")
+                append("Host: ").append(tlsHost).append("\r\n")
+                append("Accept: application/json\r\n")
+                append("Accept-Encoding: identity\r\n")
+                append("Content-Type: ").append(contentType).append("\r\n")
+                append("Content-Length: ").append(payload.size).append("\r\n")
+                append("Connection: close\r\n\r\n")
+            }.toByteArray(Charsets.UTF_8)
+            ssl.outputStream.write(header)
+            ssl.outputStream.write(payload)
+            ssl.outputStream.flush()
+            val buffer=ByteArray(8192)
+            val response=ByteArrayOutputStream()
+            while(true){
+                val n=ssl.inputStream.read(buffer)
+                if(n<0)break
+                response.write(buffer,0,n)
+                if(response.size()>1024*1024)throw IllegalStateException("Secrets response завелика")
+            }
+            ssl.close()
+            val bytes=response.toByteArray()
+            var split=-1
+            if(bytes.size>=4){
+                for(i in 0..bytes.size-4){
+                    if(bytes[i]==13.toByte()&&bytes[i+1]==10.toByte()&&bytes[i+2]==13.toByte()&&bytes[i+3]==10.toByte()){
+                        split=i
+                        break
+                    }
+                }
+            }
+            if(split<0)throw IllegalStateException("Некоректна HTTPS-відповідь Secrets")
+            val headers=String(bytes,0,split,Charsets.ISO_8859_1)
+            val statusLine=headers.lineSequence().firstOrNull().orEmpty()
+            val code=statusLine.split(' ').getOrNull(1)?.toIntOrNull()
+                ?:throw IllegalStateException("Некоректний HTTP status Secrets")
+            if(headers.lineSequence().any{it.startsWith("Transfer-Encoding:",true)&&it.contains("chunked",true)})
+                throw IllegalStateException("Непідтримувана chunked-відповідь Secrets")
+            val bodyBytes=bytes.copyOfRange(split+4,bytes.size)
+            val text=bodyBytes.toString(Charsets.UTF_8)
+            val obj=if(text.isBlank())JSONObject() else JSONObject(text)
+            if(code>=400)throw IllegalStateException(obj.optString("error","HTTP $code"))
+            return obj
+        }finally{
+            runCatching{raw.close()}
+        }
+    }
+    private suspend fun secretJson(path:String,body:JSONObject):JSONObject=withContext(Dispatchers.IO){
+        directSecretRequest(path,"application/json",body.toString().toByteArray(Charsets.UTF_8))
     }
     suspend fun postGenericSecret(service:String,alias:String,type:String,values:JSONObject)=secretJson(
         "/api/native/home-edge/secrets/generic",
@@ -270,20 +331,29 @@ private class HomeApi {
         val obj=if(text.isBlank())JSONObject() else JSONObject(text);if(code>=400)throw IllegalStateException(obj.optString("error","HTTP $code"));obj
     }
     suspend fun uploadSecretFile(context:Context,uri:Uri):JSONObject=withContext(Dispatchers.IO){
-        val base=BuildConfig.HOME_EDGE_SECRET_BASE_URL.trim().trimEnd('/').takeIf{it.startsWith("https://")}
-            ?:throw IllegalStateException("Захищений канал Secrets недоступний")
-        val boundary="SkeletonSecret${System.currentTimeMillis()}"
-        val c=URL(base+"/api/native/home-edge/secrets/file").openConnection() as HttpURLConnection
-        c.connectTimeout=5000;c.readTimeout=20000;c.requestMethod="POST";c.doOutput=true;c.setRequestProperty("Accept","application/json");c.setRequestProperty("Content-Type","multipart/form-data; boundary=$boundary")
-        c.outputStream.buffered().use{out->
-            fun text(v:String){out.write(v.toByteArray(Charsets.UTF_8))}
-            text("--$boundary\r\nContent-Disposition: form-data; name=\"secret\"; filename=\"secret.json\"\r\nContent-Type: application/octet-stream\r\n\r\n")
-            context.contentResolver.openInputStream(uri)?.use{input->val buf=ByteArray(32*1024);var total=0;while(true){val n=input.read(buf);if(n<=0)break;total+=n;if(total>131072)throw IllegalStateException("Файл секрету завеликий");out.write(buf,0,n)}}?:throw IllegalStateException("Не вдалося прочитати файл")
-            text("\r\n--$boundary--\r\n")
-        }
-        val code=c.responseCode;val input=if(code>=400)c.errorStream else c.inputStream;val text=input?.bufferedReader(Charsets.UTF_8)?.use(BufferedReader::readText).orEmpty();c.disconnect()
-        val obj=if(text.isBlank())JSONObject() else JSONObject(text);if(code>=400)throw IllegalStateException(obj.optString("error","HTTP $code"));obj
+        val boundary="SkeletonSecret"+System.currentTimeMillis()
+        val payload=ByteArrayOutputStream()
+        fun text(v:String){payload.write(v.toByteArray(Charsets.UTF_8))}
+        text("--$boundary\r\nContent-Disposition: form-data; name=\"secret\"; filename=\"secret.json\"\r\nContent-Type: application/octet-stream\r\n\r\n")
+        context.contentResolver.openInputStream(uri)?.use{input->
+            val buf=ByteArray(32*1024)
+            var total=0
+            while(true){
+                val n=input.read(buf)
+                if(n<=0)break
+                total+=n
+                if(total>131072)throw IllegalStateException("Файл секрету завеликий")
+                payload.write(buf,0,n)
+            }
+        }?:throw IllegalStateException("Не вдалося прочитати файл")
+        text("\r\n--$boundary--\r\n")
+        directSecretRequest(
+            "/api/native/home-edge/secrets/file",
+            "multipart/form-data; boundary=$boundary",
+            payload.toByteArray(),
+        )
     }
+
 }
 
 private data class MediaEndpointUi(
