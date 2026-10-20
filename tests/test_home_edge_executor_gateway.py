@@ -11,7 +11,14 @@ from pathlib import Path
 
 import pytest
 
-from core.home_edge.executor import HomeEdgeExecRequest, HomeEdgeExecReceipt, PUBLIC_ERROR_MESSAGE, receipt_from_mapping, sign_request
+from core.home_edge.executor import (
+    HomeEdgeExecError,
+    HomeEdgeExecRequest,
+    HomeEdgeExecReceipt,
+    PUBLIC_ERROR_MESSAGE,
+    receipt_from_mapping,
+    sign_request,
+)
 from core.home_edge.executor_gateway import EXEC_HMAC_SECRET_ENV, LocalExecTransport, OpenSSHExecTransport, execute_home_edge_request
 from core.home_edge.profile import load_home_edge_profile
 from scripts import home_edge_exec
@@ -92,6 +99,56 @@ def test_gateway_uses_injected_transport_without_github_or_runner_polling() -> N
 
     assert receipt.status == "ok"
     assert receipt.stdout.strip() == "transport"
+
+
+def test_root_read_only_requires_approval_before_any_device_command_reaches_transport() -> None:
+    # Only tests root identity approval. Desktop-user read_only is not a no-write sandbox.
+    class FailingTransport:
+        adapter_name = "must_not_run"
+
+        def execute(self, _request, *, timeout_seconds: int):
+            raise AssertionError("privileged read_only request reached transport")
+
+    request = {
+        "request_id": "read-only-device-mutation",
+        "node_id": "home-edge-01",
+        "execution_lane": "read_only",
+        "run_as": "root",
+        "argv": ["python3", "-c", "open('/dev/synthetic-display-control', 'w').write('on')"],
+        "timeout_seconds": 5,
+        "timestamp": datetime.now(UTC).isoformat(),
+        "nonce": "read-only-device-mutation",
+        "signature": "sha256:not-used",
+        "public": True,
+    }
+
+    with pytest.raises(HomeEdgeExecError, match="root read_only requires"):
+        execute_home_edge_request(request, transport=FailingTransport())
+
+
+def test_root_read_only_requires_approval_before_any_private_file_command_reaches_transport() -> None:
+    # The command body is never inspected here; it is rejected by root-approval gating.
+    class FailingTransport:
+        adapter_name = "must_not_run"
+
+        def execute(self, _request, *, timeout_seconds: int):
+            raise AssertionError("privileged read_only request reached transport")
+
+    request = {
+        "request_id": "read-only-private-file-write",
+        "node_id": "home-edge-01",
+        "execution_lane": "read_only",
+        "run_as": "root",
+        "argv": ["python3", "-c", "open('/root/skeleton-private-state', 'w').write('secret')"],
+        "timeout_seconds": 5,
+        "timestamp": datetime.now(UTC).isoformat(),
+        "nonce": "read-only-private-file-write",
+        "signature": "sha256:not-used",
+        "public": True,
+    }
+
+    with pytest.raises(HomeEdgeExecError, match="root read_only requires"):
+        execute_home_edge_request(request, transport=FailingTransport())
 
 
 def test_controller_cli_without_request_id_sends_exact_final_signed_mapping(

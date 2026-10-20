@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from core.calendar_planning import reconcile_calendar_event
 from core.calendar_planning_models import hash_calendar_field
 from core.scheduler_models import thaw_json
 from core.travel_calendar_planning import (
@@ -106,6 +107,88 @@ def test_schedule_payloads_have_only_opaque_domain_refs() -> None:
     assert "trip:opaque-123" not in public
     assert "private:" not in public
     assert receipt["provider_identifiers_included"] is False
+
+
+def test_public_calendar_and_itinerary_summaries_do_not_expose_private_locations_or_routes() -> None:
+    private_location = "Apartment-7B-LateDoorCode"
+    private_route = "Route-ICE707-Seat12A"
+    value = TravelPlanCalendarInput(
+        trip_ref="trip:opaque-private-route",
+        lifecycle="PLANNED",
+        source_revision=4,
+        start_at=2_000_000,
+        end_at=2_100_000,
+        timezone="Europe/Berlin",
+        confirmed=True,
+        projection_roles=("family", "travel_primary", "work_absence"),
+        projection_field_hashes={
+            role: {
+                **role_hashes(role),
+                "location": hash_calendar_field(
+                    {
+                        "role": role,
+                        "location": private_location,
+                        "route": private_route,
+                    }
+                ),
+                "description": hash_calendar_field(
+                    f"{role}:{private_location}:{private_route}"
+                ),
+            }
+            for role in ("family", "travel_primary", "work_absence")
+        },
+        projection_payload_refs={
+            "family": "private:family:Apartment7B:ICE707",
+            "travel_primary": "private:travelPrimary:Apartment7B:ICE707",
+            "work_absence": "private:workAbsence:Apartment7B:ICE707",
+        },
+    )
+
+    schedules = build_travel_schedule_bundle(value, now=1_000_000)
+    itinerary_summary = schedule_bundle_public_receipt(value, schedules)
+    desired_by_role = {
+        item.projection_role: item for item in build_desired_calendar_events(value)
+    }
+    binding_by_role = {
+        item.projection_role: item
+        for item in build_initial_bindings(
+            value,
+            {
+                "family": "calendar:family",
+                "travel_primary": "calendar:travel",
+                "work_absence": "calendar:work",
+            },
+        )
+    }
+    calendar_summary = reconcile_calendar_event(
+        desired_by_role["travel_primary"],
+        binding_by_role["travel_primary"],
+        remote=None,
+    ).public_receipt()
+
+    public = json.dumps(
+        {"calendar": calendar_summary, "itinerary": itinerary_summary},
+        sort_keys=True,
+    )
+    private = json.dumps(
+        {
+            "desired": [
+                item.private_payload_ref
+                for item in desired_by_role.values()
+            ],
+            "field_hash_source_terms": [private_location, private_route],
+        },
+        sort_keys=True,
+    )
+    assert "Apartment7B" in private
+    assert "ICE707" in private
+    assert private_location not in public
+    assert private_route not in public
+    assert "Apartment7B" not in public
+    assert "ICE707" not in public
+    assert "trip:opaque-private-route" not in public
+    assert calendar_summary["private_identifiers_included"] is False
+    assert itinerary_summary["private_identifiers_included"] is False
 
 
 def test_schedule_ids_are_stable_and_unique() -> None:
