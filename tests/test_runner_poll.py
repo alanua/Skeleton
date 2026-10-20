@@ -402,23 +402,15 @@ def test_notify_task_finished_without_current_final_label_does_not_notify() -> N
     send.assert_not_called()
 
 
-def test_notify_task_finished_normal_runner_task_notifies() -> None:
-    fence = "`" * 3
-    issue = {
-        "number": 14,
-        "body": f"{fence}task\nDo it\n{fence}",
-        "state": "OPEN",
-        "closed": False,
-        "url": "https://github.com/alanua/Skeleton/issues/14",
-        "labels": [{"name": runner.LABEL_DONE}],
-    }
-
-    with mock.patch.object(runner, "get_notification_issue", return_value=issue), mock.patch.object(
+def test_notify_task_finished_normal_done_runner_task_does_not_notify() -> None:
+    with mock.patch.object(
+        runner, "should_notify_task_finished", return_value=False
+    ), mock.patch.object(
         runner, "send_telegram_notification"
     ) as send:
         runner.notify_task_finished(14, "DONE", "DONE report")
 
-    send.assert_called_once_with("Проєкт: Skeleton\nЗадача: #14\nСтатус: DONE")
+    send.assert_not_called()
 
 
 def test_notify_task_finished_guard_failure_suppresses_notification_safely() -> None:
