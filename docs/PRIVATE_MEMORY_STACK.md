@@ -41,6 +41,7 @@ All runtime files stay under one configured private root:
 - `mempalace.index.json`: derived semantic index
 - `graphify.index.json`: derived relationship index
 - `backups/*.sqlite`: local SQLite snapshots
+- `backups/*.manifest.json`: local bounded backup manifests
 - `memory_gateway_import.sqlite`: local receipt database for the approved Memory Gateway manifest import path
 
 The private root is created with mode `0700`. SQLite and derived files are written with mode `0600`. SQLite WAL and integrity checks are enabled where supported.
@@ -54,6 +55,14 @@ After every successful canonical put or delete, both derived indexes are rebuilt
 If an index rebuild fails after a canonical mutation is committed, canonical SQLite remains the sole authority and the CLI reports a degraded receipt with the affected derived index names. Retry uses the gateway idempotency record and canonical transaction reference, so a crash after canonical commit cannot write a second mutation or advance the revision twice. Rollback for pre-commit canonical failures uses a logical SQLite backup made through SQLite's backup API instead of raw database bytes and removes stale `-wal` and `-shm` sidecars before reporting the mutation as blocked.
 
 Graphify and MemPalace never write canonical SQLite directly.
+
+## Backup and Recovery
+
+`skeleton-memory backup` creates a local SQLite snapshot plus a bounded manifest beside it. The manifest binds the canonical schema version, canonical revision, aggregate counts, SQLite schema fingerprint, bounded file size, SHA-256 hash class, creation timestamp, and local backup creator. Public stack receipts expose only status, snapshot id, revision, hash class, counts, and creation metadata; they do not expose private records, values, local paths, or the raw content hash.
+
+Backup verification rejects snapshots that are corrupt, truncated, have the wrong schema/version/fingerprint, fail integrity/readback checks, or no longer match their manifest. Verification also compares the snapshot revision with the current canonical SQLite revision so a stale backup is classified as `STALE` instead of silently replacing a newer canonical database.
+
+Dry-run restore verifies the manifest and copies the snapshot into an isolated temporary target for integrity and readback checks. It never replaces `canonical.sqlite`. A successful dry-run reports `activation_required=true` and `activated=false`; actual replacement requires a separate later operator/runtime restore activation gate. After any real restore, MemPalace, Graphify, and Cognee projections are treated as rebuildable, non-authoritative derived state.
 
 The automatic cross-domain lifecycle is documented in `docs/memory_lifecycle.md`. It resolves operator/domain/scope before tasks, recalls bounded relevant context through `MemoryGateway`, classifies durable candidates after meaningful events, writes accepted candidates through typed gateway mutations, and returns private runtime results plus public-safe receipts.
 

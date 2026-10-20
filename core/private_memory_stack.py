@@ -16,7 +16,13 @@ from core.graphify_adapter import LocalGraphifyIndex
 from core.memory_gateway import MEMORY_GATEWAY_REQUEST_SCHEMA, MemoryGateway, capability_token
 from core.mempalace_adapter import LocalMemPalaceIndex
 from core.private_memory import CanonicalPrivateMemoryStore
-from core.private_memory_backup import create_snapshot
+from core.private_memory_backup import (
+    create_snapshot,
+    dry_run_restore_snapshot,
+    load_snapshot_manifest,
+    snapshot_file_path,
+    verify_snapshot,
+)
 from core.private_memory_bundle import (
     PRIVATE_MEMORY_IMPORT_RECEIPT_NAMESPACE,
     cleanup_pre_operation_snapshot,
@@ -214,15 +220,66 @@ class PrivateMemoryStack:
             self._require_ready(allow_stale=True)
         self.paths.backups.mkdir(parents=True, exist_ok=True)
         _chmod_dir(self.paths.backups)
-        manifest = create_snapshot(self.paths.db, self.paths.backups, snapshot_id=snapshot_id)
+        snapshot_manifest = create_snapshot(self.paths.db, self.paths.backups, snapshot_id=snapshot_id)
+        manifest = load_snapshot_manifest(self.paths.backups, str(snapshot_manifest["snapshot_id"]))
         _chmod_private_tree(self.paths.backups)
         return {
             "schema": "skeleton.private_memory_stack.backup.v1",
             "status": "DONE",
             "snapshot_id": manifest["snapshot_id"],
             "canonical_revision": manifest["canonical_revision"],
+            "hash_class": manifest["hash_class"],
             "aggregate_counts": manifest["aggregate_counts"],
+            "manifest": {
+                "schema": manifest["schema"],
+                "created_at": manifest["created_at"],
+                "file_size_bytes": manifest["file_size_bytes"],
+            },
         }
+
+    def verify_backup(self, *, snapshot_id: str) -> dict[str, object]:
+        with _exclusive_lock(self.paths.lock):
+            manifest = load_snapshot_manifest(self.paths.backups, snapshot_id)
+            snapshot_path = snapshot_file_path(self.paths.backups, snapshot_id)
+            report = verify_snapshot(snapshot_path, manifest, current_db_path=self.paths.db)
+            return {
+                "schema": "skeleton.private_memory_stack.backup_verify.v1",
+                "status": report["status"],
+                "snapshot_id": report["snapshot_id"],
+                "canonical_revision": report["canonical_revision"],
+                "current_canonical_revision": report["current_canonical_revision"],
+                "revision_classification": report["revision_classification"],
+                "hash_class": report["hash_class"],
+                "aggregate_counts": report["aggregate_counts"],
+                "next_operator_action": report["next_operator_action"],
+                **({"error_class": report["error_class"]} if report.get("error_class") else {}),
+            }
+
+    def dry_run_restore(self, *, snapshot_id: str) -> dict[str, object]:
+        with _exclusive_lock(self.paths.lock):
+            manifest = load_snapshot_manifest(self.paths.backups, snapshot_id)
+            snapshot_path = snapshot_file_path(self.paths.backups, snapshot_id)
+            report = dry_run_restore_snapshot(
+                snapshot_path,
+                manifest,
+                current_db_path=self.paths.db,
+                scratch_dir=self.paths.backups,
+            )
+            return {
+                "schema": "skeleton.private_memory_stack.restore_dry_run.v1",
+                "status": report["status"],
+                "snapshot_id": report["snapshot_id"],
+                "canonical_revision": report["canonical_revision"],
+                "current_canonical_revision": report["current_canonical_revision"],
+                "revision_classification": report["revision_classification"],
+                "hash_class": report["hash_class"],
+                "aggregate_counts": report["aggregate_counts"],
+                "derived_projections_rebuild_required": report["derived_projections_rebuild_required"],
+                "activation_required": report["activation_required"],
+                "activated": report["activated"],
+                "next_operator_action": report["next_operator_action"],
+                **({"error_class": report["error_class"]} if report.get("error_class") else {}),
+            }
 
     def import_bundle(
         self,
