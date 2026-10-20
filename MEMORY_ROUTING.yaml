@@ -1,6 +1,46 @@
 schema: skeleton.memory_routing.v1
 status: DRAFT_ACTIVE_CANDIDATE
 
+memorygateway_primary_rule:
+  authority: operator_approved_2026_09_09
+  durable_memory: hetzner_memorygateway_canonical_sqlite
+  required_before_missing_context_claim:
+    - memory.lookup_exact
+    - memory.private_read_exact_when_private_scope
+    - memory.private_list_exact_when_private_scope
+    - memory.search_semantic_when_useful
+    - graph.query_code_when_useful
+  write_rule:
+    - important_durable_information_must_be_classified_then_persisted_through_memorygateway
+    - canonical_write_must_use_memorygateway_not_direct_sqlite
+    - canonical_write_is_incomplete_until_exact_readback_verifies_record_and_revision
+  authority_order:
+    - canonical_memorygateway_exact_state
+    - approved_public_github_canon_when_applicable
+    - derived_semantic_and_graph_results
+    - chat_continuity_context
+  derived_layers:
+    authoritative: false
+    includes:
+      - cognee
+      - mempalace
+      - graphify
+    rule: derived_results_must_not_become_canonical_without_exact_confirmation
+  chatgpt_memory:
+    role: convenience_continuity_only
+    authoritative: false
+    canon: false
+  home_edge:
+    role: execution_node_only
+    memory_authority: false
+    rule: do_not_route_memory_through_home_edge_unless_current_skeleton_control_path_explicitly_requires_it
+  secrets:
+    target: bitwarden
+    plaintext_in_memorygateway: forbidden
+    plaintext_in_github: forbidden
+    plaintext_in_chat: forbidden
+    memorygateway_may_store: opaque_secret_reference_only
+
 behavior_playbook:
   routine_safe_helper_steps:
     trigger: approved_helper_step_is_same_scope_read_only_or_current_scope_only_and_not_risky
@@ -46,9 +86,9 @@ routes:
     fixuy_rule: record_after_classification_in_private_memory
 
   secrets_credentials:
-    target: local_encrypted_store_or_secret_manager
+    target: bitwarden
     means: keys, credentials, tokens, identity documents, and production secrets
-    fixuy_rule: refuse_chat_GitHub_plain_storage_require_secret_manager_or_local_encrypted_route
+    fixuy_rule: refuse_chat_GitHub_plain_storage_require_bitwarden_and_allow_only_opaque_secret_reference_in_memorygateway
 
   temporary_noise:
     target: no_persist

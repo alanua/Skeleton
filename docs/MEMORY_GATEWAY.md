@@ -2,6 +2,23 @@
 
 The Memory Gateway is a bounded synthetic contract for namespace-scoped memory and code-graph access. It does not install Graphify or MemPalace and does not expose storage-specific APIs to Hermes.
 
+## Default continuity rule
+
+For serious Skeleton work, MemoryGateway is the first durable memory and retrieval path. Before concluding that important context is absent, the control layer must query MemoryGateway using exact canonical lookup/read/list first and may then use semantic or graph retrieval when useful.
+
+Important durable information must be classified before persistence. Canonical approved facts, rules, preferences, and decisions are written only through the MemoryGateway canonical path; direct SQLite writes are not a valid continuity shortcut. A canonical write is complete only after exact readback verifies the intended record and canonical revision.
+
+Lookup order and authority:
+
+1. Exact canonical MemoryGateway state is authoritative.
+2. Approved public GitHub canon remains authoritative for public-safe reviewed control/code material in its scope.
+3. MemPalace, Cognee, and Graphify are derived retrieval/index layers and are non-authoritative until exact canonical confirmation.
+4. ChatGPT memory is convenience continuity only and is never Skeleton canon or proof that durable state was written.
+
+Secrets, passwords, API keys, OAuth secrets, tokens, SSH private keys, app passwords, and equivalent credentials belong in Bitwarden. MemoryGateway may hold only a safe opaque secret reference where needed; secret plaintext must not be stored in MemoryGateway, GitHub, or chat.
+
+Home Edge is an execution node, not memory authority. Memory operations must not be routed through Home Edge unless the current reviewed Skeleton control path explicitly requires that transport.
+
 ## Contract
 
 - Requests use `skeleton.memory_gateway.request.v1`.
