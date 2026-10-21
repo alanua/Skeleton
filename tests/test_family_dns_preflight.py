@@ -16,6 +16,8 @@ def test_preflight_cli_prints_nonmutating_public_packet(capsys) -> None:
     assert packet["mutation_allowed"] is False
     assert packet["runtime_switch_allowed"] is False
     assert packet["preflight_requests"][0]["request_id"].startswith("unit-family-dns-")
+    assert "stage_b_registered_approved_control" in packet["policy"]["stages"][1]["blocked_until"]
+    assert packet["policy"]["stages"][1]["gates"][0]["passed"] is False
     assert packet["policy"]["expectations"]["android_system_dot_certificate_required"] is False
     assert packet["policy"]["expectations"]["preferred_away_path"] == "existing_encrypted_tailscale_tunnel_to_private_dns"
     assert "not_sent" in packet["policy"]["expectations"]["outcome_model"]

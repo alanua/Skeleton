@@ -61,16 +61,24 @@ class LanEvidence:
     captive_portal_failure_cases: bool = True
 
 
+@dataclass(frozen=True)
+class ControlEvidence:
+    stage_b_registered_approved_control: bool = False
+    stage_c_registered_approved_control: bool = False
+
+
 def build_rollout_policy(
     *,
     lan: LanEvidence | None = None,
     clients: Sequence[ClientEvidence] = (),
+    controls: ControlEvidence | None = None,
     generated_at: str | None = None,
 ) -> dict[str, Any]:
     lan = lan or LanEvidence()
+    controls = controls or ControlEvidence()
     stage_a = _stage_a(lan, clients)
-    stage_b = _stage_b(stage_a)
-    stage_c = _stage_c(stage_b, clients)
+    stage_b = _stage_b(stage_a, controls)
+    stage_c = _stage_c(stage_b, clients, controls)
     stage_d = _stage_d(stage_c, clients, lan)
     return {
         "schema": SCHEMA,
@@ -107,10 +115,11 @@ def build_preflight_packet(
     *,
     lan: LanEvidence | None = None,
     clients: Sequence[ClientEvidence] = (),
+    controls: ControlEvidence | None = None,
     request_prefix: str = "family-dns-stage-a",
     generated_at: str | None = None,
 ) -> dict[str, Any]:
-    policy = build_rollout_policy(lan=lan, clients=clients, generated_at=generated_at)
+    policy = build_rollout_policy(lan=lan, clients=clients, controls=controls, generated_at=generated_at)
     return {
         "schema": PREFLIGHT_SCHEMA,
         "generated_at": policy["generated_at"],
@@ -214,25 +223,47 @@ def _stage_a(lan: LanEvidence, clients: Sequence[ClientEvidence]) -> dict[str, A
     }
 
 
-def _stage_b(stage_a: Mapping[str, Any]) -> dict[str, Any]:
+def _stage_b(stage_a: Mapping[str, Any], controls: ControlEvidence) -> dict[str, Any]:
+    gates = [
+        _gate(
+            "stage_b_registered_approved_control",
+            controls.stage_b_registered_approved_control,
+            "Stage B mutation requires an existing registered approved control.",
+        )
+    ]
     return {
         "stage": "B",
         "name": "proposed_tailnet_only_secondary_adguard_bind",
         "outcome": Outcome.NOT_SENT.value,
         "mutation_allowed": False,
-        "blocked_until": ["stage_A_all_blockers_clear", "operator_approval", "registered_control_available"],
+        "blocked_until": [
+            "stage_A_all_blockers_clear",
+            "operator_approval",
+            "stage_b_registered_approved_control",
+            "existing_secondary_adguard_available",
+        ],
         "proposal": _stage_b_mutation(),
+        "gates": gates,
         "rollback_required_if": [
             "tailnet_listener_probe_fails",
             "normal_lan_dns_probe_fails",
             "public_or_wan_listener_detected",
             "service_order_or_restart_guard_fails",
         ],
-        "ready": not policy_blockers({"stages": [stage_a]}),
+        "ready": not policy_blockers({"stages": [stage_a, {"gates": gates}]}),
     }
 
 
-def _stage_c(stage_b: Mapping[str, Any], clients: Sequence[ClientEvidence]) -> dict[str, Any]:
+def _stage_c(stage_b: Mapping[str, Any], clients: Sequence[ClientEvidence], controls: ControlEvidence) -> dict[str, Any]:
+    gates = [
+        _gate("all_client_reachability", _all(clients, "away_reachability_verified"), "Every enrolled client can reach the private DNS server."),
+        _gate("independent_resolver_attestation", _all(clients, "resolver_attested_independently"), "Each client has independent resolver attestation."),
+        _gate(
+            "stage_c_registered_approved_control",
+            controls.stage_c_registered_approved_control,
+            "Stage C DNS change requires an existing registered approved control.",
+        ),
+    ]
     return {
         "stage": "C",
         "name": "proposed_tailscale_global_nameserver",
@@ -245,14 +276,12 @@ def _stage_c(stage_b: Mapping[str, Any], clients: Sequence[ClientEvidence]) -> d
             "windows_dns_settings_verified",
             "family_client_dns_settings_verified",
             "operator_approval",
+            "stage_c_registered_approved_control",
         ],
         "proposal": _stage_c_mutation(),
-        "gates": [
-            _gate("all_client_reachability", _all(clients, "away_reachability_verified"), "Every enrolled client can reach the private DNS server."),
-            _gate("independent_resolver_attestation", _all(clients, "resolver_attested_independently"), "Each client has independent resolver attestation."),
-        ],
+        "gates": gates,
         "fallback": "rollback_tailscale_dns_to_previous_settings_if_magicdns_or_resolution_fails",
-        "ready": stage_b.get("outcome") == Outcome.PHYSICALLY_VERIFIED.value,
+        "ready": stage_b.get("outcome") == Outcome.PHYSICALLY_VERIFIED.value and not policy_blockers({"stages": [{"gates": gates}]}),
     }
 
 
@@ -298,12 +327,15 @@ def _stage_b_mutation() -> dict[str, Any]:
         ],
         "safeguards": [
             "backup_existing_adguard_config",
+            "fail_closed_if_secondary_unavailable",
             "service_order_guard",
             "restart_only_existing_adguard_service",
             "live_probe_from_redmi",
             "normal_lan_dns_probe",
             "rollback_on_failed_probe",
         ],
+        "requires_existing_secondary_adguard": True,
+        "requires_registered_approved_control": True,
         "forbidden_bindings": list(PUBLIC_DNS_BINDING_FORBIDDEN),
         "status": "design_only_not_applied",
     }

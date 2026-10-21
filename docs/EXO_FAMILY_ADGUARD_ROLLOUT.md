@@ -51,6 +51,8 @@ After Stage A clears, a future approved mutation may bind the existing
 secondary AdGuard DNS service to the Home Edge tailnet address only. The design
 requires backup, service-order safeguards, restart safeguards, a live Redmi
 probe, normal LAN DNS probe and rollback if listener checks or DNS checks fail.
+It fails closed unless an existing secondary AdGuard service is verified
+available and the Stage B mutation control is already registered and approved.
 
 The proposed operation is design-only in this PR:
 `family_dns_bind_secondary_adguard_tailnet_v1`.
