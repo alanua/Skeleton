@@ -500,6 +500,8 @@ capabilities:
     deployment_state: NOT_DEPLOYED
     external_repository: alanua/skeleton-media
     external_transcription_dependency: "alanua/skeleton-media#71"
+    external_source_sha: e4531a3aad4a830b9d3dd5b55c8eff7f444e6a5d
+    external_source_merge_state: merged_source_only
     operation_ids:
       - video_understand_url
       - video_import_urls
@@ -515,4 +517,4 @@ capabilities:
       - schemas/video_transcribe_ingress.schema.json
       - docs/VIDEO_GLOBAL_GATE_SOURCE_HANDOFF.md
       - tests/test_global_video_transcribe_ingress.py
-    description: Protected source-only catalog/typed-ingress proposal for one universal media provider. No registered connector, no deployed executor, no Gate activation, no chat-local worker, and no changes to the two-tool Control MCP. External ninth operation remains Draft PR #71.
+    description: Protected source-only catalog/typed-ingress proposal for one universal media provider. No registered connector, no deployed executor, no Gate activation, no chat-local worker, and no changes to the two-tool Control MCP. External ninth operation source merged from PR #71; Gate and runtime remain inactive.
