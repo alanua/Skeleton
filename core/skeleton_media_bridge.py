@@ -7,7 +7,7 @@ from types import ModuleType
 from typing import Any, Callable, Protocol
 
 SKELETON_MEDIA_REPOSITORY = "alanua/skeleton-media"
-SKELETON_MEDIA_REQUIRED_SHA = "e4531a3aad4a830b9d3dd5b55c8eff7f444e6a5d"
+SKELETON_MEDIA_REQUIRED_SHA = "7089b1ba37292aab0283cadb8ac85644cc3d28f8"
 CANONICAL_HOME_MEDIA_ENDPOINT_SCHEMA = "skeleton.home.media_endpoints.v1"
 
 _EXTERNAL_PREFIX = "skeleton_media"
@@ -346,6 +346,8 @@ def _require_capability(endpoint: MediaEndpoint, action: str) -> None:
 # Keep the existing 2-tool Skeleton Control MCP surface unchanged.
 GLOBAL_VIDEO_PROVIDER_ID = "skeleton.video_understanding.global"
 VIDEO_TRANSCRIPT_SOURCE_DEPENDENCY_PR = "alanua/skeleton-media#71"
+# Source-only candidate: not yet a runtime-approved/CI-pinned external package.
+VIDEO_TRANSCRIPT_SOURCE_SHA = "e4531a3aad4a830b9d3dd5b55c8eff7f444e6a5d"
 GLOBAL_VIDEO_OPERATIONS = (
     "video_understand_url",
     "video_import_urls",
@@ -375,7 +377,7 @@ def global_video_provider_catalog() -> dict[str, Any]:
         "runtime_registered": False,
         "live_runtime_execution": False,
         "required_external_source_pr": VIDEO_TRANSCRIPT_SOURCE_DEPENDENCY_PR,
-        "external_source_sha": SKELETON_MEDIA_REQUIRED_SHA,
+        "external_source_sha": VIDEO_TRANSCRIPT_SOURCE_SHA,
         "control_mcp_tools_changed": False,
         "shared_worker_policy": "ONE_EXISTING_VIDEO_WORKER",
         "shared_queue_policy": "ONE_EXISTING_VIDEO_QUEUE",
