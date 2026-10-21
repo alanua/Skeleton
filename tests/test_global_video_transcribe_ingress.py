@@ -45,10 +45,10 @@ def test_one_global_catalog_and_nine_semantic_actions_without_activation() -> No
     assert "video_understand_url" in catalog["operations"]
     assert catalog["required_external_source_pr"] == "alanua/skeleton-media#71"
     assert catalog["external_source_sha"] == media.SKELETON_MEDIA_REQUIRED_SHA
-    assert registered["external_source_sha"] == catalog["external_source_sha"]
-    assert registered["external_source_merge_state"] == "merged_source_only"
 
     registered = REGISTRY["capabilities"]["video_understanding_global"]
+    assert registered["external_source_sha"] == catalog["external_source_sha"]
+    assert registered["external_source_merge_state"] == "merged_source_only"
     assert registered["provider_count"] == 1
     assert registered["provider_id"] == catalog["provider_id"]
     assert registered["operation_ids"] == catalog["operations"]
