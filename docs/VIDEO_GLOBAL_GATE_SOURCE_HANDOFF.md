@@ -4,16 +4,14 @@ Status: **DRAFT / SOURCE_ONLY / NOT_REGISTERED_IN_RUNTIME / NOT_DEPLOYED**.
 This document does not authorize merge, Gate activation, runner pickup, Home Edge/DE-PC operations,
 MCP tool changes, secrets or media ingestion.
 
-## Current exact source authority (verified 2026-10-20)
+## Current exact source authority (reverified 2026-10-21)
 
-- Core base: `alanua/Skeleton` `b11c18a3dba5b1b797142002055bb867c41d3b0f` at branch creation; recheck before merge.
-- Current external production source main (NOT installed runtime): `alanua/skeleton-media`
-  `e234c86469467dd2131a6bf5e0c1250ccef1d686` (PRs #66, #69, #70 merged).
-- Additional typed plan-only media operation `video_transcribe_url` is proposed in external **Draft PR #71**,
-  exact head `638de9059138ab800b6d6ad166df24be2c1ba825`, **not merged**.
-- Core's active legacy external pin remains `7089b1ba37292aab0283cadb8ac85644cc3d28f8`.
-  **Do not update the pin or add an import allowlist entry now.** The external PR and exact
-  package provenance must be reviewed and merged separately.
+- Core base: `alanua/Skeleton` `b11c18a3dba5b1b797142002055bb867c41d3b0f` at branch creation; recheck before protected merge.
+- External `alanua/skeleton-media/main`: `e4531a3aad4a830b9d3dd5b55c8eff7f444e6a5d` (GitHub verified, **source-only**, not installed runtime). Media PRs #66, #69, #70 and #71 are merged.
+- Ninth typed plan-only `video_transcribe_url` operation was merged from media PR #71,
+  approved exact head `638de9059138ab800b6d6ad166df24be2c1ba825`.
+- Protected Core **Draft PR #4816** proposes updating `SKELETON_MEDIA_REQUIRED_SHA` to exact merged media `e4531a3aad4a830b9d3dd5b55c8eff7f444e6a5d`. Core's deployed/merged `main` still pins `7089b1ba37292aab0283cadb8ac85644cc3d28f8` until separate protected approval. No runtime pin was changed.
+- Media `video_understanding.operations` is **NOT** added to `_SUPPORTED_MODULES`: this Draft does not authorize imports, live execution, second provider or any connector/app action.
 
 ## One provider, no second conveyor
 
@@ -64,10 +62,8 @@ boundary must be identified and explicitly operator-approved separately.
 
 ## Protected activation checklist — separate authority required
 
-1. Review/merge external media Draft #71 independently with exact-head
-   tests and strict operation-plan privacy check.
-2. Re-audit latest Skeleton Core and external media SHAs; review exact
-   source/package pin update and typed global provider ingress diffs.
+1. **SOURCE-ONLY DONE:** media PR #71 merged at exact approved head; external media main verified `e4531a3aad4a830b9d3dd5b55c8eff7f444e6a5d`. This is not a runtime deployment.
+2. Review latest Skeleton Core and media SHAs; protected Draft #4816 proposes exact source pin update and typed global provider ingress. No approved protected merge or installed runtime parity yet.
 3. Resolve authenticated connector principal and host-native Gate
    decision source; deny forged/expired/replayed identities and requests.
    Validate the same provider from at least two synthetic ancillary
