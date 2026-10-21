@@ -10,7 +10,7 @@ from core import skeleton_media_bridge as bridge
 
 def test_canonical_media_repository_and_required_sha_are_explicit() -> None:
     assert bridge.SKELETON_MEDIA_REPOSITORY == "alanua/skeleton-media"
-    assert bridge.SKELETON_MEDIA_REQUIRED_SHA == "7089b1ba37292aab0283cadb8ac85644cc3d28f8"
+    assert bridge.SKELETON_MEDIA_REQUIRED_SHA == "e4531a3aad4a830b9d3dd5b55c8eff7f444e6a5d"
 
 
 def test_missing_external_package_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -211,6 +211,9 @@ def test_global_video_source_catalog_is_one_inactive_provider() -> None:
     assert declared["runtime_registered"] is False
     assert declared["deployment_state"] == "NOT_DEPLOYED"
     assert declared["external_transcription_dependency"] == "alanua/skeleton-media#71"
+    assert declared["external_source_sha"] == bridge.SKELETON_MEDIA_REQUIRED_SHA
+    assert declared["external_source_merge_state"] == "merged_source_only"
+    assert catalog["external_source_sha"] == bridge.SKELETON_MEDIA_REQUIRED_SHA
     assert schema["additionalProperties"] is False
     assert set(schema["required"]) == {"operation", "url"}
     assert schema["properties"]["operation"]["const"] == "video_transcribe_url"
