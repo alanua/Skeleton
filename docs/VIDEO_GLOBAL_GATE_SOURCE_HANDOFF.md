@@ -10,7 +10,7 @@ MCP tool changes, secrets or media ingestion.
 - External `alanua/skeleton-media/main`: `e4531a3aad4a830b9d3dd5b55c8eff7f444e6a5d` (GitHub verified, **source-only**, not installed runtime). Media PRs #66, #69, #70 and #71 are merged.
 - Ninth typed plan-only `video_transcribe_url` operation was merged from media PR #71,
   approved exact head `638de9059138ab800b6d6ad166df24be2c1ba825`.
-- Protected Core **Draft PR #4816** proposes updating `SKELETON_MEDIA_REQUIRED_SHA` to exact merged media `e4531a3aad4a830b9d3dd5b55c8eff7f444e6a5d`. Core's deployed/merged `main` still pins `7089b1ba37292aab0283cadb8ac85644cc3d28f8` until separate protected approval. No runtime pin was changed.
+- Protected Core **Draft PR #4816** preserves `SKELETON_MEDIA_REQUIRED_SHA=7089b1ba37292aab0283cadb8ac85644cc3d28f8` exactly, both in Draft and on `main`. The current protected `Skeleton Media contract` GitHub workflow installs that exact legacy source SHA and hard-asserts this pin; changing it without a separately approved protected workflow migration breaks provenance CI. The merged source SHA `e4531a3aad4a830b9d3dd5b55c8eff7f444e6a5d` is recorded separately as **`VIDEO_TRANSCRIPT_SOURCE_SHA`** and a source-only registry candidate, NOT as an installed or executable package.
 - Media `video_understanding.operations` is **NOT** added to `_SUPPORTED_MODULES`: this Draft does not authorize imports, live execution, second provider or any connector/app action.
 
 ## One provider, no second conveyor
@@ -63,7 +63,7 @@ boundary must be identified and explicitly operator-approved separately.
 ## Protected activation checklist — separate authority required
 
 1. **SOURCE-ONLY DONE:** media PR #71 merged at exact approved head; external media main verified `e4531a3aad4a830b9d3dd5b55c8eff7f444e6a5d`. This is not a runtime deployment.
-2. Review latest Skeleton Core and media SHAs; protected Draft #4816 proposes exact source pin update and typed global provider ingress. No approved protected merge or installed runtime parity yet.
+2. Review latest Core and media SHAs. Protected Draft #4816 records merged media candidate separately and includes typed global ingress; runtime pin remains unchanged. Independently authorize a later CI workflow/pin migration, then verify installed package parity before any Gate activation.
 3. Resolve authenticated connector principal and host-native Gate
    decision source; deny forged/expired/replayed identities and requests.
    Validate the same provider from at least two synthetic ancillary
