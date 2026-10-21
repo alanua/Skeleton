@@ -482,3 +482,39 @@ capabilities:
     tested: true
     added: "2026-08-26"
     description: Protected typed no-argument sudo/forced-command gateway with exact trust anchors, persistent cached idempotency, conservative mutation receipts, and no generic root shell authority.
+
+  video_understanding_global:
+    status: stage1_dry_run
+    module: core/skeleton_media_bridge.py
+    entry: global_video_provider_catalog
+    stage: protected_source_only_not_registered
+    live_runtime_execution: false
+    protected: true
+    tested: true
+    added: "2026-10-20"
+    provider_id: skeleton.video_understanding.global
+    provider_count: 1
+    worker_policy: one_existing_video_worker
+    queue_policy: one_existing_video_queue
+    runtime_registered: false
+    deployment_state: NOT_DEPLOYED
+    external_repository: alanua/skeleton-media
+    external_transcription_dependency: "alanua/skeleton-media#71"
+    external_source_sha: e4531a3aad4a830b9d3dd5b55c8eff7f444e6a5d
+    external_source_merge_state: merged_source_only
+    operation_ids:
+      - video_understand_url
+      - video_import_urls
+      - video_process_one
+      - video_status
+      - video_doctor
+      - video_query
+      - video_reprocess
+      - video_attach_to_project
+      - video_transcribe_url
+    requires:
+      - core/skeleton_media_bridge.py
+      - schemas/video_transcribe_ingress.schema.json
+      - docs/VIDEO_GLOBAL_GATE_SOURCE_HANDOFF.md
+      - tests/test_global_video_transcribe_ingress.py
+    description: Protected source-only catalog/typed-ingress proposal for one universal media provider. No registered connector, no deployed executor, no Gate activation, no chat-local worker, and no changes to the two-tool Control MCP. External ninth operation source merged from PR #71; Gate and runtime remain inactive.
