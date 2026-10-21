@@ -7,7 +7,7 @@ from types import ModuleType
 from typing import Any, Callable, Protocol
 
 SKELETON_MEDIA_REPOSITORY = "alanua/skeleton-media"
-SKELETON_MEDIA_REQUIRED_SHA = "7089b1ba37292aab0283cadb8ac85644cc3d28f8"
+SKELETON_MEDIA_REQUIRED_SHA = "e4531a3aad4a830b9d3dd5b55c8eff7f444e6a5d"
 CANONICAL_HOME_MEDIA_ENDPOINT_SCHEMA = "skeleton.home.media_endpoints.v1"
 
 _EXTERNAL_PREFIX = "skeleton_media"
