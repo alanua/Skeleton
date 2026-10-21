@@ -44,6 +44,9 @@ def test_one_global_catalog_and_nine_semantic_actions_without_activation() -> No
     assert "video_transcribe_url" in catalog["operations"]
     assert "video_understand_url" in catalog["operations"]
     assert catalog["required_external_source_pr"] == "alanua/skeleton-media#71"
+    assert catalog["external_source_sha"] == media.SKELETON_MEDIA_REQUIRED_SHA
+    assert registered["external_source_sha"] == catalog["external_source_sha"]
+    assert registered["external_source_merge_state"] == "merged_source_only"
 
     registered = REGISTRY["capabilities"]["video_understanding_global"]
     assert registered["provider_count"] == 1
@@ -168,7 +171,7 @@ def test_invalid_mode_and_asr_type_fail_closed() -> None:
 
 def test_existing_media_route_and_mcp_boundary_remain_unchanged() -> None:
     assert media.SKELETON_MEDIA_REPOSITORY == "alanua/skeleton-media"
-    assert media.SKELETON_MEDIA_REQUIRED_SHA == "7089b1ba37292aab0283cadb8ac85644cc3d28f8"
+    assert media.SKELETON_MEDIA_REQUIRED_SHA == "e4531a3aad4a830b9d3dd5b55c8eff7f444e6a5d"
     with pytest.raises(media.SkeletonMediaDependencyError, match="unsupported_skeleton_media_module"):
         media.dependency_source("video_understanding.operations")
     assert "video_understanding.operations" not in media._SUPPORTED_MODULES
