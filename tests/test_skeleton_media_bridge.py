@@ -266,3 +266,20 @@ def test_global_video_ingress_is_gate_injected_and_public_receipt_is_private_saf
         bridge.plan_global_video_transcribe_ingress(
             payload, authenticated_caller="synthetic-alpha", trusted_gate_check=None,
         )
+
+
+# The media-contract workflow explicitly selects only this existing smoke file.
+# Re-export the dedicated synthetic ingress tests here so every new protected
+# contract gets full negative Gate/privacy/schema coverage on exact-head CI.
+# Pytest preserves parametrize marks on imported test functions.
+from test_global_video_transcribe_ingress import (  # noqa: E402,F401
+    test_arbitrary_operator_and_runtime_controls_are_rejected,
+    test_cross_ancillary_is_same_provider_without_private_data_in_public_receipt,
+    test_existing_media_route_and_mcp_boundary_remain_unchanged,
+    test_invalid_mode_and_asr_type_fail_closed,
+    test_missing_denied_and_crashing_gate_never_builds_private_plan,
+    test_missing_or_unauthorized_authenticated_caller_fails_closed,
+    test_one_global_catalog_and_nine_semantic_actions_without_activation,
+    test_schema_proves_no_user_controlled_gate_or_private_runtime_fields,
+    test_untrusted_urls_are_rejected_without_fetch,
+)
