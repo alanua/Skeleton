@@ -2065,7 +2065,7 @@ private fun VideoScreen(api:HomeApi,active:Boolean,selectionRevision:Int,endpoin
     val historyByEndpoint=remember{mutableStateMapOf<String,List<JSONObject>>()}; val savedHistoryByEndpoint=remember{mutableStateMapOf<String,List<JSONObject>>()}; val historyHydratedByEndpoint=remember{mutableStateMapOf<String,Boolean>()}; val historyErrorByEndpoint=remember{mutableStateMapOf<String,String>()}
     var history by remember(endpoint.endpointId){mutableStateOf(historyByEndpoint[endpoint.endpointId].orEmpty())}; var savedHistory by remember(endpoint.endpointId){mutableStateOf(savedHistoryByEndpoint[endpoint.endpointId].orEmpty())}; var historyHydrated by remember(endpoint.endpointId){mutableStateOf(historyHydratedByEndpoint[endpoint.endpointId] == true)}; var historyLoading by remember(endpoint.endpointId){mutableStateOf(false)}; var historyError by remember(endpoint.endpointId){mutableStateOf(historyErrorByEndpoint[endpoint.endpointId].orEmpty())}; var historyOpen by remember(endpoint.endpointId){mutableStateOf(false)}; var seasonOpen by remember{mutableStateOf(false)}; var detailOpen by remember{mutableStateOf(false)}; var loadingSeason by remember{mutableStateOf("")}
     var selection by remember{mutableStateOf(JSONObject())}; var selectionIdentity by remember{mutableStateOf("")}; var pendingSelectionIdentity by remember{mutableStateOf("")}; var selectedHistoryItem by remember(endpoint.endpointId){mutableStateOf<JSONObject?>(null)}; var job by remember{mutableStateOf<JSONObject?>(null)}; var sources by remember{mutableStateOf(emptyList<JSONObject>())}; var jobId by remember{mutableStateOf("")}; var loading by remember{mutableStateOf(false)}
-    var season by remember{mutableStateOf("")}; var episode by remember{mutableStateOf("")}; var quality by remember{mutableStateOf("")}; var voice by remember{mutableStateOf("")}; var autoplay by remember{mutableStateOf(false)}; var monitor by remember{mutableStateOf(false)}; var monitorReady by remember{mutableStateOf(false)}; var external by remember{mutableStateOf(JSONObject())}; var message by remember{mutableStateOf("")}; var currentPlayer by remember{mutableStateOf(JSONObject())}; var audioSel by remember{mutableStateOf("")}; var subSel by remember{mutableStateOf("")}
+    var season by remember{mutableStateOf("")}; var episode by remember{mutableStateOf("")}; var quality by remember{mutableStateOf("")}; var voice by remember{mutableStateOf("")}; var autoplay by remember{mutableStateOf(false)}; var monitor by remember(api.server,jobId,endpoint.endpointId){mutableStateOf(false)}; var monitorReady by remember(api.server,jobId,endpoint.endpointId){mutableStateOf(false)}; var monitorSupported by remember(api.server,jobId,endpoint.endpointId){mutableStateOf(false)}; var external by remember{mutableStateOf(JSONObject())}; var message by remember{mutableStateOf("")}; var currentPlayer by remember{mutableStateOf(JSONObject())}; var audioSel by remember{mutableStateOf("")}; var subSel by remember{mutableStateOf("")}
     fun setEndpointHistory(items:List<JSONObject>){history=items;historyByEndpoint[endpoint.endpointId]=items}
     fun setEndpointSavedHistory(items:List<JSONObject>){savedHistory=items;savedHistoryByEndpoint[endpoint.endpointId]=items}
     fun setEndpointHistoryHydrated(value:Boolean){historyHydrated=value;historyHydratedByEndpoint[endpoint.endpointId]=value}
@@ -2084,10 +2084,16 @@ private fun VideoScreen(api:HomeApi,active:Boolean,selectionRevision:Int,endpoin
         }
         loading=false
     }
+    val currentMonitorEndpointId by rememberUpdatedState(endpoint.endpointId)
     suspend fun loadMonitor(){
         if(api.server==null||jobId.isBlank()){monitor=false;monitorReady=false;return}
-        monitorReady=false
-        runCatching{api.get("/api/video/monitor?job_id=${Uri.encode(jobId)}")}.onSuccess{monitor=it.optBoolean("enabled");monitorReady=true}.onFailure{monitor=false;monitorReady=false}
+        monitorReady=false;monitorSupported=false
+        val requestedJobId=jobId;val requestedEndpointId=endpoint.endpointId;val requestedServer=api.server
+        runCatching{api.get("/api/video/monitor?job_id=${Uri.encode(requestedJobId)}&device_id=${Uri.encode(requestedEndpointId)}")}.onSuccess{
+            if(jobId==requestedJobId&&currentMonitorEndpointId==requestedEndpointId&&api.server==requestedServer){monitorSupported=it.optBoolean("supported",false);monitor=monitorSupported&&it.optBoolean("enabled");monitorReady=true}
+        }.onFailure{
+            if(jobId==requestedJobId&&currentMonitorEndpointId==requestedEndpointId&&api.server==requestedServer){monitor=false;monitorReady=false;message=it.message?:"Не вдалося отримати стан моніторингу"}
+        }
     }
     suspend fun applyEndpointSelection(latest:JSONObject,reloadWork:Boolean){
         selection=latest
@@ -2177,7 +2183,7 @@ private fun VideoScreen(api:HomeApi,active:Boolean,selectionRevision:Int,endpoin
         }
     }
     LaunchedEffect(api.server,jobId,active,endpoint.endpointId){if(api.server!=null){runCatching{api.get(endpointPath(endpoint.endpointId,"/player"))}.onSuccess{currentPlayer=it};if(active)while(true){delay(2500);runCatching{api.get(endpointPath(endpoint.endpointId,"/player"))}.onSuccess{currentPlayer=it}}}}
-    LaunchedEffect(api.server,jobId){if(jobId.isNotBlank())loadMonitor() else {monitor=false;monitorReady=false}}
+    LaunchedEffect(api.server,jobId,endpoint.endpointId){if(jobId.isNotBlank())loadMonitor() else {monitor=false;monitorReady=false}}
     val cat=job?.optJSONObject("catalog")?:JSONObject()
     val isSeries=cat.optString("media_type",job?.optString("history_media_type","")?:"").lowercase(Locale.ROOT)=="tv"
     LaunchedEffect(selectionIdentity,job,sources,isSeries){
@@ -2295,10 +2301,10 @@ private fun VideoScreen(api:HomeApi,active:Boolean,selectionRevision:Int,endpoin
                                 selection=out.optJSONObject("preferred")?:JSONObject();jobId=out.optString("job_id");selection.put("job_id",jobId);loadJob(jobId);message="Продовжено зі збереженого місця";onApplied()
                             }.onFailure{message=it.message?:"Немає збереженого моменту"}
                         }}
-                        val monitorAvailable=jobId.isNotBlank()&&cat.optInt("tmdb_id")>0
+                        val monitorAvailable=jobId.isNotBlank()&&isSeries&&monitorSupported
                         VideoToggleControl("radar",monitor,monitorAvailable&&monitorReady){v->
-                            val previous=monitor;monitor=v;monitorReady=false
-                            scope.launch{runCatching{api.put("/api/video/monitor",JSONObject().put("job_id",jobId).put("enabled",v))}.onSuccess{monitor=it.optBoolean("enabled");monitorReady=true;message=if(monitor)"Моніторинг майбутніх релізів увімкнено" else "Моніторинг майбутніх релізів вимкнено"}.onFailure{monitor=previous;monitorReady=true;message=it.message?:"Не вдалося змінити моніторинг"}}
+                            val previous=monitor;val requestedJobId=jobId;val requestedEndpointId=endpoint.endpointId;val requestedServer=api.server;monitor=v;monitorReady=false
+                            scope.launch{runCatching{api.put("/api/video/monitor",JSONObject().put("job_id",requestedJobId).put("device_id",requestedEndpointId).put("enabled",v))}.onSuccess{if(jobId!=requestedJobId||currentMonitorEndpointId!=requestedEndpointId||api.server!=requestedServer)return@onSuccess;monitorSupported=it.optBoolean("supported",false);monitor=monitorSupported&&it.optBoolean("enabled");monitorReady=true;message=if(monitor)"Моніторинг майбутніх релізів увімкнено" else "Моніторинг майбутніх релізів вимкнено"}.onFailure{if(jobId!=requestedJobId||currentMonitorEndpointId!=requestedEndpointId||api.server!=requestedServer)return@onFailure;monitor=previous;monitorReady=true;message=it.message?:"Не вдалося змінити моніторинг"}}
                         }
                         VideoToggleControl("autoplay-repeat",autoplay,isSeries){v->if(isSeries){autoplay=v;scope.launch{runCatching{api.put("/api/video/autoplay",JSONObject().put("enabled",v))}}}}
                     }
