@@ -500,7 +500,7 @@ capabilities:
     deployment_state: NOT_DEPLOYED
     external_repository: alanua/skeleton-media
     external_transcription_dependency: "alanua/skeleton-media#71"
-    external_source_sha: e4531a3aad4a830b9d3dd5b55c8eff7f444e6a5d
+    external_source_sha: ef5c45f90b069d6d54c5e72b8b34a1f5cfc0fd07
     external_source_merge_state: merged_source_only
     operation_ids:
       - video_understand_url
