@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://skeleton.invalid/schemas/geo_place.schema.json",
+  "title": "Skeleton Geo Place",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["place_id", "canonical_name", "categories", "tags", "provenance", "saved_at", "updated_at", "status", "privacy_class"],
+  "properties": {
+    "place_id": {"type": "string", "minLength": 1},
+    "canonical_name": {"type": "string", "minLength": 1},
+    "normalized_address": {"type": ["string", "null"]},
+    "coordinate": {
+      "anyOf": [
+        {"type": "null"},
+        {"type": "object", "additionalProperties": false, "required": ["lat", "lon"], "properties": {"lat": {"type": "number", "minimum": -90, "maximum": 90}, "lon": {"type": "number", "minimum": -180, "maximum": 180}}}
+      ]
+    },
+    "provider_identities": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["provider", "provider_place_id"], "properties": {"provider": {"type": "string", "minLength": 1}, "provider_place_id": {"type": "string", "minLength": 1}}}},
+    "categories": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "tags": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "domain_refs": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "note": {"type": ["string", "null"]},
+    "what_to_try": {"type": ["string", "null"]},
+    "reason_saved": {"type": ["string", "null"]},
+    "provenance": {"$ref": "geo_provenance.schema.json"},
+    "saved_at": {"type": "string", "minLength": 1},
+    "updated_at": {"type": "string", "minLength": 1},
+    "status": {"enum": ["want_to_visit", "visited", "archived"]},
+    "personal_rating": {"type": ["number", "null"], "minimum": 0, "maximum": 5},
+    "privacy_class": {"const": "PRIVATE_USER_GEO"}
+  }
+}
