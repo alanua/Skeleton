@@ -10,7 +10,7 @@ from core import skeleton_media_bridge as bridge
 
 def test_canonical_media_repository_and_required_sha_are_explicit() -> None:
     assert bridge.SKELETON_MEDIA_REPOSITORY == "alanua/skeleton-media"
-    assert bridge.SKELETON_MEDIA_REQUIRED_SHA == "e4531a3aad4a830b9d3dd5b55c8eff7f444e6a5d"
+    assert bridge.SKELETON_MEDIA_REQUIRED_SHA == "ef5c45f90b069d6d54c5e72b8b34a1f5cfc0fd07"
 
 
 def test_missing_external_package_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
