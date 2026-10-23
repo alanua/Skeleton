@@ -7,7 +7,7 @@ from types import ModuleType
 from typing import Any, Callable, Protocol
 
 SKELETON_MEDIA_REPOSITORY = "alanua/skeleton-media"
-SKELETON_MEDIA_REQUIRED_SHA = "e4531a3aad4a830b9d3dd5b55c8eff7f444e6a5d"
+SKELETON_MEDIA_REQUIRED_SHA = "ef5c45f90b069d6d54c5e72b8b34a1f5cfc0fd07"
 CANONICAL_HOME_MEDIA_ENDPOINT_SCHEMA = "skeleton.home.media_endpoints.v1"
 
 _EXTERNAL_PREFIX = "skeleton_media"
@@ -347,7 +347,7 @@ def _require_capability(endpoint: MediaEndpoint, action: str) -> None:
 GLOBAL_VIDEO_PROVIDER_ID = "skeleton.video_understanding.global"
 VIDEO_TRANSCRIPT_SOURCE_DEPENDENCY_PR = "alanua/skeleton-media#71"
 # Source-only candidate: not yet a runtime-approved/CI-pinned external package.
-VIDEO_TRANSCRIPT_SOURCE_SHA = "e4531a3aad4a830b9d3dd5b55c8eff7f444e6a5d"
+VIDEO_TRANSCRIPT_SOURCE_SHA = "ef5c45f90b069d6d54c5e72b8b34a1f5cfc0fd07"
 GLOBAL_VIDEO_OPERATIONS = (
     "video_understand_url",
     "video_import_urls",
