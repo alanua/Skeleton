@@ -1,17 +1,17 @@
 # Universal Video Understanding — protected source-only Gate registration (#4788)
 
-Status: **DRAFT / SOURCE_ONLY / NOT_REGISTERED_IN_RUNTIME / NOT_DEPLOYED**.
+Status: **SOURCE_ONLY / NOT_REGISTERED_IN_RUNTIME / NOT_DEPLOYED**.
 This document does not authorize merge, Gate activation, runner pickup, Home Edge/DE-PC operations,
 MCP tool changes, secrets or media ingestion.
 
-## Current exact source authority (reverified 2026-10-21)
+## Current exact source authority (reverified 2026-10-23; protected migration Draft)
 
-- Core base: `alanua/Skeleton` `b11c18a3dba5b1b797142002055bb867c41d3b0f` at branch creation; recheck before protected merge.
-- External `alanua/skeleton-media/main`: `e4531a3aad4a830b9d3dd5b55c8eff7f444e6a5d` (GitHub verified, **source-only**, not installed runtime). Media PRs #66, #69, #70 and #71 are merged.
+- Core `alanua/Skeleton/main` at this protected migration branch creation: `cb2070a84ffd06358b84d789452a53db30921969`. Source-only protected PRs #4816 and #4818 are merged; recheck exact base before any new protected merge.
+- External `alanua/skeleton-media/main`: `ef5c45f90b069d6d54c5e72b8b34a1f5cfc0fd07` (GitHub verified, **source-only**, not installed runtime). Media PRs #66, #69, #70, #71 and #72 are merged.
 - Ninth typed plan-only `video_transcribe_url` operation was merged from media PR #71,
   approved exact head `638de9059138ab800b6d6ad166df24be2c1ba825`.
-- Protected Core **Draft PR #4816** preserves `SKELETON_MEDIA_REQUIRED_SHA=7089b1ba37292aab0283cadb8ac85644cc3d28f8` exactly, both in Draft and on `main`. The current protected `Skeleton Media contract` GitHub workflow installs that exact legacy source SHA and hard-asserts this pin; changing it without a separately approved protected workflow migration breaks provenance CI. The merged source SHA `e4531a3aad4a830b9d3dd5b55c8eff7f444e6a5d` is recorded separately as **`VIDEO_TRANSCRIPT_SOURCE_SHA`** and a source-only registry candidate, NOT as an installed or executable package.
-- Media `video_understanding.operations` is **NOT** added to `_SUPPORTED_MODULES`: this Draft does not authorize imports, live execution, second provider or any connector/app action.
+- Protected Core PR #4816 registered the inactive source-only plan; protected PR #4818 aligned the Core media pin, source candidate and CI workflow to the then-current media source. This **new protected Draft** proposes to align both bridge constants, CI checkout/assertion, tests and `video_understanding_global.external_source_sha` with `ef5c45f90b069d6d54c5e72b8b34a1f5cfc0fd07`. Neither source alignment nor green CI proves an installed or executable runtime package.
+- Media `video_understanding.operations` remains **outside** `_SUPPORTED_MODULES`; SHA alignment does not authorize bridge imports, live execution, extra providers or connector/app publication.
 
 ## One provider, no second conveyor
 
@@ -62,8 +62,8 @@ boundary must be identified and explicitly operator-approved separately.
 
 ## Protected activation checklist — separate authority required
 
-1. **SOURCE-ONLY DONE:** media PR #71 merged at exact approved head; external media main verified `e4531a3aad4a830b9d3dd5b55c8eff7f444e6a5d`. This is not a runtime deployment.
-2. Review latest Core and media SHAs. Protected Draft #4816 records merged media candidate separately and includes typed global ingress; runtime pin remains unchanged. Independently authorize a later CI workflow/pin migration, then verify installed package parity before any Gate activation.
+1. **SOURCE-ONLY DONE:** media PR #71 added the planned video transcription URL ingress and PR #72 merged subtitle cue-order/provenance safety. External media main is `ef5c45f90b069d6d54c5e72b8b34a1f5cfc0fd07`. Neither source merge is a runtime deployment.
+2. Protected Core #4816 and #4818 are merged source-only. This protected SHA-alignment Draft must pass exact-head CI and obtain a distinct exact-head merge approval. Separately prove installed package parity before any Gate activation.
 3. Resolve authenticated connector principal and host-native Gate
    decision source; deny forged/expired/replayed identities and requests.
    Validate the same provider from at least two synthetic ancillary
