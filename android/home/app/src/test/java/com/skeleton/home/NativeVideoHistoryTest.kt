@@ -209,6 +209,116 @@ class NativeVideoHistoryTest {
         assertNull(canonicalSourceForSelection(noIntent, sources))
     }
 
+    @Test
+    fun automaticHydrationIsOncePerEndpointEvenAfterTtlAndIsolatedFromManualRefresh() {
+        val cache=NativeHistoryCache()
+        assertTrue(cache.claimAutomaticRefresh("tv"))
+        assertFalse(cache.claimAutomaticRefresh("tv"))
+        val token=cache.begin()!!
+        cache.complete(token,"tv",listOf(history("a","A")),emptyList(),100)
+        cache.finish(token)
+        assertFalse(cache.claimAutomaticRefresh("tv"))
+        assertTrue(cache.needsRefresh("tv",60100)) // manual tap can refresh if stale
+        assertTrue(cache.claimAutomaticRefresh("tablet"))
+        assertFalse(cache.claimAutomaticRefresh("tablet"))
+        assertEquals("A",cache.items("tv").single().getString("title"))
+    }
+
+    @Test
+    fun hydratedPickerOpensSynchronouslyAndRefreshesOnlyWhenStale() {
+        val cache=NativeHistoryCache()
+        val token=cache.begin()!!
+        cache.complete(token,"tv",listOf(history("a","A")),emptyList(),100)
+        cache.finish(token)
+        assertEquals(HistoryPickerOpen(true,false),cache.open("tv",101))
+        assertEquals(HistoryPickerOpen(true,true),cache.open("tv",60100))
+        val refresh=cache.begin()!!
+        assertNull(cache.begin())
+        assertEquals(HistoryPickerOpen(true,false),cache.open("tv",60101))
+        cache.complete(refresh,"tv",null,null,60102)
+        cache.finish(refresh)
+        assertEquals("A",cache.items("tv").single().getString("title"))
+        assertTrue(cache.open("tv",60103).refresh)
+    }
+
+    @Test
+    fun initialErrorAndEmptyCacheCanRetryAndCancelledEndpointCannotPublish() {
+        val cache=NativeHistoryCache()
+        assertEquals(HistoryPickerOpen(false,true),cache.open("tv",0))
+        val old=cache.begin()!!
+        cache.cancel()
+        val next=cache.begin()!!
+        assertFalse(cache.complete(old,"tv",listOf(history("old","Old")),null,1))
+        cache.finish(old)
+        assertNull(cache.begin())
+        cache.complete(next,"tablet",null,null,2)
+        cache.finish(next)
+        assertTrue(cache.open("tablet",3).refresh)
+        val empty=cache.begin()!!
+        cache.complete(empty,"tablet",emptyList(),emptyList(),4)
+        cache.finish(empty)
+        assertEquals(HistoryPickerOpen(false,false),cache.open("tablet",5))
+        assertTrue(cache.open("tablet",60004).refresh)
+    }
+
+    @Test
+    fun initialTapOpensWhenCatalogArrivesWithoutWaitingForProgress() {
+        val cache=NativeHistoryCache()
+        val requested=cache.open("tv",0).refresh
+        assertFalse(historyPickerOpensAfterRefresh(requested,cache.items("tv")))
+        val token=cache.begin()!!
+        cache.complete(token,"tv",listOf(history("a","A")),null,1)
+        assertTrue(historyPickerOpensAfterRefresh(requested,cache.items("tv")))
+        assertFalse(historyPickerOpensAfterRefresh(false,cache.items("tv")))
+        assertFalse(historyPickerOpensAfterRefresh(requested,listOf(history("b","B").put("hidden",true))))
+        cache.cancel()
+        val tablet=cache.begin()!!
+        assertFalse(cache.complete(token,"tablet",null,listOf(history("a","A",season="9")),2))
+        cache.complete(tablet,"tablet",null,listOf(history("a","A",season="3")),3)
+        assertEquals("3",cache.items("tablet").single().getString("season"))
+        assertFalse(cache.items("tv").single().has("season"))
+    }
+
+    @Test
+    fun sharedMembershipAndPostersPreserveSeparateDeviceProgress() {
+        val cache=NativeHistoryCache()
+        val saved=listOf(history("a","A",poster="/a.jpg",season="9"),history("b","B"))
+        val tv=cache.begin()!!
+        cache.complete(tv,"tv",saved,listOf(history("a","A",season="1",episode="2")),0)
+        cache.finish(tv)
+        assertFalse(cache.items("tablet")[0].has("season"))
+        val tablet=cache.begin()!!
+        cache.complete(tablet,"tablet",saved,listOf(history("a","A",season="3",episode="4")),1)
+        cache.finish(tablet)
+        assertEquals("1",cache.items("tv")[0].getString("season"))
+        assertEquals("3",cache.items("tablet")[0].getString("season"))
+        assertEquals("/a.jpg",cache.items("tablet")[0].getString("poster"))
+        val removal=cache.begin()!!
+        cache.complete(removal,"tablet",listOf(saved[1].put("hidden",true)),null,2)
+        cache.finish(removal)
+        assertEquals(listOf("b"),cache.items("tv").map(::historyKey))
+        assertTrue(cache.items("tv").single().getBoolean("hidden"))
+    }
+
+    @Test
+    fun hiddenOnlyCacheDoesNotOpenAndFailedRefreshPreservesProgress() {
+        val cache=NativeHistoryCache()
+        val first=cache.begin()!!
+        cache.complete(first,"tv",listOf(history("a","A").put("hidden",true)),
+            listOf(history("a","A",season="2",episode="3").put("position_seconds",42)),0)
+        cache.finish(first)
+        assertEquals(HistoryPickerOpen(false,false),cache.open("tv",1))
+        assertEquals(HistoryPickerOpen(false,true),cache.open("tv",60000))
+        val retry=cache.begin()!!
+        cache.complete(retry,"tv",null,null,60001)
+        cache.finish(retry)
+        assertTrue(cache.items("tv").single().getBoolean("hidden"))
+        assertEquals("2",cache.items("tv").single().getString("season"))
+        assertEquals(42,cache.items("tv").single().getInt("position_seconds"))
+        assertFalse(cache.items("tablet").single().has("position_seconds"))
+        assertFalse(cache.open("tv",60002).showDialog)
+    }
+
     private fun history(id:String, title:String, poster:String = "", overview:String = "", season:String = "", episode:String = ""):JSONObject =
         JSONObject().put("history_id", id).put("title", title).put("poster", poster).put("overview", overview).put("season", season).put("episode", episode)
 

@@ -96,6 +96,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
 import androidx.core.content.ContextCompat
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -341,6 +345,7 @@ private suspend fun savedVideoHistoryItemsWithRetry(api:HomeApi,attempts:Int=2):
     var lastError:Throwable?=null
     repeat(attempts.coerceAtLeast(1)){i->
         val result=runCatching{api.get(savedVideoHistoryPath()).optJSONArray("items")?.objects().orEmpty()}
+        result.exceptionOrNull()?.let{if(it is CancellationException)throw it}
         result.onSuccess{return it}
         lastError=result.exceptionOrNull()
         if(i<attempts-1)delay(650)
@@ -389,8 +394,47 @@ private fun watchedHistoryForSavedLibrary(savedLibrary:List<JSONObject>,watchedH
 internal fun historyItemsAfterRead(previous:List<JSONObject>,savedLibrary:List<JSONObject>?,watchedHistory:List<JSONObject>?,homeEdgeTv:Boolean,previousSavedLibrary:List<JSONObject>? = null):List<JSONObject>{
     val savedBase=savedLibrary?.let(::canonicalHistoryItems) ?: previousSavedLibrary?.let(::canonicalHistoryItems) ?: return previous
     val watchedBase=watchedHistory?.let{watchedHistoryForSavedLibrary(savedBase,it)}.orEmpty()
-    return canonicalHistoryItems(mergedHistoryItems(savedBase,watchedBase))
+    val progressByKey=watchedBase.associateBy(::historyKey)
+    return savedBase.map{item->
+        val merged=JSONObject(item.toString())
+        // Shared catalog metadata never supplies another device's watch position.
+        val progress=progressByKey[historyKey(item)]
+        listOf("season","episode","position","position_seconds","duration","duration_seconds","watched","progress","source_id","job_id","voice").forEach{k->
+            merged.remove(k)
+            if(progress?.has(k)==true)merged.put(k,progress.opt(k))
+        }
+        merged
+    }
 }
+// One catalog, device-specific progress, and a single generation-guarded refresh.
+internal class NativeHistoryCache {
+    var library:List<JSONObject>? by mutableStateOf(null)
+        private set
+    private val watched=mutableStateMapOf<String,List<JSONObject>>()
+    private val refreshed=mutableMapOf<String,Long>()
+    // An endpoint is automatically hydrated once; revisits do not refetch by TTL.
+    private val automaticAttempted=mutableSetOf<String>()
+    fun claimAutomaticRefresh(endpoint:String):Boolean=automaticAttempted.add(endpoint)
+    private var generation=0L
+    private var inflight:Long?=null
+    fun items(endpoint:String):List<JSONObject> = historyItemsAfterRead(emptyList(),library,watched[endpoint],false)
+    fun needsRefresh(endpoint:String,now:Long):Boolean = inflight==null && (refreshed[endpoint]?.let{now-it>=60_000L} ?: true)
+    fun begin():Long? {
+        if(inflight!=null)return null
+        return (++generation).also{inflight=it}
+    }
+    fun complete(token:Long,endpoint:String,saved:List<JSONObject>?,progress:List<JSONObject>?,now:Long):Boolean {
+        if(inflight!=token)return false
+        if(saved!=null){library=canonicalHistoryItems(saved);refreshed[endpoint]=now}
+        if(progress!=null)watched[endpoint]=progress
+        return true
+    }
+    fun finish(token:Long){if(inflight==token)inflight=null}
+    fun cancel(){generation++;inflight=null}
+    fun open(endpoint:String,now:Long)=HistoryPickerOpen(historyPickerOpensAfterRefresh(true,items(endpoint)),needsRefresh(endpoint,now))
+}
+internal data class HistoryPickerOpen(val showDialog:Boolean,val refresh:Boolean)
+internal fun historyPickerOpensAfterRefresh(requested:Boolean,items:List<JSONObject>):Boolean = requested && items.any{!it.optBoolean("hidden",false)}
 private val VideoSelectionIdentityFields=listOf("job_id","source_id","season","episode","voice")+listOf("endpoint_id")
 private fun videoSelectionIdentity(selection:JSONObject):String=
     VideoSelectionIdentityFields.joinToString("|"){key->
@@ -600,8 +644,9 @@ private fun mdi(name: String): Int = when(name) {
 private val remoteBitmapCache = object: android.util.LruCache<String, ImageBitmap>(48 * 1024) {
     override fun sizeOf(key:String,value:ImageBitmap):Int=((value.width.toLong()*value.height.toLong()*4L)/1024L).coerceAtLeast(1L).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
 }
-private val remoteBitmapLocks = java.util.concurrent.ConcurrentHashMap<String,Any>()
-private fun remoteBitmapKey(url:String,maxWidth:Int,maxHeight:Int)="$url@$maxWidth×$maxHeight"
+// Fixed stripes bound memory and keep concurrent waiters on the same lock.
+private val remoteBitmapLocks = Array(32){Any()}
+internal fun remoteBitmapKey(url:String,maxWidth:Int,maxHeight:Int)="$url@$maxWidth×$maxHeight"
 private fun remoteBitmapDiskFile(context:Context,url:String):java.io.File {
     val digest=MessageDigest.getInstance("SHA-256").digest(url.toByteArray()).joinToString(""){"%02x".format(it)}
     val dir=java.io.File(context.cacheDir,"home-poster-cache-v1").apply{mkdirs()}
@@ -619,8 +664,10 @@ private fun decodeRemoteBitmap(bytes:ByteArray,maxWidth:Int,maxHeight:Int):Image
     return BitmapFactory.decodeByteArray(bytes,0,bytes.size,opts)?.asImageBitmap()
 }
 private fun loadRemoteBitmap(context:Context,url:String,maxWidth:Int,maxHeight:Int):ImageBitmap? {
-    val lock=remoteBitmapLocks.computeIfAbsent(url){Any()}
+    val key=remoteBitmapKey(url,maxWidth,maxHeight)
+    val lock=remoteBitmapLocks[(url.hashCode() and Int.MAX_VALUE)%remoteBitmapLocks.size]
     return synchronized(lock){
+        remoteBitmapCache.get(key)?.let{return@synchronized it}
         try{
             val file=remoteBitmapDiskFile(context,url)
             var bytes=if(file.isFile&&file.length()>0)file.readBytes() else ByteArray(0)
@@ -636,22 +683,24 @@ private fun loadRemoteBitmap(context:Context,url:String,maxWidth:Int,maxHeight:I
                     if(!tmp.renameTo(file)){file.writeBytes(bytes);tmp.delete()}
                 }
             }
-            decodeRemoteBitmap(bytes,maxWidth,maxHeight)
+            decodeRemoteBitmap(bytes,maxWidth,maxHeight)?.also{remoteBitmapCache.put(key,it)}
         }catch(_:Exception){null}
-        finally{remoteBitmapLocks.remove(url,lock)}
     }
 }
 @Composable private fun remoteBitmap(url:String?,maxWidth:Int=0,maxHeight:Int=0): ImageBitmap? {
     val context=LocalContext.current.applicationContext
     val key=if(url.isNullOrBlank())"" else remoteBitmapKey(url,maxWidth,maxHeight)
-    val initial=remember(key){if(key.isBlank())null else remoteBitmapCache.get(key)}
-    return produceState<ImageBitmap?>(initial,key){
-        if(url.isNullOrBlank()||key.isBlank()){value=null;return@produceState}
-        remoteBitmapCache.get(key)?.let{value=it;return@produceState}
-        val loaded=withContext(Dispatchers.IO){loadRemoteBitmap(context,url,maxWidth,maxHeight)}
-        if(loaded!=null)remoteBitmapCache.put(key,loaded)
-        value=loaded
-    }.value
+    // Producer keys restart the coroutine but do not reset produceState's value.
+    // Scope the state itself to the request to prevent a stale cross-title frame.
+    return androidx.compose.runtime.key(key){
+        val initial=remember{if(key.isBlank())null else remoteBitmapCache.get(key)}
+        produceState<ImageBitmap?>(initial,key){
+            if(url.isNullOrBlank()||key.isBlank())return@produceState
+            remoteBitmapCache.get(key)?.let{value=it;return@produceState}
+            val loaded=withContext(Dispatchers.IO){loadRemoteBitmap(context,url,maxWidth,maxHeight)}
+            if(loaded!=null)value=loaded
+        }.value
+    }
 }
 
 private fun drawableBitmap(d:Drawable): ImageBitmap {
@@ -1708,7 +1757,7 @@ private fun Header(title:String, connected:Boolean, endpointId:String, endpoints
     val remoteVideoId=liveRemote.optString("video_id","")
     val canonicalVideoId=lastGoodPlayer.optString("video_id","")
     val videoId=remoteVideoId.ifBlank{canonicalVideoId}
-    val sameVideo=remoteVideoId.isBlank()||canonicalVideoId.isBlank()||remoteVideoId==canonicalVideoId
+    val sameVideo=remoteVideoId.isBlank()||(canonicalVideoId.isNotBlank()&&remoteVideoId==canonicalVideoId)
     val running=lastGoodPlayer.optBoolean("running") || (videoId.isNotBlank()&&remoteState in setOf(1,2,3))
     val remoteTitle=remotePlayer.optString("display-title",remotePlayer.optString("title",remotePlayer.optString("media-title",""))).trim()
     val canonicalTitle=lastGoodPlayer.optString("display-title",lastGoodPlayer.optString("title",lastGoodPlayer.optString("media-title",""))).trim()
@@ -2062,14 +2111,17 @@ private fun VideoScreen(api:HomeApi,active:Boolean,selectionRevision:Int,endpoin
             }
         }
     }
-    val historyByEndpoint=remember{mutableStateMapOf<String,List<JSONObject>>()}; val savedHistoryByEndpoint=remember{mutableStateMapOf<String,List<JSONObject>>()}; val historyHydratedByEndpoint=remember{mutableStateMapOf<String,Boolean>()}; val historyErrorByEndpoint=remember{mutableStateMapOf<String,String>()}
-    var history by remember(endpoint.endpointId){mutableStateOf(historyByEndpoint[endpoint.endpointId].orEmpty())}; var savedHistory by remember(endpoint.endpointId){mutableStateOf(savedHistoryByEndpoint[endpoint.endpointId].orEmpty())}; var historyHydrated by remember(endpoint.endpointId){mutableStateOf(historyHydratedByEndpoint[endpoint.endpointId] == true)}; var historyLoading by remember(endpoint.endpointId){mutableStateOf(false)}; var historyError by remember(endpoint.endpointId){mutableStateOf(historyErrorByEndpoint[endpoint.endpointId].orEmpty())}; var historyOpen by remember(endpoint.endpointId){mutableStateOf(false)}; var seasonOpen by remember{mutableStateOf(false)}; var detailOpen by remember{mutableStateOf(false)}; var loadingSeason by remember{mutableStateOf("")}
+    val historyCache=remember(api.server){NativeHistoryCache()}
+    val history=historyCache.items(endpoint.endpointId)
+    val historyHydrated=historyCache.library!=null
+    var historyLoading by remember(api.server,endpoint.endpointId){mutableStateOf(false)}
+    var historyError by remember(api.server,endpoint.endpointId){mutableStateOf("")}
+    var historyOpen by remember(api.server,endpoint.endpointId){mutableStateOf(false)}
+    var historyOpenRequested by remember(api.server,endpoint.endpointId){mutableStateOf(false)}
+    var historyRefresh by remember(api.server,endpoint.endpointId){mutableStateOf(0)}
+    var seasonOpen by remember{mutableStateOf(false)}; var detailOpen by remember{mutableStateOf(false)}; var loadingSeason by remember{mutableStateOf("")}
     var selection by remember{mutableStateOf(JSONObject())}; var selectionIdentity by remember{mutableStateOf("")}; var pendingSelectionIdentity by remember{mutableStateOf("")}; var selectedHistoryItem by remember(endpoint.endpointId){mutableStateOf<JSONObject?>(null)}; var job by remember{mutableStateOf<JSONObject?>(null)}; var sources by remember{mutableStateOf(emptyList<JSONObject>())}; var jobId by remember{mutableStateOf("")}; var loading by remember{mutableStateOf(false)}
     var season by remember{mutableStateOf("")}; var episode by remember{mutableStateOf("")}; var quality by remember{mutableStateOf("")}; var voice by remember{mutableStateOf("")}; var autoplay by remember{mutableStateOf(false)}; var monitor by remember{mutableStateOf(false)}; var monitorReady by remember{mutableStateOf(false)}; var external by remember{mutableStateOf(JSONObject())}; var message by remember{mutableStateOf("")}; var currentPlayer by remember{mutableStateOf(JSONObject())}; var audioSel by remember{mutableStateOf("")}; var subSel by remember{mutableStateOf("")}
-    fun setEndpointHistory(items:List<JSONObject>){history=items;historyByEndpoint[endpoint.endpointId]=items}
-    fun setEndpointSavedHistory(items:List<JSONObject>){savedHistory=items;savedHistoryByEndpoint[endpoint.endpointId]=items}
-    fun setEndpointHistoryHydrated(value:Boolean){historyHydrated=value;historyHydratedByEndpoint[endpoint.endpointId]=value}
-    fun setEndpointHistoryError(value:String){historyError=value;historyErrorByEndpoint[endpoint.endpointId]=value}
     suspend fun loadJob(id:String){
         if(id.isBlank())return; loading=true
         repeat(30){
@@ -2096,22 +2148,25 @@ private fun VideoScreen(api:HomeApi,active:Boolean,selectionRevision:Int,endpoin
         jobId=latest.optString("job_id")
         if(reloadWork&&jobId.isNotBlank()){loadJob(jobId);loadMonitor()}
     }
-    suspend fun loadHistoryForEndpoint():Boolean{
-        if(api.server==null)return false
-        historyLoading=true; setEndpointHistoryError("")
-        // Both dialogs read the same work membership, regardless of output device.
-        val saved=runCatching{savedVideoHistoryItemsWithRetry(api)}
-        val watched=runCatching{api.get(mediaHistoryPath(endpoint.endpointId)).optJSONArray("items")?.objects().orEmpty()}
-        if(saved.isSuccess){
-            val catalog=canonicalHistoryItems(saved.getOrThrow())
-            setEndpointSavedHistory(catalog)
-            setEndpointHistory(historyItemsAfterRead(history,catalog,watched.getOrNull(),endpoint.adapterKind=="home_edge_tv"))
-            setEndpointHistoryHydrated(true)
-        }else{
-            setEndpointHistoryError(saved.exceptionOrNull()?.message?:"Спільний каталог недоступний")
-        }
-        historyLoading=false
-        return saved.isSuccess
+    suspend fun loadHistoryForEndpoint(){
+        if(api.server==null||!historyCache.needsRefresh(endpoint.endpointId,android.os.SystemClock.elapsedRealtime()))return
+        val token=historyCache.begin()?:return
+        historyLoading=true;historyError=""
+        try{
+            withTimeout(15_000L){
+                val saved=runCatching{savedVideoHistoryItemsWithRetry(api)}
+                currentCoroutineContext().ensureActive()
+                // Publish the catalog before the optional progress request completes.
+                historyCache.complete(token,endpoint.endpointId,saved.getOrNull(),null,android.os.SystemClock.elapsedRealtime())
+                if(historyPickerOpensAfterRefresh(historyOpenRequested,historyCache.items(endpoint.endpointId))){historyOpen=true;historyOpenRequested=false}
+                if(saved.isFailure)historyError=saved.exceptionOrNull()?.message?:"Спільний каталог недоступний"
+                val watched=runCatching{api.get(mediaHistoryPath(endpoint.endpointId)).optJSONArray("items")?.objects().orEmpty()}
+                currentCoroutineContext().ensureActive()
+                historyCache.complete(token,endpoint.endpointId,null,watched.getOrNull(),android.os.SystemClock.elapsedRealtime())
+            }
+        }catch(e:kotlinx.coroutines.TimeoutCancellationException){historyError="Історія недоступна · торкніться ще раз"}
+        catch(e:CancellationException){throw e}
+        finally{historyCache.finish(token);historyLoading=false}
     }
     suspend fun confirmEndpointSelection(body:JSONObject):JSONObject{
         pendingSelectionIdentity=videoSelectionIdentity(body)
@@ -2161,9 +2216,11 @@ private fun VideoScreen(api:HomeApi,active:Boolean,selectionRevision:Int,endpoin
             while(true){if(loadAll())break;delay(1500)}
         }
     }
-    LaunchedEffect(api.server,endpoint.endpointId){
-        setEndpointHistoryHydrated(historyByEndpoint.containsKey(endpoint.endpointId)); setEndpointHistoryError("")
-        if(api.server!=null)while(true){if(loadHistoryForEndpoint())break;delay(1500)}
+    LaunchedEffect(api.server,endpoint.endpointId,historyRefresh){
+        val initial=historyCache.claimAutomaticRefresh(endpoint.endpointId)
+        if(initial||historyRefresh>0){
+            try{loadHistoryForEndpoint()}finally{historyCache.cancel()}
+        }
     }
     LaunchedEffect(api.server,active,endpoint.endpointId){
         if(api.server!=null&&active)while(true){
@@ -2256,8 +2313,13 @@ private fun VideoScreen(api:HomeApi,active:Boolean,selectionRevision:Int,endpoin
                         job!=null->cat.optString("title","Обраний твір")
                         else->"Оберіть збережений твір"
                     }
-                    val historyActionable=api.server!=null&&!historyLoading
-                    HistoryPickerField(historyLabel,historyActionable,historyLoading,historyError.isNotBlank()){scope.launch{if(loadHistoryForEndpoint()&&history.isNotEmpty())historyOpen=true}}
+                    val historyActionable=api.server!=null
+                    HistoryPickerField(historyLabel,historyActionable,historyLoading&&!historyHydrated,historyError.isNotBlank()){
+                        val action=historyCache.open(endpoint.endpointId,android.os.SystemClock.elapsedRealtime())
+                        if(action.showDialog)historyOpen=true
+                        historyOpenRequested=!action.showDialog
+                        if(action.refresh)historyRefresh++
+                    }
                     if(isSeries){
                         SeasonPickerField(season,seasonItems,loadedSeasons){seasonOpen=true}
                         SelectorField(ui("Серія"),"play",if(selectedIsTrailer)"Трейлер" else episode,if(selectedIsTrailer)listOf("Трейлер") else episodes,showCount=!selectedIsTrailer,trailing=if(selectedIsTrailer)"" else selectedDuration){if(!selectedIsTrailer)episode=it}

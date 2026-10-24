@@ -1,81 +1,77 @@
-from __future__ import annotations
-
-import re
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[2]
-MAIN_ACTIVITY = ROOT / "android/home/app/src/main/java/com/skeleton/home/MainActivity.kt"
+MAIN = ROOT / 'android/home/app/src/main/java/com/skeleton/home/MainActivity.kt'
 
 
-def _source() -> str:
-    return MAIN_ACTIVITY.read_text(encoding="utf-8")
+def test_cached_tap_opens_before_scheduling_network():
+    source = MAIN.read_text()
+    tap = source.split('val action=historyCache.open', 1)[1].split('\n                    }', 1)[0]
+    assert 'if(action.showDialog)historyOpen=true' in tap
+    assert tap.index('historyOpen=true') < tap.index('historyRefresh++')
+    assert 'scope.launch' not in tap
+    assert 'val historyActionable=api.server!=null\n' in source
 
 
-def test_history_hydration_is_separate_from_selected_job_loading() -> None:
-    text = _source()
-    video_screen = text.split("private fun VideoScreen", 1)[1]
-    load_all = re.search(
-        r"suspend fun loadAll\(\):Boolean\{(?P<body>.*?)\n    \}",
-        video_screen,
-        re.DOTALL,
-    ).group("body")
-
-    assert 'runCatching{endpointVideoSelection(api,endpoint.endpointId)}' in load_all
-    assert 'api.get(endpointPath(endpoint.endpointId,"/player"))' in load_all
-    assert "loadHistoryForEndpoint" not in load_all
-    assert "return sel.isSuccess" in load_all
-    assert "LaunchedEffect(api.server,endpoint.endpointId)" in video_screen
-    assert "while(true){if(loadHistoryForEndpoint())break;delay(1500)}" in video_screen
+def test_refresh_is_bounded_cancellable_and_not_an_infinite_retry():
+    source = MAIN.read_text()
+    loader = source.split('suspend fun loadHistoryForEndpoint(){', 1)[1].split('suspend fun confirmEndpointSelection', 1)[0]
+    assert 'withTimeout(15_000L)' in loader
+    assert loader.count('currentCoroutineContext().ensureActive()') == 2
+    assert 'historyCache.begin()?:return' in loader
+    assert 'historyCache.finish(token)' in loader
+    assert 'catch(e:CancellationException){throw e}' in loader
+    assert 'while(true){if(loadHistoryForEndpoint())' not in source
+    assert 'LaunchedEffect(api.server,endpoint.endpointId,historyRefresh)' in source
+    assert 'finally{historyCache.cancel()}' in source
 
 
-def test_history_picker_distinguishes_loading_error_empty_and_ready_states() -> None:
-    text = _source()
-
-    assert "val historyByEndpoint=remember{mutableStateMapOf<String,List<JSONObject>>()}" in text
-    assert "val savedHistoryByEndpoint=remember{mutableStateMapOf<String,List<JSONObject>>()}" in text
-    assert "val historyHydratedByEndpoint=remember{mutableStateMapOf<String,Boolean>()}" in text
-    assert "var historyHydrated by remember(endpoint.endpointId){mutableStateOf(historyHydratedByEndpoint[endpoint.endpointId] == true)}" in text
-    assert "var historyLoading by remember(endpoint.endpointId){mutableStateOf(false)}" in text
-    assert "var historyError by remember(endpoint.endpointId){mutableStateOf(historyErrorByEndpoint[endpoint.endpointId].orEmpty())}" in text
-    assert "var historyOpen by remember(endpoint.endpointId){mutableStateOf(false)}" in text
-    assert "var selectedHistoryItem by remember(endpoint.endpointId){mutableStateOf<JSONObject?>(null)}" in text
-    assert "historyLoading&&!historyHydrated->\"Читаю історію…\"" in text
-    assert "historyError.isNotBlank()&&history.isEmpty()->\"Не вдалося завантажити · торкніться ще раз\"" in text
-    assert "history.isEmpty()&&historyHydrated->\"Історія порожня\"" in text
-    assert "api.server==null->\"Home Edge недоступний\"" in text
-    assert "val historyActionable=api.server!=null&&!historyLoading&&(history.isNotEmpty()||historyError.isNotBlank())" in text
-    assert "HistoryPickerField(historyLabel,historyActionable,historyLoading,historyError.isNotBlank())" in text
-    assert "if(history.isNotEmpty())historyOpen=true else scope.launch{loadHistoryForEndpoint()}" in text
+def test_shared_catalog_and_lazy_posters():
+    source = MAIN.read_text()
+    assert 'savedHistoryByEndpoint' not in source
+    assert 'val historyCache=remember(api.server){NativeHistoryCache()}' in source
+    assert 'if(inflight!=token)return false' in source
+    assert 'if(saved!=null){library=canonicalHistoryItems(saved)' in source
+    assert 'watchedHistoryForSavedLibrary(savedBase,it)' in source
+    assert 'progressByKey[historyKey(item)]' in source
+    dialog = source.split('@Composable private fun HistoryPickerDialog', 1)[1].split('@Composable private fun HistoryPickerRow', 1)[0]
+    assert 'LazyColumn' in dialog
+    assert 'remoteBitmap' not in dialog
+    assert 'filter{!it.optBoolean("hidden",false)}' in dialog
 
 
-def test_home_edge_tv_history_preserves_saved_library_on_partial_failure() -> None:
-    text = _source()
-    loader = re.search(
-        r"suspend fun loadHistoryForEndpoint\(\):Boolean\{(?P<body>.*?)\n    \}",
-        text,
-        re.DOTALL,
-    ).group("body")
-
-    assert 'val watched=runCatching{api.get(mediaHistoryPath(endpoint.endpointId)).optJSONArray("items")?.objects().orEmpty()}' in loader
-    assert 'val saved=if(endpoint.adapterKind=="home_edge_tv")runCatching{savedVideoHistoryItemsWithRetry(api)} else null' in loader
-    assert 'val ok=if(endpoint.adapterKind=="home_edge_tv")saved?.isSuccess==true else watched.isSuccess' in loader
-    assert 'saved?.isSuccess==true||watched.isSuccess' not in loader
-    assert "setEndpointHistory(historyItemsAfterRead(history,saved?.getOrNull(),watched.getOrNull(),true,savedHistory))" in loader
-    assert "saved?.getOrNull()?.let{setEndpointSavedHistory(canonicalHistoryItems(it))}" in loader
-    assert "setEndpointHistoryError((saved?.exceptionOrNull()?:watched.exceptionOrNull())?.message?:\"Історія недоступна\")" in loader
+def test_kotlin_behavior_regressions_are_present():
+    tests = (ROOT / 'android/home/app/src/test/java/com/skeleton/home/NativeVideoHistoryTest.kt').read_text()
+    for name in ('hydratedPickerOpensSynchronouslyAndRefreshesOnlyWhenStale',
+                 'initialErrorAndEmptyCacheCanRetryAndCancelledEndpointCannotPublish',
+                 'sharedMembershipAndPostersPreserveSeparateDeviceProgress',
+                 'successfulSavedReadIsAuthoritativeOverStaleWatchedHistory',
+                 'initialTapOpensWhenCatalogArrivesWithoutWaitingForProgress'):
+        assert f'fun {name}()' in tests
 
 
-def test_home_edge_tv_saved_history_is_retried_before_fallback_error() -> None:
-    text = _source()
-    retry = re.search(
-        r"private suspend fun savedVideoHistoryItemsWithRetry\(api:HomeApi,attempts:Int=2\):List<JSONObject>\{(?P<body>.*?)\n\}",
-        text,
-        re.DOTALL,
-    ).group("body")
+def test_initial_tap_publishes_dialog_before_watched_progress_read():
+    source = MAIN.read_text()
+    loader = source.split('suspend fun loadHistoryForEndpoint(){', 1)[1].split('suspend fun confirmEndpointSelection', 1)[0]
+    assert loader.index('historyPickerOpensAfterRefresh(historyOpenRequested,') < loader.index('val watched=')
+    assert 'historyOpenRequested=!action.showDialog' in source
+    assert 'var historyOpenRequested by remember(api.server,endpoint.endpointId)' in source
 
-    assert "repeat(attempts.coerceAtLeast(1)){i->" in retry
-    assert "api.get(savedVideoHistoryPath()).optJSONArray(\"items\")?.objects().orEmpty()" in retry
-    assert "result.onSuccess{return it}" in retry
-    assert "if(i<attempts-1)delay(650)" in retry
-    assert "throw lastError ?: IllegalStateException(\"Історія недоступна\")" in retry
+
+def test_cached_open_uses_same_visibility_rule_as_initial_refresh():
+    source = MAIN.read_text()
+    assert 'HistoryPickerOpen(historyPickerOpensAfterRefresh(true,items(endpoint)),needsRefresh(endpoint,now))' in source
+    tests = (ROOT / 'android/home/app/src/test/java/com/skeleton/home/NativeVideoHistoryTest.kt').read_text()
+    assert 'fun hiddenOnlyCacheDoesNotOpenAndFailedRefreshPreservesProgress()' in tests
+
+
+def test_cached_history_never_shows_refresh_spinner_or_auto_refetches_on_revisit():
+    source = MAIN.read_text()
+    assert 'HistoryPickerField(historyLabel,historyActionable,historyLoading&&!historyHydrated,historyError.isNotBlank())' in source
+    assert 'val historyActionable=api.server!=null' in source
+    assert 'private val automaticAttempted=mutableSetOf<String>()' in source
+    assert 'fun claimAutomaticRefresh(endpoint:String):Boolean=automaticAttempted.add(endpoint)' in source
+    assert 'val initial=historyCache.claimAutomaticRefresh(endpoint.endpointId)' in source
+    assert 'if(initial||historyRefresh>0)' in source
+    assert 'LaunchedEffect(api.server,endpoint.endpointId,historyRefresh)' in source
+    assert 'while(true){if(loadHistoryForEndpoint())' not in source
