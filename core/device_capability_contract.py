@@ -70,10 +70,14 @@ def validate_device_action(plan: DeviceActionPlan, *, approved_scope: str | None
         if any("password=" in part.lower() or "token=" in part.lower() for part in plan.argv):
             failures.append("argv: may not embed secrets")
     if plan.execution_lane != DeviceRisk.READ_ONLY:
-        if not plan.operator_approval_ref or not approved_scope:
+        if not plan.operator_approval_ref or not plan.operator_approval_ref.strip() or not approved_scope:
             failures.append("operator consent: required")
         elif approved_scope != f"{plan.device_id}:{plan.capability}":
             failures.append("operator consent: scope mismatch")
+    if plan.execution_lane == DeviceRisk.ROUTINE_MUTATION and plan.run_as != "desktop-user":
+        failures.append("run_as: routine mutation must run as desktop-user")
+    if plan.execution_lane in (DeviceRisk.PRIVILEGED_MUTATION, DeviceRisk.DESTRUCTIVE) and plan.run_as != "root":
+        failures.append("run_as: privileged/destructive mutations must run as root")
     if plan.execution_lane == DeviceRisk.DESTRUCTIVE and not plan.rollback:
         failures.append("rollback: destructive actions must define rollback or fail closed")
     return DeviceActionDecision(not failures, tuple(failures))
