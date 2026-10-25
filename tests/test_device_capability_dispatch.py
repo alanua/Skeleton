@@ -24,7 +24,7 @@ def test_dispatch_uses_only_canonical_gateway():
     called = []
     def transport(request):
         called.append(request)
-        return {"status": "success", "idempotency": "executed"}
+        return {"status": "ok", "idempotency": "executed"}
     result = execute_device_capability(
         "brother_printer", "print_head_clean_black_normal",
         resolve=lambda *_: plan(),
@@ -49,7 +49,7 @@ def test_rejects_incorrect_resolved_device_identity():
             "other_device", "print_head_clean_black_normal",
             resolve=lambda *_: plan(),
             verify_approval=lambda *args: True,
-            execute_home_edge=lambda req: {"status": "success"},
+            execute_home_edge=lambda req: {"status": "ok"},
             verify_postcondition=lambda *_: True,
         )
 
@@ -59,7 +59,7 @@ def test_execution_success_without_physical_evidence_remains_unverified():
         "brother_printer", "print_head_clean_black_normal",
         resolve=lambda *_: plan(),
         verify_approval=lambda *args: True,
-        execute_home_edge=lambda req: {"status": "success"},
+        execute_home_edge=lambda req: {"status": "ok"},
         verify_postcondition=lambda *_: False,
     )
     assert result.status == "accepted_unverified"
