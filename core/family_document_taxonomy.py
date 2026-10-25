@@ -22,7 +22,7 @@ FAMILY_DOCUMENT_NAMESPACE: Final = "family_document"
 
 _TOPIC_KEYWORDS: Final[Mapping[str, tuple[str, ...]]] = {
     FAMILY_DOCUMENT_TOPICS[0]: ("geburtsurkunde", "heiratsurkunde", "standesamt", "birth certificate", "паспорт", "свідоцтво"),
-    FAMILY_DOCUMENT_TOPICS[1]: ("aufenthalt", "ausländerbehörde", "residence permit", "jobcenter", "bürgergeld", "visa", "внж"),
+    FAMILY_DOCUMENT_TOPICS[1]: ("aufenthaltstitel", "aufenthaltserlaubnis", "ausländerbehörde", "residence permit", "jobcenter", "bürgergeld", "visa", "внж"),
     FAMILY_DOCUMENT_TOPICS[2]: ("krankenkasse", "techniker krankenkasse", "versicherung", "arzt", "hospital", "medical", "страхув"),
     FAMILY_DOCUMENT_TOPICS[3]: ("finanzamt", "steuer", "einkommen", "gewerbe", "arbeitgeber", "lohn", "rechnung", "invoice", "подат"),
     FAMILY_DOCUMENT_TOPICS[4]: ("schule", "universität", "zeugnis", "diplom", "qualification", "ausbildung", "освіт"),
@@ -117,6 +117,58 @@ def _calendar_candidates(raw_text: str, document_type: str | None, issuer: str |
     ]
 
 
+_BANK_RE = re.compile(r"\b(?:mittelbrandenburgische sparkasse|mbs)\b", re.I)
+_BANK_FORM_RE = re.compile(r"\b(girovertrag|girokonto|kontovertrag)\b", re.I)
+
+
+def _bank_evidence(text: str, aliases: Sequence[str]) -> tuple[dict[str, object], list[str]] | None:
+    if not _BANK_RE.search(text) or not _BANK_FORM_RE.search(text):
+        return None
+    reasons: list[str] = []
+    forms = {match.group().casefold() for match in _BANK_FORM_RE.finditer(text)}
+    contracts = forms & {"girovertrag", "kontovertrag"}
+    form = next(iter(contracts)) if len(contracts) == 1 else None
+    if form is None:
+        reasons.append("BANK_FORM_AMBIGUOUS")
+    owner_lines = re.findall(r"\bkontoinhaber(?:in)?[ \t]*:[ \t]*([^\n]*)", text, re.I)
+    owners = []
+    for value in owner_lines:
+        matches = [alias for alias in aliases if value.strip().casefold() == alias.casefold()]
+        owners.extend(matches)
+    owner = owners[0] if owners and len(owners) == len(owner_lines) and len(set(owners)) == 1 else None
+    if owner is None:
+        reasons.append("BANK_OWNER_AMBIGUOUS")
+    # Only complete, labelled monetary evidence is accepted; never infer free banking.
+    fee_lines = re.findall(r"\b(?:kontoführungsgebühr|kontofuehrungsgebuehr)\s*:\s*([^\n;]+)", text, re.I)
+    fees = []
+    for value in fee_lines:
+        match = re.fullmatch(r"(\d+(?:[,.]\d{2})?)\s*(?:EUR|€)\s*(?:pro\s+Monat|monatlich)\.?", value.strip(), re.I)
+        if match:
+            fees.append({"amount": match[1].replace(",", "."), "currency": "EUR", "period": "month"})
+    if not fees or len(fees) != len(fee_lines) or any(fee != fees[0] for fee in fees):
+        fees = []
+        reasons.append("BANK_FEES_AMBIGUOUS")
+    else:
+        fees = fees[:1]
+    conditions = sorted(set(value.strip() for value in re.findall(
+        r"\b(?:Bedingungen|Konditionen)\s*:\s*([^\n]+)", text, re.I) if value.strip()))
+    if len(conditions) > 1:
+        conditions = []
+        reasons.append("BANK_CONDITIONS_AMBIGUOUS")
+    if any(keyword in text.casefold() for keyword in _TOPIC_KEYWORDS[FAMILY_DOCUMENT_TOPICS[1]]):
+        reasons.append("BANK_MIGRATION_CONTEXT_CONFLICT")
+    if any(issuer.casefold() in text.casefold() for issuer in _ISSUERS):
+        reasons.append("BANK_ISSUER_CONFLICT")
+    return {
+        "bank": "Mittelbrandenburgische Sparkasse",
+        "form_type": form,
+        "product_type": "Girokonto" if forms & {"girovertrag", "girokonto"} else None,
+        "account_owner_alias": owner,
+        "fees": fees,
+        "conditions": conditions,
+    }, reasons
+
+
 def classify_family_document_text(text: str, subject_aliases: Sequence[str]) -> dict[str, object]:
     """Conservative local classifier. Ambiguity is REVIEW, never guessed ACCEPT."""
     normalized = re.sub(r"\s+", " ", text).casefold()
@@ -130,9 +182,16 @@ def classify_family_document_text(text: str, subject_aliases: Sequence[str]) -> 
     document_type, type_score = _unique_best(normalized, _DOCUMENT_TYPES)
     issuer_matches = [issuer for issuer in _ISSUERS if issuer.casefold() in normalized]
     issuer = issuer_matches[0] if len(issuer_matches) == 1 else None
+    bank_result = _bank_evidence(text, aliases)
+    if bank_result:
+        bank, bank_reasons = bank_result
+        topic, topic_score = FAMILY_DOCUMENT_TOPICS[5], 2
+        document_type, type_score = "Vertrag" if bank["form_type"] else None, 1
+        issuer = str(bank["bank"])
+        principal = bank["account_owner_alias"]
     event_candidates = _calendar_candidates(text, document_type, issuer)
 
-    reason_codes: list[str] = []
+    reason_codes: list[str] = list(bank_reasons) if bank_result else []
     if principal is None:
         reason_codes.append("OWNER_AMBIGUOUS")
     if topic is None:
@@ -154,6 +213,7 @@ def classify_family_document_text(text: str, subject_aliases: Sequence[str]) -> 
     )
     route = "ACCEPT" if not reason_codes and confidence >= 0.80 else "REVIEW"
     return {
+        **({"bank_contract": bank} if bank_result else {}),
         "route": route,
         "principal_subject_alias": principal,
         "linked_subject_aliases": matched_aliases,
