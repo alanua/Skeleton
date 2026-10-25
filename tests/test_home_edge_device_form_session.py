@@ -1,6 +1,6 @@
 import pytest
 from core.home_edge.device_form_session import (
-    DeviceSessionError, FormSessionProfile, acquire_device_session,
+    DeviceSessionError, FormSessionProfile, DeviceFormAction, acquire_device_session, perform_authenticated_form_action,
 )
 from core.secret_store import ResolvedSecret, SecretReference, SecretResolutionContext
 
@@ -97,3 +97,28 @@ def test_unrecognized_successful_http_page_is_not_authenticated():
 def test_login_form_with_menu_label_is_not_authentication():
     opener = Opener(protected=b'<html>Print Head Cleaning<input id="LogBox" type="password"></html>')
     assert not acquire_device_session(profile(), secret_ref=REF, secrets=Vault(), context=CTX, opener=opener)
+
+
+def test_authenticated_post_action_uses_same_opener_and_scoped_payload():
+    opener = Opener()
+    action = DeviceFormAction(
+        path="/general/clean.html",
+        fields=(("channel", "black"), ("strength", "normal")),
+        response_marker=b"Print Head Cleaning",
+    )
+    assert perform_authenticated_form_action(
+        profile(), action, secret_ref=REF, secrets=Vault(),
+        context=CTX, opener=opener,
+    )
+    assert len(opener.requests) == 3
+    assert opener.requests[2].full_url.endswith("/general/clean.html")
+    assert b"channel=black" in opener.requests[2].data
+
+
+def test_reject_action_without_positive_response_marker():
+    action = DeviceFormAction(path="/general/clean.html", fields=(), response_marker=b"")
+    with pytest.raises(DeviceSessionError, match="missing_action_response_marker"):
+        perform_authenticated_form_action(
+            profile(), action, secret_ref=REF, secrets=Vault(),
+            context=CTX, opener=Opener(),
+        )
