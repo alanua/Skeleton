@@ -262,8 +262,11 @@ class BrotherWBMClient:
         """Authenticate only to the status page; never invoke maintenance actions."""
         try:
             status, headers, data = self._request("GET", self.protected_path)
-            if self._is_authenticated_status(status, data):
-                return {"authenticated": True, "model": self.model_title}
+            if status == 200:
+                status, _headers, status_page = self._request("GET", self.status_path)
+                if self._is_authenticated_status(status, status_page):
+                    return {"authenticated": True, "model": self.model_title}
+                raise BrotherWBMError("authenticated_status_unverified")
             if status != 302:
                 raise BrotherWBMError("unexpected_protected_page_response")
             location = headers.get("location", "")
@@ -300,7 +303,11 @@ class BrotherWBMClient:
                 raise BrotherWBMError("authentication_failed")
             if post_status in {302, 303}:
                 redirect = urlsplit(post_headers.get("location", ""))
-                if redirect.scheme or redirect.netloc or redirect.path != self.status_path:
+                if (
+                    redirect.scheme
+                    or redirect.netloc
+                    or redirect.path not in {self.status_path, self.protected_path}
+                ):
                     raise BrotherWBMError("unexpected_post_redirect")
             status, _headers, status_page = self._request("GET", self.status_path)
             if not self._is_authenticated_status(status, status_page):
