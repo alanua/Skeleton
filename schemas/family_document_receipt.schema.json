@@ -2,15 +2,144 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "skeleton.family_document_receipt.schema.json",
   "type": "object",
-  "required": ["schema", "receipt_key", "receipt_type", "record_id"],
+  "required": [
+    "schema",
+    "receipt_key",
+    "receipt_type",
+    "record_id"
+  ],
   "additionalProperties": true,
   "properties": {
-    "schema": {"const": "skeleton.family_document_receipt.v1"},
-    "receipt_key": {"type": "string"},
-    "receipt_type": {"enum": ["intake", "terminal"]},
-    "intake_id": {"type": "string"},
-    "record_id": {"type": "string"},
-    "record_hash": {"type": "string"},
-    "status": {"type": "string"}
+    "schema": {
+      "const": "skeleton.family_document_receipt.v1"
+    },
+    "receipt_key": {
+      "type": "string"
+    },
+    "receipt_type": {
+      "enum": [
+        "intake",
+        "terminal"
+      ]
+    },
+    "intake_id": {
+      "type": "string"
+    },
+    "record_id": {
+      "type": "string"
+    },
+    "record_hash": {
+      "type": "string"
+    },
+    "status": {
+      "type": "string"
+    },
+    "scan_provenance": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/scan_provenance"
+      }
+    }
+  },
+  "$defs": {
+    "scan_provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "session_id",
+        "scanner_id",
+        "profile_id",
+        "completion_event_id",
+        "idempotency_key",
+        "sha256",
+        "page_count",
+        "slots",
+        "output_name",
+        "readback_verified"
+      ],
+      "properties": {
+        "session_id": {
+          "type": "string"
+        },
+        "scanner_id": {
+          "type": "string"
+        },
+        "profile_id": {
+          "type": "string"
+        },
+        "completion_event_id": {
+          "type": "string"
+        },
+        "idempotency_key": {
+          "type": "string"
+        },
+        "output_name": {
+          "type": "string"
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "page_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 500
+        },
+        "slots": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "sheet",
+              "side",
+              "kind",
+              "pass_id",
+              "event_id"
+            ],
+            "properties": {
+              "sheet": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "side": {
+                "enum": [
+                  "front",
+                  "back"
+                ]
+              },
+              "kind": {
+                "enum": [
+                  "page",
+                  "blank",
+                  "absent"
+                ]
+              },
+              "pass_id": {
+                "type": "string"
+              },
+              "event_id": {
+                "type": "string"
+              },
+              "page_index": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "output_page_index": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "component_sha256": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              }
+            }
+          }
+        },
+        "readback_verified": {
+          "const": true
+        }
+      }
+    }
   }
 }
