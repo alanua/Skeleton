@@ -1,3 +1,4 @@
+"""Explicit duplex producer. Operational state lives in the existing outbox DB.
 
 No timestamps or OCR content participate in pairing. A page index is zero based;
 physical sheet numbers are one based. Missing backs must be declared, never inferred.
