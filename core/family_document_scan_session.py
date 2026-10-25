@@ -14,9 +14,70 @@ import sqlite3
 import tempfile
 from contextlib import closing
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from core.family_document_sources import StableFileGate
+from core.local_inference_adapters import InferenceValidationError, validate_json_schema
+
+
+_TOKEN = {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$"}
+PROVENANCE_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["session_id", "scanner_id", "profile_id", "pages"],
+    "properties": {
+        "session_id": _TOKEN,
+        "scanner_id": _TOKEN,
+        "profile_id": _TOKEN,
+        "pages": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 500,
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["pass_id", "sheet", "side", "page"],
+                "properties": {
+                    "pass_id": _TOKEN,
+                    "sheet": {"type": "integer", "minimum": 1, "maximum": 500},
+                    "side": {"enum": ["front", "back"]},
+                    "page": {"type": "integer", "minimum": 1, "maximum": 500},
+                },
+            },
+        },
+    },
+}
+
+
+def validate_scan_provenance(value: Mapping[str, Any], page_count: int) -> dict[str, Any]:
+    validate_json_schema(value, PROVENANCE_SCHEMA)
+    pages = value["pages"]
+    if sorted(page["page"] for page in pages) != list(range(1, page_count + 1)):
+        raise InferenceValidationError("scan_page_coverage_invalid")
+    sides = {(page["pass_id"], page["sheet"], page["side"]) for page in pages}
+    if len(sides) != len(pages):
+        raise InferenceValidationError("scan_side_duplicate")
+    return {**value, "pages": [dict(page) for page in pages]}
+
+
+def safe_scan_provenance(receipt: Mapping[str, Any]) -> dict[str, Any]:
+    page_count = int(receipt["page_count"])
+    safe = {
+        "session_id": receipt["session_id"],
+        "scanner_id": receipt["scanner_id"],
+        "profile_id": receipt["profile_id"],
+        "pages": [
+            {
+                "pass_id": slot["pass_id"],
+                "sheet": slot["sheet"],
+                "side": slot["side"],
+                "page": slot["output_page_index"] + 1,
+            }
+            for slot in receipt["slots"]
+            if isinstance(slot.get("output_page_index"), int)
+        ],
+    }
+    return validate_scan_provenance(safe, page_count)
 
 
 class SessionReview(ValueError):
@@ -258,16 +319,16 @@ class ScanSessionAssembler:
         return document, receipt
 
     def write_handoff(self, session_id: str, handoff_root: Path) -> Path:
-        # The existing consumer's strict packet schema is preserved. Provenance is
-        # the durable local inference receipt in this same SQLite session row.
+        # Keep only bounded identifiers and output-page coordinates in the local inference packet.
         from core.family_document_intake import build_intake_request
         document, receipt = self.verified_document(session_id)
         request = build_intake_request(document.path, source_id=document.source_id, source_sha256=document.sha256, scan_provenance=receipt)
         if request.page_count != receipt["page_count"]:
             raise SessionReview("OCR_PAGE_COUNT_MISMATCH")
+        provenance = safe_scan_provenance(receipt)
         key = "scan:" + digest(session_id.encode()) + ":" + document.sha256
         packet = {"schema": "skeleton.family_document_inference_handoff.v1", "idempotency_key": key,
-                  "payload": {"ocr_text": request.ocr_text, "source_kind": "mfp", "page_count": request.page_count, "mime_type": request.mime_type}}
+                  "payload": {"ocr_text": request.ocr_text, "source_kind": "mfp", "page_count": request.page_count, "mime_type": request.mime_type, "scan_provenance": provenance}}
         name = digest(key.encode()) + ".json"
         for status in ("accepted", "processing", "review", "pending"):
             existing = Path(handoff_root) / status / name

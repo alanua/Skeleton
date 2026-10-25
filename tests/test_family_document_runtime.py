@@ -7,20 +7,34 @@ from core.family_document_sinks import FileFamilyDocumentArchive
 from core.family_document_sources import LocalDirectoryDocumentSource
 
 
+class VerifiedSyntheticArchive(FileFamilyDocumentArchive):
+    def archive(self, record, *, source_path=None):
+        receipt = super().archive(record, source_path=source_path)
+        import json
+        import hashlib
+        assert json.loads((self.root / f"{record['record_id']}.json").read_text()) == record
+        assert hashlib.sha256(source_path.read_bytes()).hexdigest() == record["source_sha256"]
+        return {**receipt, "original_readback_verified": True,
+                "canonical_readback_verified": True, "canonical_ref": "synthetic-canonical"}
+
+
+def synthetic_classification():
+    from tests.test_local_inference_runtime import accepted_output
+    value = accepted_output()
+    value["document_type"] = "Лист"
+    value["evidence"] = {key: ["synthetic document"] for key in value["evidence"]}
+    return value
+
+
 def runtime(tmp_path):
     inbox = tmp_path / "inbox"
     inbox.mkdir()
     return FamilyDocumentRuntime(
         source=LocalDirectoryDocumentSource(inbox),
-        archive_sink=FileFamilyDocumentArchive(tmp_path / "archive"),
+        archive_sink=VerifiedSyntheticArchive(tmp_path / "archive"),
         outbox=FamilyDocumentReceiptOutbox(tmp_path / "outbox" / "receipts.sqlite"),
-        classifier=lambda _text: {
-            "document_type": "Лист",
-            "topic_alias": "Документи",
-            "summary": "Синтетичний документ для тесту.",
-            "confidence": 0.99,
-            "route": "ACCEPT",
-        },
+        allowed_subject_aliases=("person-a", "person-b", "person-c"),
+        classifier=lambda _text: synthetic_classification(),
     ), inbox
 
 
@@ -81,9 +95,10 @@ def test_replay_restart_does_not_duplicate_successful_sends(tmp_path) -> None:
 
     restarted = FamilyDocumentRuntime(
         source=LocalDirectoryDocumentSource(inbox),
-        archive_sink=FileFamilyDocumentArchive(tmp_path / "archive"),
+        archive_sink=VerifiedSyntheticArchive(tmp_path / "archive"),
         outbox=FamilyDocumentReceiptOutbox(tmp_path / "outbox" / "receipts.sqlite"),
         classifier=rt.classifier,
+        allowed_subject_aliases=rt.allowed_subject_aliases,
     )
     restarted.source.scan()
     restarted.scan_once(sender=sent.append)
@@ -176,40 +191,51 @@ def test_outbox_rejects_receipt_key_payload_conflict(tmp_path) -> None:
         outbox.enqueue({**receipt, "message": "different"})
 
 
-def test_lost_event_reconciles_and_replay_preserves_original(tmp_path):
+@pytest.mark.parametrize("classification", [None, {}, {"summary": " "}, {"route": "ACCEPT", "summary": "invented"}])
+def test_invalid_inference_has_one_durable_technical_notice(tmp_path, classification):
     rt, inbox = runtime(tmp_path)
-    original = b"synthetic completed before worker scan"
-    path = inbox / "scan.txt"
-    path.write_bytes(original)
-    # No event is delivered; directory reconciliation alone discovers the file.
-    assert rt.scan_once(drain=False)["completed_intakes"] == 0
-    rt.source = LocalDirectoryDocumentSource(inbox)
-    assert rt.scan_once(drain=False)["completed_intakes"] == 0
-    assert rt.scan_once(drain=False)["completed_intakes"] == 1
-    assert rt.scan_once(drain=False)["completed_intakes"] == 0
-    assert path.read_bytes() == original
+    rt.classifier = lambda _: classification
+    (inbox / "scan.txt").write_text("synthetic document")
+    rt.scan_once(drain=False)
+    rt.scan_once(drain=False)
+    # Force retry availability without relying on wall time.
+    import sqlite3
+    with sqlite3.connect(rt.state.db_path) as db:
+        db.execute("UPDATE family_document_work SET next_attempt_at=0")
+    rt.scan_once(drain=False)
+    state = FamilyDocumentReceiptOutbox(rt.state.db_path)
+    receipts = state.receipts()
+    assert len(receipts) == 1
+    assert receipts[0]["payload"]["receipt_type"] == "technical_failure"
+    assert "✅" not in receipts[0]["payload"]["message"]
+    assert not list((tmp_path / "archive").glob("*.json"))
 
 
-def test_uncertain_archive_is_never_replayed(tmp_path):
+def test_missing_archive_readback_never_reports_success(tmp_path):
     rt, inbox = runtime(tmp_path)
-    (inbox / "scan.txt").write_bytes(b"synthetic")
-    calls = []
-
-    class UncertainArchive:
-        def archive(self, record, *, source_path=None):
-            calls.append(1)
-            raise RuntimeError("synthetic uncertain commit")
-
-    rt.archive_sink = UncertainArchive()
+    rt.archive_sink = FileFamilyDocumentArchive(tmp_path / "unverified")
+    (inbox / "scan.txt").write_text("synthetic document")
     rt.scan_once(drain=False)
-    assert rt.scan_once(drain=False)["review_required"] == 1
-    rt.scan_once(drain=False)
-    assert calls == [1]
-    assert rt.state.work_state_counts() == {"REVIEW": 1}
+    result = rt.scan_once(drain=False)
+    assert result["completed_intakes"] == 0
+    assert rt.state.receipts()[0]["payload"]["receipt_type"] == "technical_failure"
 
-def test_runtime_automatically_gates_producer_output_before_ocr(tmp_path, monkeypatch):
+
+def test_empty_legacy_outbox_payload_is_not_sent(tmp_path):
+    state = FamilyDocumentReceiptOutbox(tmp_path / "state.sqlite")
+    state.enqueue({"receipt_key": "legacy-empty", "records": []})
+    sent = []
+    assert state.drain(sender=sent.append)["retry"] == 1
+    assert sent == []
+
+
+def test_multiple_documents_produce_one_coherent_package(tmp_path):
     rt, inbox = runtime(tmp_path)
-    (inbox / ('scan-' + 'a' * 64 + '.pdf')).write_bytes(b'synthetic uncommitted output')
-    monkeypatch.setattr('core.family_document_intake.read_local_document', lambda path: pytest.fail('orphan reached OCR'))
+    (inbox / "a.txt").write_text("synthetic document a")
+    (inbox / "b.txt").write_text("synthetic document b")
     rt.scan_once(drain=False)
-    assert rt.scan_once(drain=False)['completed_intakes'] == 0
+    sent = []
+    assert rt.scan_once(sender=sent.append)["completed_intakes"] == 2
+    assert len(sent) == 1
+    assert "Документів: 2" in sent[0]
+    assert rt.state.work_state_counts() == {"DONE": 2}

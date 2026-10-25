@@ -141,7 +141,14 @@ def test_handoff_retry_uses_existing_consumer_packet(producer, tmp_path, monkeyp
     from core.family_document_local_inference import _HANDOFF_SCHEMA
     from core.local_inference_adapters import validate_json_schema
     validate_json_schema(json.loads(packet.read_bytes()), _HANDOFF_SCHEMA)
-    assert json.loads(packet.read_bytes())['idempotency_key'] == receipt['idempotency_key']
+    accepted_packet = json.loads(packet.read_bytes())
+    assert accepted_packet['idempotency_key'] == receipt['idempotency_key']
+    provenance = accepted_packet['payload']['scan_provenance']
+    assert (provenance['session_id'], provenance['scanner_id'], provenance['profile_id']) == (
+        receipt['session_id'], receipt['scanner_id'], receipt['profile_id'])
+    assert [item['page'] for item in provenance['pages']] == list(range(1, 15))
+    assert all(set(item) == {'pass_id', 'sheet', 'side', 'page'} for item in provenance['pages'])
+    assert 'path' not in str(provenance) and 'component_sha256' not in str(provenance)
     (root / 'accepted').mkdir()
     accepted = root / 'accepted' / packet.name
     packet.rename(accepted)
@@ -219,27 +226,48 @@ def test_verified_producer_flows_through_existing_runtime_once(producer, tmp_pat
         assert path.read_bytes() == original
         calls.append('ocr')
         return OcrResult('synthetic document', 14, 'application/pdf', document.sha256)
-    class Archive:
-        def archive(self, record, *, source_path):
-            assert source_path.read_bytes() == original
+    from tests.test_family_document_runtime import VerifiedSyntheticArchive, synthetic_classification
+
+    class Archive(VerifiedSyntheticArchive):
+        def archive(self, record, *, source_path=None):
             calls.append('archive')
-            return {'status': 'DONE'}
+            return super().archive(record, source_path=source_path)
+
     monkeypatch.setattr('core.family_document_intake.read_local_document', ocr)
-    runtime = FamilyDocumentRuntime(source=LocalDirectoryDocumentSource(producer.output_directory, scan_sessions=producer), archive_sink=Archive(), outbox=producer.state)
+    runtime = FamilyDocumentRuntime(
+        source=LocalDirectoryDocumentSource(producer.output_directory, scan_sessions=producer),
+        archive_sink=Archive(tmp_path / 'archive'),
+        outbox=producer.state,
+        classifier=lambda _: synthetic_classification(),
+        allowed_subject_aliases=('person-a', 'person-b', 'person-c'),
+    )
     assert runtime.scan_once(drain=False)['completed_intakes'] == 0
     assert runtime.scan_once(drain=False)['completed_intakes'] == 1
     assert calls == ['ocr', 'archive']
     assert runtime.scan_once(drain=False)['completed_intakes'] == 0
     assert calls == ['ocr', 'archive']
-    assert producer.state.receipts()[0]['payload']['scan_provenance'] == [receipt]
+    safe_receipt = producer.state.receipts()[0]['payload']['scan_provenance'][0]
+    assert (safe_receipt['session_id'], safe_receipt['scanner_id'], safe_receipt['profile_id']) == (
+        receipt['session_id'], receipt['scanner_id'], receipt['profile_id'])
+    assert [page['page'] for page in safe_receipt['pages']] == list(range(1, 15))
+    assert 'component_sha256' not in str(safe_receipt) and 'event_id' not in str(safe_receipt)
     assert document.path.read_bytes() == original
 
 
 def test_safe_scan_receipt_schema(producer, tmp_path):
     import jsonschema
     ready(producer, tmp_path)
+    from core.family_document_scan_session import safe_scan_provenance
     schema = json.loads((Path(__file__).parents[1] / 'schemas/family_document_receipt.schema.json').read_text())
-    jsonschema.validate(producer.get('synthetic-session')['receipt'], schema['$defs']['scan_provenance'])
+    safe = safe_scan_provenance(producer.get('synthetic-session')['receipt'])
+    jsonschema.validate({
+        'schema': 'skeleton.family_document_receipt.v1',
+        'receipt_key': 'synthetic-package:1',
+        'receipt_type': 'package_part',
+        'status': 'DONE',
+        'message': 'Synthetic package complete',
+        'scan_provenance': [safe],
+    }, schema)
 
 
 def test_unavailable_pdf_backend_routes_review(producer, tmp_path, monkeypatch):

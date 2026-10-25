@@ -110,10 +110,41 @@ Original component bytes are never modified; the archive-before-memory sink
 order is unchanged. Package receipts retain safe scan provenance.
 
 Optional `--handoff-root` writes to the existing inference handoff's `pending`
-directory only after verification and OCR. The existing consumer's strict packet
-schema is unchanged: its `idempotency_key` links to the durable local scan
-receipt containing safe provenance, rather than placing provenance in model
-output. Accepted/processing/review/pending packet replays are recognized; the
-consumer's existing queue idempotency handles crash/retry. No additional worker,
-queue, archive or sender is introduced. Component events and OCR packets are
-private local artifacts and must never be printed in public logs.
+directory only after PDF verification and OCR. Its payload includes a validated
+`scan_provenance` object with bounded session/scanner/profile/pass identifiers,
+physical sheet and side, and one-based output page numbers. The provenance omits
+component paths, component hashes, event payloads, and OCR. The existing consumer
+validates this shape, preserves it in the local inference queue, and writes it to
+the durable handoff receipt with aggregate page count, request ID, and status.
+Accepted/processing/review/pending packet replays use the existing queue
+idempotency. No additional worker, queue, archive, or sender is introduced.
+Component events and OCR packets remain private local artifacts.
+
+
+## Truthful completion and quarantine proposals
+
+The runtime validates classifier output against the local family-document acceptance
+contract and the configured exact subject aliases. Empty, missing, REVIEW, malformed,
+unsupported evidence, or failed inference cannot produce a completion report. Evidence
+quotes must occur in the OCR input; all required confidence fields must meet 0.80.
+Completion also requires affirmative original and canonical archive readback, a
+canonical reference, and the calendar completion gate. Compatibility file-only sinks
+are insufficient for a production completion report.
+
+The existing SQLite receipt outbox atomically saves all package report parts together
+with work completion markers before delivery. Failures use a separate
+`technical_failure` receipt with a stable source/content-derived key, a fixed safe
+reason, and aggregate document/page counts (zero pages means unknown). Retries and
+restarts reuse that receipt. Delivery retains the existing retry behavior: an external
+sender accepting a message immediately before a process crash can still cause a
+transport retry; there is no new sender or exactly-once network guarantee.
+
+`propose_quarantine_reevaluation(evaluator, limit=20)` evaluates at most 100 existing
+REVIEW work entries per invocation, once per source/content and acceptance gate
+version. The local evaluator supplies classifier output and its private request for
+validation, followed by report rendering validation. Only a proposal decision is
+saved in the existing state database; no work state, archive, historical record, or
+canonical data is changed. REVIEW and evaluation failures stay quarantined. Even a
+fully validated acceptance proposal requires a separate operator-controlled action;
+this method never releases or re-archives history. Its returned counts are local
+operational metadata and are not published as backlog receipts.

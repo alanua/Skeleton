@@ -21,6 +21,8 @@ class FamilyDocumentState(Protocol):
     def claim_work(self, source_id: str, source_sha256: str, **kwargs: Any) -> str | None: ...
     def begin_archive(self, source_id: str, source_sha256: str, token: str) -> None: ...
     def enqueue(self, receipt: Mapping[str, Any]) -> bool: ...
+    def complete_package(self, receipts: Any, records: Any) -> None: ...
+    def propose_quarantine_reevaluation(self, evaluator: Any, *, limit: int = 20) -> dict[str, int]: ...
     def should_process(self, source_id: str, source_sha256: str, *, now: int | None = None) -> bool: ...
     def mark_work_done(self, source_id: str, source_sha256: str, *, token: str | None = None) -> None: ...
     def mark_work_failure(self, source_id: str, source_sha256: str, reason: str, *, token: str | None = None, now: int | None = None, max_attempts: int = 5, base_delay_seconds: int = 30) -> str: ...
@@ -61,6 +63,70 @@ class FamilyDocumentReceiptOutbox:
                     (receipt_key, payload_hash, payload),
                 )
         return True
+
+    def complete_package(self, receipts: Any, records: Any) -> None:
+        """Atomically queue a verified package report and mark its work complete."""
+        with closing(sqlite3.connect(str(self.db_path))) as connection:
+            with connection:
+                for receipt in receipts:
+                    key = str(receipt["receipt_key"])
+                    digest = content_hash(receipt)
+                    row = connection.execute(
+                        "SELECT payload_hash FROM family_document_receipts WHERE receipt_key=?",
+                        (key,),
+                    ).fetchone()
+                    if row is not None and row[0] != digest:
+                        raise ValueError("receipt key reused with different payload")
+                    connection.execute(
+                        "INSERT OR IGNORE INTO family_document_receipts(receipt_key,state,payload_hash,payload_json,attempts) VALUES (?,'PENDING',?,?,0)",
+                        (key, digest, canonical_json(receipt)),
+                    )
+                for record in records:
+                    changed = connection.execute(
+                        "UPDATE family_document_work SET state='DONE',next_attempt_at=0,last_error=NULL,claim_token=NULL,lease_until=0 WHERE source_id=? AND source_sha256=? AND state='CLAIMED' AND claim_token=?",
+                        (record["source_id"], record["source_sha256"], record["_claim_token"]),
+                    ).rowcount
+                    if changed != 1:
+                        raise RuntimeError("claim no longer owns package completion")
+
+    def propose_quarantine_reevaluation(self, evaluator: Any, *, limit: int = 20) -> dict[str, int]:
+        """Store bounded proposals only; never release or archive quarantined records."""
+        from core.family_document_local_inference import validate_family_document_output
+
+        if isinstance(limit, bool) or not 1 <= limit <= 100:
+            raise ValueError("reevaluation_limit_invalid")
+        counts = {"evaluated": 0, "acceptance_proposed": 0, "review": 0}
+        with closing(sqlite3.connect(str(self.db_path))) as connection:
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS family_document_reevaluation (source_id TEXT, source_sha256 TEXT, gate TEXT, decision TEXT, PRIMARY KEY(source_id,source_sha256,gate))"
+            )
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                rows = connection.execute(
+                    "SELECT w.source_id,w.source_sha256 FROM family_document_work w WHERE w.state='REVIEW' AND NOT EXISTS (SELECT 1 FROM family_document_reevaluation p WHERE p.source_id=w.source_id AND p.source_sha256=w.source_sha256 AND p.gate='evidence-v1') ORDER BY w.source_id,w.source_sha256 LIMIT ?",
+                    (limit,),
+                ).fetchall()
+                for source_id, sha256 in rows:
+                    decision = "REVIEW"
+                    try:
+                        output, payload = evaluator(source_id, sha256)
+                        validated = validate_family_document_output(output, payload)
+                        if validated["route"] == "ACCEPT":
+                            render_package_report([{"classification": validated, "page_count": payload.get("page_count", 1)}])
+                            decision = "ACCEPTANCE_PROPOSED"
+                    except Exception:
+                        pass
+                    connection.execute(
+                        "INSERT INTO family_document_reevaluation VALUES (?,?,'evidence-v1',?)",
+                        (source_id, sha256, decision),
+                    )
+                    counts["evaluated"] += 1
+                    counts["acceptance_proposed" if decision == "ACCEPTANCE_PROPOSED" else "review"] += 1
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        return counts
 
     def record_lifecycle(self, **kwargs: Any) -> Mapping[str, Any]:
         item = self.lifecycle.record(item_kind="document", **kwargs)
@@ -239,12 +305,9 @@ class FamilyDocumentReceiptOutbox:
                 payload = json.loads(str(row["payload_json"]))
                 message = payload.get("message")
                 if not isinstance(message, str) or not message.strip():
-                    legacy_messages = render_package_report(payload.get("records", []))
-                    if len(legacy_messages) != 1:
-                        self._mark_retry(connection, str(row["receipt_key"]), "invalid_outbox_payload")
-                        retry += 1
-                        continue
-                    message = legacy_messages[0]
+                    self._mark_retry(connection, str(row["receipt_key"]), "invalid_outbox_payload")
+                    retry += 1
+                    continue
                 try:
                     sender(message)
                 except Exception as exc:

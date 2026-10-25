@@ -10,8 +10,10 @@ from core.family_document_calendar import (
     FamilyDocumentCalendarReceipt,
     NoopFamilyDocumentCalendar,
 )
+from core.family_document_local_inference import validate_family_document_output
+from core.family_document_scan_session import safe_scan_provenance
 from core.family_document_intake import build_family_document_record, build_intake_request
-from core.family_document_report import render_package_report
+from core.family_document_report import render_package_report, useful_classification, render_technical_failure
 from core.family_document_sources import LocalDirectoryDocumentSource, read_snapshot
 from core.family_document_state import FamilyDocumentReceiptOutbox, FamilyDocumentState
 from core.private_memory_history import content_hash
@@ -36,6 +38,7 @@ class FamilyDocumentRuntime:
         outbox: FamilyDocumentState,
         classifier: Callable[[str], Mapping[str, Any]] | None = None,
         calendar: FamilyDocumentCalendar | None = None,
+        allowed_subject_aliases: tuple[str, str, str] | None = None,
     ) -> None:
         self.source = source
         if source.scan_sessions is None and isinstance(outbox, FamilyDocumentReceiptOutbox):
@@ -44,6 +47,7 @@ class FamilyDocumentRuntime:
         self.archive_sink = archive_sink
         self.state = outbox
         self.outbox = outbox  # compatibility alias; state remains explicitly noncanonical
+        self.allowed_subject_aliases = allowed_subject_aliases
         self.classifier = classifier
         self.calendar = calendar or NoopFamilyDocumentCalendar()
 
@@ -78,6 +82,7 @@ class FamilyDocumentRuntime:
                     },
                 ),
             )
+            page_count = 0
             try:
                 request = build_intake_request(
                     document.path,
@@ -85,6 +90,12 @@ class FamilyDocumentRuntime:
                     source_sha256=document.sha256,
                     snapshot=document.snapshot,
                     scan_provenance=document.scan_provenance,
+                )
+                page_count = request.page_count
+                safe_provenance = (
+                    safe_scan_provenance(document.scan_provenance)
+                    if document.scan_provenance is not None
+                    else None
                 )
                 self.state.record_lifecycle(
                     source_ref=document.source_id,
@@ -106,6 +117,20 @@ class FamilyDocumentRuntime:
                     "reason_codes": ["CLASSIFIER_NOT_CONFIGURED"],
                     "event_candidates": [],
                 }
+                if not useful_classification(classification):
+                    raise ValueError("inference_unavailable")
+                classification_payload = {
+                    "ocr_text": request.ocr_text,
+                    "source_kind": request.source_kind,
+                    "allowed_subject_aliases": list(self.allowed_subject_aliases or ()),
+                    "page_count": request.page_count,
+                    "mime_type": request.mime_type,
+                }
+                if safe_provenance is not None:
+                    classification_payload["scan_provenance"] = safe_provenance
+                classification = validate_family_document_output(classification, classification_payload)
+                if classification["route"] != "ACCEPT":
+                    raise ValueError("inference_requires_review")
                 record = build_family_document_record(request, classification)
                 self.state.record_lifecycle(
                     source_ref=document.source_id,
@@ -139,17 +164,28 @@ class FamilyDocumentRuntime:
                 calendar_receipt = self.calendar.upsert(record)
                 _require_calendar_receipt(calendar_receipt)
                 report_record = dict(record)
-                if document.scan_provenance is not None:
-                    report_record["scan_provenance"] = document.scan_provenance
+                if safe_provenance is not None:
+                    report_record["scan_provenance"] = safe_provenance
                 report_record["storage_label"] = archive_receipt.get("storage_label") or "Сімейний архів"
                 report_record["completion_evidence"] = _completion_evidence(
                     record,
                     archive_receipt,
                     calendar_receipt,
                 )
+                report_record["_claim_token"] = token
                 records.append(report_record)
-                self.state.mark_work_done(document.source_id, document.sha256, token=token)
             except Exception as exc:
+                failure_key = content_hash({"source": document.source_id, "sha256": document.sha256})[:32]
+                self.state.enqueue({
+                    "schema": FAMILY_DOCUMENT_RECEIPT_SCHEMA,
+                    "receipt_type": "technical_failure",
+                    "receipt_key": f"failure:{failure_key}",
+                    "status": "REVIEW",
+                    "reason_code": "INTAKE_FAILED",
+                    "document_count": 1,
+                    "page_count": page_count,
+                    "message": render_technical_failure("INTAKE_FAILED", 1, page_count),
+                })
                 state = self.state.mark_work_failure(
                     document.source_id,
                     document.sha256,
@@ -178,8 +214,9 @@ class FamilyDocumentRuntime:
         identities = sorted(str(record["record_id"]) for record in records)
         package_key = content_hash({"records": identities})[:32]
         messages = render_package_report(records)
+        receipts = []
         for index, message in enumerate(messages, start=1):
-            self.state.enqueue(
+            receipts.append(
                 {
                     "schema": FAMILY_DOCUMENT_RECEIPT_SCHEMA,
                     "receipt_type": "package_part",
@@ -192,14 +229,28 @@ class FamilyDocumentRuntime:
                     "scan_provenance": [record["scan_provenance"] for record in records if record.get("scan_provenance")],
                 }
             )
+        self.state.complete_package(receipts, records)
+        for record in records:
+            self.state.record_lifecycle(
+                source_ref=str(record["source_id"]),
+                source_hash=str(record["source_sha256"]),
+                state="DONE",
+                blocker_reason="PACKAGE_REPORT_QUEUED",
+                next_action="none",
+                provenance_refs=(f"family_document:{record['record_id']}",),
+                canonical_ref=str(record.get("completion_evidence", {}).get("canonical_ref") or ""),
+                record_ref=f"family_document:{record['record_id']}",
+            )
 
 
 def _require_authoritative_archive_receipt(receipt: Mapping[str, Any]) -> None:
+    if not receipt.get("canonical_ref"):
+        raise RuntimeError("canonical reference missing")
     if receipt.get("status") != "DONE":
         raise RuntimeError("archive commit not complete")
-    if "original_readback_verified" in receipt and receipt.get("original_readback_verified") is not True:
+    if receipt.get("original_readback_verified") is not True:
         raise RuntimeError("original archive readback not verified")
-    if "canonical_readback_verified" in receipt and receipt.get("canonical_readback_verified") is not True:
+    if receipt.get("canonical_readback_verified") is not True:
         raise RuntimeError("MemoryGateway exact readback not verified")
 
 
