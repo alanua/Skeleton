@@ -57,3 +57,63 @@ or contractual conditions are supplied from bank knowledge. The schema keeps
 all new fields optional for compatibility with existing records.
 
 The intake builder retains the structured bank_contract object in each document record, subject to the record schema.
+
+## Explicit duplex producer
+
+`core.family_document_scan_session.ScanSessionAssembler` is the canonical
+producer. `scripts/brother-duplex-scan` and the compatibility conveyor entry point
+submit events to it; neither controls a scanner. Use the existing outbox SQLite
+path with `--state-db`, the existing intake inbox with `--output-directory`, and
+an explicit JSON event file with `--event`. Production assembly requires the
+existing optional `pypdf` dependency. Missing PDF support routes REVIEW.
+
+Every event requires opaque `session_id`, `scanner_id`, `profile_id`, and
+`event_id` identifiers (ASCII letters, digits, underscores or hyphens). `start`
+also requires `sheet_count`. A `pass` requires a unique `pass_id`, a `side`
+(`front` or `back`), `orientation: "physical_slots"`, and `pages`. Each page
+requires a one-based physical `sheet`, `kind` (`page` or `blank`), component
+`path`, captured `sha256`, and zero-based component `page_index`. A blank is a
+real captured page and is retained. An absent back is exactly
+`{"sheet": 7, "kind": "absent"}`. It occupies a physical slot but emits no PDF
+page. There is no automatic blank deletion, sheet renumbering, or inferred back
+mapping. For reverse feeds, list each captured page with its actual physical
+sheet, for example back component indices 0..5 mapped to sheets 6..1. Eight
+fronts and those six backs plus explicitly absent backs 7 and 8 produce exactly
+14 pages in physical sheet/front/back order.
+
+Only `complete` finalizes. Every physical front/back slot must be accounted for.
+A `timeout` persists recoverable REVIEW and never produces a completed output.
+The same explicit session/scanner/profile may continue after any time gap;
+timestamps and OCR never associate passes. Mismatches, conflicting replays,
+and ambiguous orientation require operator review. Exact event replay survives
+restart; finalized sessions reject new or conflicting events without changing
+their receipt. Correct incomplete sessions with additional explicit passes and
+a new completion event; mapping conflicts require a new reviewed session.
+
+The producer reads and hashes component snapshots, validates page indices,
+assembles in memory, verifies page count/readback, checks components again, and
+atomically publishes a private `scan-<opaque digest>.pdf`. Finalized receipts
+live in `family_document_scan_sessions` in the existing operational database.
+They contain session/scanner/profile, completion event, pass/event, physical
+sheet/side, input/output page indices, explicit blank/absent markers, component
+hashes, final hash and page count. Local component paths remain only in private
+event state, never in the safe receipt.
+
+`FamilyDocumentRuntime` automatically attaches the session verifier to its
+existing source when using `FamilyDocumentReceiptOutbox`. Reserved `scan-*.pdf`
+outputs remain hidden until their SQLite completion commits, including a crash
+between file publication and transaction commit. The existing stable-file gate
+then checks the final hash, PDF readback and count before intake/OCR. Ordinary
+local-file intake continues through the same runtime. Explicit producer-only
+sources can pass `scan_sessions=assembler` to `LocalDirectoryDocumentSource`.
+Original component bytes are never modified; the archive-before-memory sink
+order is unchanged. Package receipts retain safe scan provenance.
+
+Optional `--handoff-root` writes to the existing inference handoff's `pending`
+directory only after verification and OCR. The existing consumer's strict packet
+schema is unchanged: its `idempotency_key` links to the durable local scan
+receipt containing safe provenance, rather than placing provenance in model
+output. Accepted/processing/review/pending packet replays are recognized; the
+consumer's existing queue idempotency handles crash/retry. No additional worker,
+queue, archive or sender is introduced. Component events and OCR packets are
+private local artifacts and must never be printed in public logs.

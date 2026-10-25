@@ -206,3 +206,10 @@ def test_uncertain_archive_is_never_replayed(tmp_path):
     rt.scan_once(drain=False)
     assert calls == [1]
     assert rt.state.work_state_counts() == {"REVIEW": 1}
+
+def test_runtime_automatically_gates_producer_output_before_ocr(tmp_path, monkeypatch):
+    rt, inbox = runtime(tmp_path)
+    (inbox / ('scan-' + 'a' * 64 + '.pdf')).write_bytes(b'synthetic uncommitted output')
+    monkeypatch.setattr('core.family_document_intake.read_local_document', lambda path: pytest.fail('orphan reached OCR'))
+    rt.scan_once(drain=False)
+    assert rt.scan_once(drain=False)['completed_intakes'] == 0
