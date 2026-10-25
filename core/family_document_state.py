@@ -335,6 +335,11 @@ class FamilyDocumentReceiptOutbox:
             for name, definition in (("claim_token", "TEXT"), ("lease_until", "INTEGER NOT NULL DEFAULT 0"), ("archive_started", "INTEGER NOT NULL DEFAULT 0")):
                 if name not in columns:
                     connection.execute(f"ALTER TABLE family_document_work ADD COLUMN {name} {definition}")
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS family_document_scan_sessions (
+                    session_id TEXT PRIMARY KEY, status TEXT NOT NULL, payload TEXT NOT NULL
+                )"""
+            )
             connection.commit()
         self.lifecycle.initialize()
         self.db_path.chmod(0o600)
