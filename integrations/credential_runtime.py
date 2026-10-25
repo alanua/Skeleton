@@ -116,11 +116,26 @@ _GMAIL_SECONDARY = RegisteredMaterialCredential(
     target_id="mail-gmail-secondary-oauth-consumer",
 )
 
+_BROTHER_WBM = RegisteredMaterialCredential(
+    service_id="brother-mfc-j4540dw",
+    alias="wbm-admin",
+    reference_credential_name="brother-wbm-secret-ref",
+    context=SecretResolutionContext(
+        machine_identity="home-edge-01",
+        audience="brother-mfc-j4540dw-wbm",
+        task_kind="bounded_maintenance_status",
+    ),
+    action_id="read-authenticated-status",
+    target_id="brother-wbm-status-session",
+    bootstrap_required=True,
+)
+
 _REGISTERED_ENVIRONMENT_CREDENTIALS = {
     (_RUNNER_OPENHANDS.service_id, _RUNNER_OPENHANDS.alias): _RUNNER_OPENHANDS,
     (_RUNNER_CODEX_OPENAI.service_id, _RUNNER_CODEX_OPENAI.alias): _RUNNER_CODEX_OPENAI,
 }
 _REGISTERED_MATERIAL_CREDENTIALS = {
+    (_BROTHER_WBM.service_id, _BROTHER_WBM.alias): _BROTHER_WBM,
     (_GMAIL_PRIMARY.service_id, _GMAIL_PRIMARY.alias): _GMAIL_PRIMARY,
     (_GMAIL_SECONDARY.service_id, _GMAIL_SECONDARY.alias): _GMAIL_SECONDARY,
 }
