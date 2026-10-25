@@ -62,6 +62,69 @@ def _base(profile: FormSessionProfile) -> str:
     return ("https" if profile.tls else "http") + "://" + str(addr)
 
 
+@dataclass(frozen=True)
+class DeviceFormAction:
+    """Pre-registered POST operation; not arbitrary web commands."""
+    path: str
+    fields: tuple[tuple[str, str], ...]
+    response_marker: bytes
+
+
+def perform_authenticated_form_action(
+    profile: FormSessionProfile,
+    action: DeviceFormAction,
+    *,
+    secret_ref: SecretReference,
+    secrets: SecretStoreGate,
+    context: SecretResolutionContext,
+    opener: urllib.request.OpenerDirector | None = None,
+) -> bool:
+    """Authenticate and POST using one cookie jar, with fail-closed evidence.
+
+    Return value confirms an expected HTTP response, not physical execution.
+    An independent verifier must check the device's actual state.
+    """
+    _path(action.path)
+    if not action.response_marker or len(action.response_marker) > 256:
+        raise DeviceSessionError("missing_action_response_marker")
+    if len(action.fields) > 12 or any(
+        not k.isidentifier() or len(k) > 64 or not isinstance(v, str) or len(v) > 256
+        for k, v in action.fields
+    ):
+        raise DeviceSessionError("invalid_action_fields")
+    base = _base(profile)
+    jar = CookieJar()
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            raise DeviceSessionError("redirect_rejected")
+    session = opener or urllib.request.build_opener(
+        urllib.request.HTTPCookieProcessor(jar), NoRedirect()
+    )
+    authenticated = acquire_device_session(
+        profile, secret_ref=secret_ref, secrets=secrets,
+        context=context, opener=session,
+    )
+    if not authenticated:
+        raise DeviceSessionError("authentication_not_confirmed")
+    payload = urllib.parse.urlencode(action.fields).encode("utf-8")
+    if len(payload) > 4096:
+        raise DeviceSessionError("action_payload_too_large")
+    req = urllib.request.Request(
+        base + action.path, method="POST", data=payload,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    try:
+        with session.open(req, timeout=15) as response:
+            raw = response.read(profile.max_response_bytes + 1)
+            if len(raw) > profile.max_response_bytes:
+                raise DeviceSessionError("action_response_too_large")
+            return response.status == 200 and action.response_marker in raw
+    except DeviceSessionError:
+        raise
+    except Exception:
+        raise DeviceSessionError("device_action_failed") from None
+
+
 def acquire_device_session(
     profile: FormSessionProfile,
     *,
