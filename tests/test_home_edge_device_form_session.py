@@ -122,3 +122,23 @@ def test_reject_action_without_positive_response_marker():
             profile(), action, secret_ref=REF, secrets=Vault(),
             context=CTX, opener=Opener(),
         )
+
+
+def test_action_response_containing_login_form_is_not_accepted():
+    class ActionLoginOpener(Opener):
+        def open(self, req, timeout):
+            self.requests.append(req)
+            if len(self.requests) == 1:
+                return Response(b"ok")
+            if len(self.requests) == 2:
+                return Response(b"<html>Print Head Cleaning</html>")
+            return Response(b'<html>Print Head Cleaning<input id="LogBox"></html>')
+    action = DeviceFormAction(
+        path="/general/clean.html",
+        fields=(("channel", "black"),),
+        response_marker=b"Print Head Cleaning",
+    )
+    assert not perform_authenticated_form_action(
+        profile(), action, secret_ref=REF, secrets=Vault(),
+        context=CTX, opener=ActionLoginOpener(),
+    )
