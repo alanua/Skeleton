@@ -92,3 +92,8 @@ def test_unrecognized_successful_http_page_is_not_authenticated():
         profile(), secret_ref=REF, secrets=Vault(), context=CTX,
         opener=Opener(protected=b"<html>Generic page</html>"),
     )
+
+
+def test_login_form_with_menu_label_is_not_authentication():
+    opener = Opener(protected=b'<html>Print Head Cleaning<input id="LogBox" type="password"></html>')
+    assert not acquire_device_session(profile(), secret_ref=REF, secrets=Vault(), context=CTX, opener=opener)
