@@ -105,7 +105,9 @@ def acquire_device_session(
                 raise DeviceSessionError("oversized_protected_response")
             # The profile cannot infer successful login solely from HTTP 200.
             return (protected.status == 200 and profile.authenticated_marker in raw
-                    and b"Please&#32;Login" not in raw)
+                    and b"Please&#32;Login" not in raw
+                    and b"Please Login" not in raw
+                    and b'id="LogBox"' not in raw)
     except DeviceSessionError:
         raise
     except Exception:
