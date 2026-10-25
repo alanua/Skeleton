@@ -73,3 +73,29 @@ def test_mutation_before_ocr_rejected(tmp_path, monkeypatch):
     monkeypatch.setattr(module, "read_local_document", lambda _: pytest.fail("OCR must not run"))
     with pytest.raises(ValueError):
         build_intake_request(path, source_id="synthetic", source_sha256=digest)
+
+
+def test_record_schema_supports_optional_bank_evidence_and_legacy_records() -> None:
+    import json
+    from pathlib import Path
+
+    import jsonschema
+
+    from core.family_document_intake import FamilyDocumentIntakeRequest
+
+    schema = json.loads((Path(__file__).parents[1] / "schemas/family_document_record.schema.json").read_text())
+    request = FamilyDocumentIntakeRequest(
+        source_id="synthetic-bank", source_sha256="a" * 64, ocr_text="synthetic"
+    )
+    legacy = build_family_document_record(request, {"route": "REVIEW"})
+    jsonschema.validate(legacy, schema)
+    classification = classify_family_document_text(
+        "MBS Girovertrag\nKontoinhaber: Subject-A\nKontoführungsgebühr: 2,00 EUR monatlich",
+        ("Subject-A", "Subject-B", "Subject-C"),
+    )
+    record = build_family_document_record(request, classification)
+    assert record["classification"]["bank_contract"] == classification["bank_contract"]
+    jsonschema.validate(record, schema)
+    classification["bank_contract"]["fees"][0]["amount"] = "invented"
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(record, schema)
