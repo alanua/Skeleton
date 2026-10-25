@@ -50,7 +50,7 @@ def test_brother_form_login_then_protected_read():
     assert acquire_device_session(profile(), secret_ref=REF, secrets=Vault(), context=CTX, opener=opener)
     assert opener.requests[0].full_url == "https://192.168.1.165/home/status.html"
     assert b"Baf9=opaque-password" in opener.requests[0].data
-    assert opener.requests[1].full_url.endswith("/general/print_head_cleaning.html")
+    assert str(opener.requests[1]).endswith("/general/print_head_cleaning.html")
 
 
 def test_login_page_returned_is_not_success():
