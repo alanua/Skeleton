@@ -91,5 +91,6 @@ def _public_classification(value: Mapping[str, Any]) -> dict[str, object]:
         "confidence",
         "event_candidates",
         "reason_codes",
+        "bank_contract",
     }
     return {key: value[key] for key in sorted(allowed) if key in value}
