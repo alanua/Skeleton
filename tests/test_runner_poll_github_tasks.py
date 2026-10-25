@@ -6405,7 +6405,7 @@ def test_prepare_target_worktree_retained_dirty_wrong_base_duplicate_recovery_bl
 
     assert code == 1
     assert path == issue_path
-    assert "reason=wrong_base_recovery_path_exists" in output
+    assert "reason=wrong_base_recovery_existing_repository_root_mismatch" in output
     assert runner.run_command(["git", "rev-parse", "HEAD"], cwd=issue_path)[1].strip() == retained_head
 
 
@@ -30003,3 +30003,95 @@ def test_codex_primary_health_openai_api_mode_uses_registered_environment(
     }
     assert all(env.get("OPENAI_API_KEY") == "synthetic-never-report" for env in seen_envs)
     assert checkout.checkout_path
+
+
+@pytest.mark.parametrize(
+    ("fault", "reason"),
+    [
+        (None, None),
+        ("repository", "repository_mismatch"),
+        ("issue", "task_identity_mismatch"),
+        ("source", "task_identity_mismatch"),
+        ("branch", "branch_mismatch"),
+        ("base", "base_mismatch"),
+        ("base_ref", "base_ref_mismatch"),
+        ("outside", "files_outside_allowlist"),
+        ("ignored", "files_outside_allowlist"),
+        ("unsafe", "file_not_regular"),
+        ("lock", "locked"),
+        ("rebase", "locked"),
+    ],
+)
+def test_wrong_base_recovery_existing_synthetic_lavalamp13(
+    tmp_path: Path, fault: str | None, reason: str | None,
+) -> None:
+    # All repositories are synthetic temporary fixtures, never registered worktrees.
+    source = "alanua/Lavalamp"
+    coordinator, retained, retained_head, base = _prepare_target_wrong_base_recovery_fixture(
+        tmp_path, issue_number=13, source_repository=source,
+    )
+    recovery = runner._bounded_wrong_base_recovery_path(retained, base)
+    _run_git(coordinator, "clone", "--local", str(coordinator), str(recovery))
+    branch = runner.issue_branch(13, source)
+    _run_git(recovery, "checkout", "-B", branch, base)
+    _run_git(recovery, "remote", "set-url", "origin", "https://github.com/alanua/Lavalamp.git")
+    allowed = frozenset({"scripts/runner_poll_github_tasks.py", "tests/test_runner_poll_github_tasks.py"})
+    dirty = recovery / "scripts/runner_poll_github_tasks.py"
+    dirty.write_text("unique existing recovery edits\n", encoding="utf-8")
+    _run_git(recovery, "add", "scripts/runner_poll_github_tasks.py")
+    dirty.write_text("unique existing recovery edits plus unstaged\n", encoding="utf-8")
+    (recovery / "tests/test_runner_poll_github_tasks.py").unlink()
+    issue = 13
+    if fault == "repository":
+        _run_git(recovery, "remote", "set-url", "origin", "https://github.com/alanua/Other.git")
+    elif fault == "issue":
+        issue = 14
+    elif fault == "source":
+        source = runner.REPO
+    elif fault == "branch":
+        _run_git(recovery, "branch", "-m", "other-task")
+    elif fault == "base":
+        # Move the ref without changing any dirty files.
+        _run_git(recovery, "update-ref", "HEAD", retained_head)
+    elif fault == "base_ref":
+        _run_git(recovery, "update-ref", "refs/remotes/origin/main", retained_head)
+    elif fault == "outside":
+        (recovery / "unexpected.txt").write_text("preserve\n", encoding="utf-8")
+    elif fault == "ignored":
+        (recovery / ".git/info/exclude").write_text("ignored.txt\n", encoding="utf-8")
+        (recovery / "ignored.txt").write_text("preserve\n", encoding="utf-8")
+    elif fault == "unsafe":
+        dirty.unlink()
+        dirty.symlink_to("../docs/out-of-scope.md")
+    elif fault == "lock":
+        (recovery / ".git/index.lock").write_text("busy\n", encoding="utf-8")
+    elif fault == "rebase":
+        (recovery / ".git/rebase-merge").mkdir()
+    before = {
+        str(p.relative_to(recovery)): (p.readlink() if p.is_symlink() else p.read_bytes())
+        for p in recovery.rglob("*") if p.is_file() or p.is_symlink()
+    }
+    retained_before = (retained / "scripts/runner_poll_github_tasks.py").read_bytes()
+    outputs: list[str] = []
+    with mock.patch.object(
+        runner, "ensure_safe_target_repository_worktree_path",
+        side_effect=lambda _repository, path: Path(path).resolve(strict=False),
+    ):
+        code, diagnostic, result = runner._prepare_wrong_base_recovery_worktree(
+            issue_number=issue, coordinator_workdir=coordinator,
+            retained_path=retained, target_repository="alanua/Lavalamp",
+            source_repository=source, base_ref="main", verified_base_sha=base,
+            branch=branch, origin_url="https://github.com/alanua/Lavalamp.git",
+            allowed_files=allowed, outputs=outputs,
+        )
+    assert result == recovery
+    assert code == (1 if reason else 0)
+    assert diagnostic == (f"wrong_base_recovery_existing_{reason}" if reason else None)
+    if reason is None:
+        assert "wrong_base_recovery=reused" in "\n".join(outputs)
+    after = {
+        str(p.relative_to(recovery)): (p.readlink() if p.is_symlink() else p.read_bytes())
+        for p in recovery.rglob("*") if p.is_file() or p.is_symlink()
+    }
+    assert after == before
+    assert (retained / "scripts/runner_poll_github_tasks.py").read_bytes() == retained_before
