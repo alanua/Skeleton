@@ -30,3 +30,22 @@ def test_multipart_delivery_replay_sends_only_pending_parts(tmp_path) -> None:
     assert again["sent"] == 0
     assert sent == ["one", "two"]
     assert state.state_counts() == {"DONE": 2}
+
+
+def test_quarantine_proposals_bounded_idempotent_and_never_release(tmp_path):
+    from tests.test_family_document_local_inference import output, payload
+    state = FamilyDocumentReceiptOutbox(tmp_path / "state.sqlite")
+    for source in ("a", "b", "c"):
+        state.mark_work_failure(source, "a" * 64, "synthetic", max_attempts=1)
+    calls = []
+    def evaluate(source, sha):
+        calls.append(source)
+        return output("REVIEW" if source == "b" else "ACCEPT"), payload()
+    assert state.propose_quarantine_reevaluation(evaluate, limit=2) == {
+        "evaluated": 2, "acceptance_proposed": 1, "review": 1}
+    restarted = FamilyDocumentReceiptOutbox(state.db_path)
+    assert restarted.propose_quarantine_reevaluation(evaluate, limit=2)["evaluated"] == 1
+    assert restarted.propose_quarantine_reevaluation(evaluate)["evaluated"] == 0
+    assert calls == ["a", "b", "c"]
+    assert restarted.work_state_counts() == {"REVIEW": 3}
+    assert restarted.receipts() == []

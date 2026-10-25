@@ -14,12 +14,21 @@ from core.local_inference_adapters import InferenceValidationError
 
 def payload() -> dict[str, object]:
     return {
-        "ocr_text": "Bescheid fuer Person A, ausgestellt durch Behoerde am 2026-07-20.",
+        "ocr_text": "Bescheid fuer Person A, residence decision, German authority, ausgestellt durch Behoerde am 2026-07-20.",
         "allowed_subject_aliases": ["person-a", "person-b", "person-c"],
         "languages": ["de"],
         "source_kind": "mfp",
         "page_count": 2,
         "mime_type": "application/pdf",
+        "scan_provenance": {
+            "session_id": "session-1",
+            "scanner_id": "scanner-1",
+            "profile_id": "profile-1",
+            "pages": [
+                {"pass_id": "pass-front", "sheet": 1, "side": "front", "page": 1},
+                {"pass_id": "pass-back", "sheet": 1, "side": "back", "page": 2},
+            ],
+        },
     }
 
 
@@ -118,6 +127,13 @@ def test_handoff_ingestor_queues_completed_ocr_packet(tmp_path) -> None:
     )
     assert receipt["status"] == "QUEUED"
     assert isinstance(receipt["request_id"], str)
+    assert receipt["scan_provenance"] == payload()["scan_provenance"]
+    assert receipt["page_count"] == 2
+    assert "ocr_text" not in receipt and "source_path" not in receipt
+    queued = __import__("json").loads(
+        (queue.root / "pending" / f"{receipt['request_id']}.json").read_text(encoding="utf-8")
+    )
+    assert queued["request"]["payload"]["scan_provenance"] == payload()["scan_provenance"]
 
 
 def test_invalid_handoff_routes_to_review(tmp_path) -> None:
@@ -201,3 +217,21 @@ def test_review_normalizes_only_configured_aliases() -> None:
     normalized = validate_family_document_output(value, payload())
     assert normalized["principal_subject_alias"] == "person-a"
     assert normalized["linked_subject_aliases"] == ["person-b", "person-a"]
+
+
+@pytest.mark.parametrize("defect", ["empty_summary", "unsupported_evidence", "low_field_confidence", "contradictory_reason", "unknown_date"])
+def test_acceptance_rejects_unusable_or_unsupported_semantics(defect):
+    value = output()
+    if defect == "empty_summary":
+        value["summary"] = " "
+    elif defect == "unsupported_evidence":
+        value["evidence"]["owner"] = ["invented quotation"]
+    elif defect == "low_field_confidence":
+        value["confidence"]["issuer"] = 0.2
+    elif defect == "contradictory_reason":
+        value["reason_codes"] = ["UNCERTAIN"]
+    else:
+        value["document_date"] = None
+        value["date_precision"] = "unknown"
+    with pytest.raises(InferenceValidationError):
+        validate_family_document_output(value, payload())

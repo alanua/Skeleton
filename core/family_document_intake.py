@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
 from core.family_document_sinks import FAMILY_DOCUMENT_RECORD_SCHEMA
+from core.family_document_sources import read_snapshot
 from core.local_document_ocr import read_local_document
 from core.private_memory_history import content_hash
 
@@ -22,18 +24,36 @@ class FamilyDocumentIntakeRequest:
     source_kind: str = "mfp"
     page_count: int = 1
     mime_type: str = "text/plain"
+    scan_provenance: Mapping[str, Any] | None = None
 
 
-def build_intake_request(path: Path, *, source_id: str, source_sha256: str) -> FamilyDocumentIntakeRequest:
-    result = read_local_document(path)
+def build_intake_request(path: Path, *, source_id: str, source_sha256: str, snapshot: tuple[int, ...] = (), scan_provenance: Mapping[str, Any] | None = None) -> FamilyDocumentIntakeRequest:
+    data = read_snapshot(path, snapshot)
+    data_sha256 = hashlib.sha256(data).hexdigest()
+    if data_sha256 != source_sha256:
+        raise ValueError("source changed after stable-file gate")
+    if scan_provenance is not None and (scan_provenance.get("readback_verified") is not True or scan_provenance.get("sha256") != data_sha256):
+        raise ValueError("unverified scan source")
+    with tempfile.TemporaryDirectory(prefix="skeleton-intake-") as directory:
+        staged = Path(directory) / ("document" + path.suffix.lower())
+        staged.write_bytes(data)
+        # OCR reads the verified private copy, never the mutable inbox path.
+        if read_snapshot(path, snapshot) != data:
+            raise ValueError("source changed after stable-file gate")
+        result = read_local_document(staged)
+    if read_snapshot(path, snapshot) != data:
+        raise ValueError("source changed after stable-file gate")
     if result.source_sha256 != source_sha256:
         raise ValueError("source changed after stable-file gate")
+    if scan_provenance is not None and result.page_count != scan_provenance.get("page_count"):
+        raise ValueError("scan page count changed before intake")
     return FamilyDocumentIntakeRequest(
         source_id=source_id,
         source_sha256=source_sha256,
         ocr_text=result.text,
         page_count=result.page_count,
         mime_type=result.mime_type,
+        scan_provenance=scan_provenance,
     )
 
 
@@ -78,5 +98,6 @@ def _public_classification(value: Mapping[str, Any]) -> dict[str, object]:
         "confidence",
         "event_candidates",
         "reason_codes",
+        "bank_contract",
     }
     return {key: value[key] for key in sorted(allowed) if key in value}

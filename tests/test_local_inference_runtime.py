@@ -41,7 +41,7 @@ class FakeClient:
 
 def request_payload() -> dict[str, object]:
     return {
-        "ocr_text": "Synthetic German decision for person-a.",
+        "ocr_text": "Synthetic German decision for person-a. owner topic jurisdiction date document_type issuer",
         "allowed_subject_aliases": ["person-a", "person-b", "person-c"],
         "source_kind": "mfp",
     }
