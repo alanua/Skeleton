@@ -30,3 +30,48 @@ def test_multipart_delivery_replay_sends_only_pending_parts(tmp_path) -> None:
     assert again["sent"] == 0
     assert sent == ["one", "two"]
     assert state.state_counts() == {"DONE": 2}
+
+
+def test_concurrent_claims_and_expired_owner_fencing(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+
+    db = tmp_path / "state.sqlite3"
+    state = FamilyDocumentReceiptOutbox(db)
+    other = FamilyDocumentReceiptOutbox(db)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        tokens = list(pool.map(lambda adapter: adapter.claim_work("synthetic", "b" * 64, now=100, lease_seconds=10), (state, other)))
+    assert sum(token is not None for token in tokens) == 1
+    old = next(token for token in tokens if token)
+    assert other.claim_work("synthetic", "b" * 64, now=110) is None
+    assert other.work_state_counts() == {"RETRY": 1}
+    assert other.claim_work("synthetic", "b" * 64, now=139) is None
+    new = other.claim_work("synthetic", "b" * 64, now=140)
+    assert new and new != old
+    state.mark_work_done("synthetic", "b" * 64, token=old)
+    assert state.work_state_counts() == {"CLAIMED": 1}
+    other.mark_work_done("synthetic", "b" * 64, token=new)
+    assert state.claim_work("synthetic", "b" * 64, now=9999) is None
+    assert state.work_state_counts() == {"DONE": 1}
+
+
+def test_expired_archive_claim_stays_review(tmp_path):
+    import time
+
+    state = FamilyDocumentReceiptOutbox(tmp_path / "state.sqlite3")
+    now = int(time.time())
+    token = state.claim_work("synthetic", "b" * 64, now=now, lease_seconds=10)
+    state.begin_archive("synthetic", "b" * 64, token)
+    restarted = FamilyDocumentReceiptOutbox(state.db_path)
+    assert restarted.claim_work("synthetic", "b" * 64, now=now + 11) is None
+    assert restarted.claim_work("synthetic", "b" * 64, now=now + 9999) is None
+    assert restarted.work_state_counts() == {"REVIEW": 1}
+
+
+def test_repeated_expiration_has_bounded_attempts(tmp_path):
+    state = FamilyDocumentReceiptOutbox(tmp_path / "state.sqlite3")
+    now = 100
+    for _ in range(5):
+        assert state.claim_work("synthetic", "b" * 64, now=now, lease_seconds=1)
+        assert state.claim_work("synthetic", "b" * 64, now=now + 1) is None
+        now += 3602
+    assert state.work_state_counts() == {"REVIEW": 1}
