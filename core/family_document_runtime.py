@@ -38,6 +38,9 @@ class FamilyDocumentRuntime:
         calendar: FamilyDocumentCalendar | None = None,
     ) -> None:
         self.source = source
+        if source.scan_sessions is None and isinstance(outbox, FamilyDocumentReceiptOutbox):
+            from core.family_document_scan_session import ScanSessionAssembler
+            source.scan_sessions = ScanSessionAssembler(outbox, source.root)
         self.archive_sink = archive_sink
         self.state = outbox
         self.outbox = outbox  # compatibility alias; state remains explicitly noncanonical
@@ -81,6 +84,7 @@ class FamilyDocumentRuntime:
                     source_id=document.source_id,
                     source_sha256=document.sha256,
                     snapshot=document.snapshot,
+                    scan_provenance=document.scan_provenance,
                 )
                 self.state.record_lifecycle(
                     source_ref=document.source_id,
@@ -135,6 +139,8 @@ class FamilyDocumentRuntime:
                 calendar_receipt = self.calendar.upsert(record)
                 _require_calendar_receipt(calendar_receipt)
                 report_record = dict(record)
+                if document.scan_provenance is not None:
+                    report_record["scan_provenance"] = document.scan_provenance
                 report_record["storage_label"] = archive_receipt.get("storage_label") or "Сімейний архів"
                 report_record["completion_evidence"] = _completion_evidence(
                     record,
@@ -183,6 +189,7 @@ class FamilyDocumentRuntime:
                     "part_count": len(messages),
                     "status": "DONE",
                     "message": message,
+                    "scan_provenance": [record["scan_provenance"] for record in records if record.get("scan_provenance")],
                 }
             )
 
