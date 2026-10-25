@@ -118,7 +118,10 @@ def perform_authenticated_form_action(
             raw = response.read(profile.max_response_bytes + 1)
             if len(raw) > profile.max_response_bytes:
                 raise DeviceSessionError("action_response_too_large")
-            return response.status == 200 and action.response_marker in raw
+            return (response.status == 200 and action.response_marker in raw
+                    and b'id="LogBox"' not in raw
+                    and b"Please&#32;Login" not in raw
+                    and b"Please Login" not in raw)
     except DeviceSessionError:
         raise
     except Exception:
