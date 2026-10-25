@@ -107,7 +107,7 @@ def execute_device_capability(
         raise DeviceCapabilityError("resolved operation identity mismatch")
     request = prepare_home_edge_request(plan, approval_verifier=verify_approval)
     receipt = execute_home_edge(request)
-    if receipt.get("status") != "success" or receipt.get("idempotency") == "conflict":
+    if receipt.get("status") != "ok" or receipt.get("idempotency") == "conflict":
         return DeviceOperationResult(device_id, capability, "execution_failed", receipt, False)
     verified = verify_postcondition(plan, receipt) is True
     return DeviceOperationResult(
