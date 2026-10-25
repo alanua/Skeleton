@@ -7,7 +7,8 @@ import re
 import ssl
 from dataclasses import dataclass
 from html.parser import HTMLParser
-from http.cookies import SimpleCookie
+from http.cookies import CookieError, SimpleCookie
+from typing import TypedDict
 from urllib.parse import urlencode, urlsplit
 
 
@@ -24,10 +25,17 @@ class WBMConfig:
     max_response_bytes: int = 1_048_576
 
     def __post_init__(self) -> None:
-        parsed = urlsplit(self.base_url)
+        try:
+            parsed = urlsplit(self.base_url)
+            port = parsed.port
+        except ValueError:
+            raise BrotherWBMError("invalid_https_origin") from None
         if (
             parsed.scheme.lower() != "https"
             or not parsed.hostname
+            or port == 0
+            or any(ord(char) <= 0x20 or ord(char) == 0x7f for char in self.base_url)
+            or "\\" in self.base_url
             or parsed.username is not None
             or parsed.password is not None
             or parsed.path not in ("", "/")
@@ -55,15 +63,23 @@ class WBMConfig:
         return parsed.hostname or "", parsed.port or 443
 
 
+class _FormSignals(TypedDict):
+    method: str
+    action: str
+    passwords: list[str]
+    hidden: list[tuple[str, str]]
+    login: bool
+
+
 class _PageSignals(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.title_parts: list[str] = []
         self.in_title = False
         self.password_fields: list[str] = []
-        self.hidden_fields: dict[str, str] = {}
-        self.forms: list[dict[str, str]] = []
-        self.current_form: dict[str, str] | None = None
+        self.forms: list[_FormSignals] = []
+        self.invalid_form = False
+        self.current_form: _FormSignals | None = None
         self.logout = False
         self.login_control = False
 
@@ -72,30 +88,41 @@ class _PageSignals(HTMLParser):
         if tag.lower() == "title":
             self.in_title = True
         if tag.lower() == "form":
+            if self.current_form is not None:
+                self.invalid_form = True
             self.current_form = {
                 "method": attrs_map.get("method", "get").lower(),
                 "action": attrs_map.get("action", ""),
+                "passwords": [],
+                "hidden": [],
+                "login": False,
             }
         if tag.lower() == "input":
             name = attrs_map.get("name", "")
             input_type = attrs_map.get("type", "").lower()
-            if input_type == "password" and name:
+            if input_type == "password":
                 self.password_fields.append(name)
-            if input_type == "hidden" and name:
-                self.hidden_fields[name] = attrs_map.get("value", "")
+                if self.current_form is not None:
+                    self.current_form["passwords"].append(name)
+            if input_type == "hidden" and name and self.current_form is not None:
+                self.current_form["hidden"].append((name, attrs_map.get("value", "")))
             control = " ".join(
                 attrs_map.get(key, "") for key in ("id", "name", "value", "aria-label")
             ).lower()
-            if "logout" in control:
+            if "logout" in control.split():
                 self.logout = True
             if attrs_map.get("id", "").lower() == "login":
                 self.login_control = True
+                if self.current_form is not None:
+                    self.current_form["login"] = True
         if tag.lower() in {"a", "button"}:
             control = " ".join(
                 attrs_map.get(key, "") for key in ("id", "name", "href", "aria-label")
             ).lower()
-            if "logout" in control:
+            if "logout" in control.split():
                 self.logout = True
+            if attrs_map.get("id", "").lower() == "login":
+                self.login_control = True
 
     def handle_endtag(self, tag: str) -> None:
         if tag.lower() == "title":
@@ -107,6 +134,21 @@ class _PageSignals(HTMLParser):
     def handle_data(self, data: str) -> None:
         if self.in_title:
             self.title_parts.append(data)
+
+    def valid_login_form(self, status_path: str, protected_path: str) -> bool:
+        return (
+            not self.invalid_form
+            and self.current_form is None
+            and len(self.forms) == 1
+            and self.forms[0] == {
+                "method": "post",
+                "action": status_path,
+                "passwords": ["Baf9"],
+                "hidden": [("loginurl", protected_path)],
+                "login": True,
+            }
+            and self.password_fields == ["Baf9"]
+        )
 
     @property
     def title(self) -> str:
@@ -216,8 +258,7 @@ class BrotherWBMClient:
             response = connection.getresponse()
             data = response.read(self.config.max_response_bytes + 1)
             if len(data) > self.config.max_response_bytes:
-                connection.close()
-                self._connection = None
+                self.close()
                 raise BrotherWBMError("response_too_large")
             for raw_cookie in response.headers.get_all("Set-Cookie", []):
                 parsed_cookie = SimpleCookie()
@@ -230,7 +271,7 @@ class BrotherWBMClient:
             return response.status, response_headers, data
         except BrotherWBMError:
             raise
-        except (OSError, ssl.SSLError, http.client.HTTPException, ValueError):
+        except (OSError, ssl.SSLError, http.client.HTTPException, ValueError, CookieError):
             self.close()
             raise BrotherWBMError("https_request_failed") from None
 
@@ -256,7 +297,16 @@ class BrotherWBMClient:
             page.title == self.model_title
             and page.logout
             and not has_login_form
+            and not page.login_control
+            and not page.invalid_form
+            and page.current_form is None
         )
+
+    @staticmethod
+    def _check_redirect(location: str, paths: set[str], error: str) -> None:
+        # Accept only literal fixed paths; never forward server-controlled queries.
+        if location not in paths:
+            raise BrotherWBMError(error)
 
     def read_authenticated_status(self, password: str) -> dict[str, object]:
         """Authenticate only to the status page; never invoke maintenance actions."""
@@ -269,25 +319,16 @@ class BrotherWBMClient:
                 raise BrotherWBMError("authenticated_status_unverified")
             if status != 302:
                 raise BrotherWBMError("unexpected_protected_page_response")
-            location = headers.get("location", "")
-            target = urlsplit(location)
-            if target.scheme or target.netloc or target.path != self.login_error_path:
-                raise BrotherWBMError("unexpected_login_redirect")
-            status, _headers, login_page_data = self._request(
-                "GET", self.login_error_path + (("?" + target.query) if target.query else "")
+            self._check_redirect(
+                headers.get("location", ""), {self.login_error_path},
+                "unexpected_login_redirect",
             )
+            status, _headers, login_page_data = self._request("GET", self.login_error_path)
             if status != 200:
                 raise BrotherWBMError("login_page_unavailable")
             page = self._page(login_page_data)
-            if page.title != self.model_title or page.password_fields != ["Baf9"]:
-                raise BrotherWBMError("unrecognized_login_form")
-            if page.hidden_fields.get("loginurl") != self.protected_path:
-                raise BrotherWBMError("unrecognized_login_form")
-            if not page.login_control:
-                raise BrotherWBMError("unrecognized_login_form")
-            if not any(
-                form.get("method") == "post" and form.get("action") == self.status_path
-                for form in page.forms
+            if page.title != self.model_title or not page.valid_login_form(
+                self.status_path, self.protected_path
             ):
                 raise BrotherWBMError("unrecognized_login_form")
             form_body = urlencode(
@@ -302,13 +343,10 @@ class BrotherWBMClient:
             if post_status not in {200, 302, 303}:
                 raise BrotherWBMError("authentication_failed")
             if post_status in {302, 303}:
-                redirect = urlsplit(post_headers.get("location", ""))
-                if (
-                    redirect.scheme
-                    or redirect.netloc
-                    or redirect.path not in {self.status_path, self.protected_path}
-                ):
-                    raise BrotherWBMError("unexpected_post_redirect")
+                self._check_redirect(
+                    post_headers.get("location", ""),
+                    {self.status_path, self.protected_path}, "unexpected_post_redirect",
+                )
             status, _headers, status_page = self._request("GET", self.status_path)
             if not self._is_authenticated_status(status, status_page):
                 raise BrotherWBMError("authenticated_status_unverified")
@@ -340,6 +378,10 @@ def read_brother_status_with_registered_credential(
             authority_environment=authority_environment,
         )
     broker_result = receipt.get("result")
-    if not isinstance(broker_result, dict) or broker_result.get("status") != "USED":
+    if (
+        not isinstance(broker_result, dict)
+        or broker_result.get("status") != "USED"
+        or result.get("authenticated") is not True
+    ):
         raise BrotherWBMError("credential_broker_use_failed")
     return result
