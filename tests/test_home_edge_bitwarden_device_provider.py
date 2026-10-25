@@ -18,7 +18,7 @@ def test_fetches_one_exact_secret_without_leaking_to_representations(monkeypatch
     secret=BitwardenSecretsProvider(token_reader=lambda:"private-token").resolve(ref,ctx)
     assert str(secret)=="<redacted>"
     assert "do-not-log" not in repr(secret)
-    assert seen[0][0][2]==ID
+    assert seen[0][0][3]==ID
     assert "private-token" not in str(seen[0][0])
     assert seen[0][1]["env"]["BWS_ACCESS_TOKEN"]=="private-token"
 
