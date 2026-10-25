@@ -64,3 +64,20 @@ def test_mutation_during_descriptor_readback_is_rejected(tmp_path, monkeypatch):
     monkeypatch.setattr(module.os, "fstat", mutate)
     with pytest.raises(ValueError, match="source snapshot changed"):
         module.read_snapshot(path)
+
+
+def test_scan_output_without_session_verifier_is_never_exposed(tmp_path):
+    (tmp_path / ('scan-' + 'a' * 64 + '.pdf')).write_bytes(b'synthetic orphan')
+    source = LocalDirectoryDocumentSource(tmp_path)
+    assert source.scan() == []
+    assert source.scan() == []
+
+
+def test_scan_verifier_does_not_block_regular_documents(tmp_path):
+    (tmp_path / 'ordinary.txt').write_text('synthetic document')
+    source = LocalDirectoryDocumentSource(tmp_path, scan_sessions=object())
+    assert source.scan() == []
+    documents = source.scan()
+    assert [document.path.name for document in documents] == ['ordinary.txt']
+    assert documents[0].scan_provenance is None
+
