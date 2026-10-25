@@ -8,6 +8,7 @@ from contextlib import closing
 from pathlib import Path
 from typing import Any, Protocol
 
+from core.family_document_scan_session import ScanEvent, ScanSession, apply_event
 from core.family_document_report import render_package_report
 from core.intake_lifecycle import IntakeLifecycleStore
 from core.private_memory_history import canonical_json, content_hash
@@ -35,6 +36,41 @@ class FamilyDocumentReceiptOutbox:
         self.db_path = db_path
         self.lifecycle = IntakeLifecycleStore(db_path)
         self._ensure_schema()
+
+    def scan_session(self, session_id: str) -> ScanSession | None:
+        with closing(sqlite3.connect(str(self.db_path))) as connection:
+            return self._load_scan_session(connection, session_id)
+
+    @staticmethod
+    def _load_scan_session(connection: sqlite3.Connection, session_id: str) -> ScanSession | None:
+        session = None
+        for (payload,) in connection.execute(
+            "SELECT payload_json FROM family_document_scan_events WHERE session_id = ? ORDER BY sequence",
+            (session_id,),
+        ):
+            session = apply_event(session, ScanEvent.from_mapping(json.loads(payload)))
+        return session
+
+    def record_scan_event(self, event: ScanEvent) -> ScanSession:
+        """Atomically persist evidence and its transition in the existing outbox DB.
+
+        BEGIN IMMEDIATE serializes concurrent completion/pass writers. Reconstructing
+        from the ordered log preserves physical slots and idempotency after restart.
+        """
+        with closing(sqlite3.connect(str(self.db_path))) as connection:
+            with connection:
+                connection.execute("BEGIN IMMEDIATE")
+                previous = self._load_scan_session(connection, event.session_id)
+                session = apply_event(previous, event)
+                if session != previous:
+                    connection.execute(
+                        """INSERT INTO family_document_scan_events
+                        (session_id, event_id, profile_id, payload_json, from_state, to_state)
+                        VALUES (?, ?, ?, ?, ?, ?)""",
+                        (event.session_id, event.event_id, event.profile_id,
+                         canonical_json(event.mapping()), previous.state if previous else None, session.state),
+                    )
+                return session
 
     def enqueue(self, receipt: Mapping[str, Any]) -> bool:
         receipt_key = str(receipt["receipt_key"])
@@ -266,6 +302,18 @@ class FamilyDocumentReceiptOutbox:
                     PRIMARY KEY(source_id, source_sha256)
                 )
                 """
+            )
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS family_document_scan_events (
+                    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT NOT NULL,
+                    event_id TEXT NOT NULL,
+                    profile_id TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    from_state TEXT,
+                    to_state TEXT NOT NULL,
+                    UNIQUE(session_id, event_id)
+                )"""
             )
             connection.commit()
         self.lifecycle.initialize()
