@@ -29,6 +29,7 @@ class FormSessionProfile:
     password_field: str
     hidden_fields: tuple[tuple[str, str], ...] = ()
     tls: bool = True
+    authenticated_marker: bytes = b""
     max_response_bytes: int = 32768
 
 
@@ -52,6 +53,8 @@ def _base(profile: FormSessionProfile) -> str:
     _path(profile.protected_path)
     if not profile.password_field.isidentifier() or len(profile.hidden_fields) > 8:
         raise DeviceSessionError("invalid_form")
+    if not profile.authenticated_marker or len(profile.authenticated_marker) > 256:
+        raise DeviceSessionError("authenticated_marker_required")
     if not 1 <= profile.max_response_bytes <= 65536:
         raise DeviceSessionError("invalid_response_bound")
     if any(not k.isidentifier() or len(k) > 64 or len(v) > 256 for k, v in profile.hidden_fields):
@@ -101,7 +104,8 @@ def acquire_device_session(
             if len(raw) > profile.max_response_bytes:
                 raise DeviceSessionError("oversized_protected_response")
             # The profile cannot infer successful login solely from HTTP 200.
-            return protected.status == 200 and b"Please&#32;Login" not in raw
+            return (protected.status == 200 and profile.authenticated_marker in raw
+                    and b"Please&#32;Login" not in raw)
     except DeviceSessionError:
         raise
     except Exception:
