@@ -967,7 +967,8 @@ private fun HomeComposeApp(sharedUrl:String?, consumeShare:()->Unit) {
     activeUiLanguage=uiLanguage
     var contentLanguage by rememberSaveable { mutableStateOf("uk") }
     var languageDialog by remember { mutableStateOf("") }
-    var tab by rememberSaveable { mutableIntStateOf(0) }
+    // Always open Home on the main tab; saved Android state must not restore Scanner.
+    var tab by remember { mutableIntStateOf(0) }
     var hyperion by remember { mutableStateOf(false) }
     var mediaEndpoints by remember { mutableStateOf(defaultMediaEndpoints()) }
     var endpointId by rememberSaveable { mutableStateOf("home_edge_tv") }
