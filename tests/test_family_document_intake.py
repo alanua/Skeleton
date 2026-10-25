@@ -99,3 +99,12 @@ def test_record_schema_supports_optional_bank_evidence_and_legacy_records() -> N
     classification["bank_contract"]["fees"][0]["amount"] = "invented"
     with pytest.raises(jsonschema.ValidationError):
         jsonschema.validate(record, schema)
+
+def test_unverified_scan_provenance_blocks_ocr(tmp_path, monkeypatch):
+    import pytest
+    from core.family_document_intake import build_intake_request
+    source = tmp_path / 'synthetic.pdf'
+    source.write_bytes(b'synthetic')
+    monkeypatch.setattr('core.family_document_intake.read_local_document', lambda path: pytest.fail('unverified source reached OCR'))
+    with pytest.raises(ValueError, match='unverified'):
+        build_intake_request(source, source_id='synthetic', source_sha256='a' * 64, scan_provenance={'readback_verified': False})
