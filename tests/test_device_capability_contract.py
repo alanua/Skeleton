@@ -88,3 +88,27 @@ def test_read_only_action_does_not_require_approval():
         approved_scope=None,
     )
     assert result.permitted
+
+
+def test_routine_mutation_rejects_root():
+    result = validate_device_action(
+        make_plan(run_as="root"),
+        approved_scope="brother_printer:print_head_clean_normal",
+    )
+    assert not result.permitted
+
+
+def test_privileged_mutation_rejects_desktop_user():
+    result = validate_device_action(
+        make_plan(execution_lane=DeviceRisk.PRIVILEGED_MUTATION),
+        approved_scope="brother_printer:print_head_clean_normal",
+    )
+    assert not result.permitted
+
+
+def test_blank_operator_approval_reference_rejected():
+    result = validate_device_action(
+        make_plan(operator_approval_ref="   "),
+        approved_scope="brother_printer:print_head_clean_normal",
+    )
+    assert not result.permitted
