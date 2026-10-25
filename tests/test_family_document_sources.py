@@ -80,4 +80,3 @@ def test_scan_verifier_does_not_block_regular_documents(tmp_path):
     documents = source.scan()
     assert [document.path.name for document in documents] == ['ordinary.txt']
     assert documents[0].scan_provenance is None
-
