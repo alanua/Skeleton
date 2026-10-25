@@ -2345,6 +2345,75 @@ def _apply_private_patch(
     return 0, None
 
 
+def _verify_existing_wrong_base_recovery(
+    *, path: Path, retained_path: Path, issue_number: int,
+    source_repository: str, target_repository: str, branch: str,
+    verified_base_sha: str, allowed_files: frozenset[str], base_ref: str,
+) -> str | None:
+    # Verification is read-only: never replay patches over an occupied path.
+    if (retained_path.name != _source_issue_slug(issue_number, source_repository)
+            or branch != issue_branch(issue_number, source_repository)):
+        return "task_identity_mismatch"
+    if path.is_symlink() or not path.is_dir():
+        return "path_unsafe"
+    for args, expected, reason in (
+        (["rev-parse", "--show-toplevel"], str(path.resolve()), "repository_root_mismatch"),
+        (["branch", "--show-current"], branch, "branch_mismatch"),
+        (["rev-parse", "HEAD"], verified_base_sha, "base_mismatch"),
+        (["rev-parse", f"refs/remotes/origin/{base_ref}"], verified_base_sha, "base_ref_mismatch"),
+    ):
+        code, output = run_command(["git", *args], cwd=path)
+        if code or output.strip() != expected:
+            return reason
+    code, output = run_command(["git", "remote", "get-url", "origin"], cwd=path)
+    if code or not _remote_url_matches_project_repo(output, target_repository):
+        return "repository_mismatch"
+    for ref in ("--absolute-git-dir", "--git-common-dir"):
+        code, output = run_command(["git", "rev-parse", ref], cwd=path)
+        if code or not output.strip():
+            return "lock_state_unknown"
+        git_dir = Path(output.strip())
+        if not git_dir.is_absolute():
+            git_dir = path / git_dir
+        try:
+            if (any(git_dir.rglob("*.lock")) or any(
+                (git_dir / name).exists() for name in (
+                    "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD",
+                    "rebase-apply", "rebase-merge", "sequencer",
+                )
+            )):
+                return "locked"
+        except OSError:
+            return "lock_state_unknown"
+    if not allowed_files or not all(_safe_changed_file(f) for f in allowed_files):
+        return "allowlist_unsafe"
+    files: set[str] = set()
+    for args in (
+        ["diff", "--name-only", "HEAD", "--"],
+        ["diff", "--cached", "--name-only", "--"],
+        ["ls-files", "--others", "--exclude-standard"],
+        ["ls-files", "--others", "--ignored", "--exclude-standard"],
+    ):
+        code, names, _ = _git_name_lines(["git", *args], path)
+        if code:
+            return "status_discovery_failed"
+        files.update(names)
+    if not all(_safe_changed_file(f) for f in files):
+        return "file_path_unsafe"
+    if not files <= allowed_files:
+        return "files_outside_allowlist"
+    for name in files:
+        candidate = path / name
+        if not _path_is_relative_to(candidate, path):
+            return "file_path_escape"
+        try:
+            if candidate.is_symlink() or (candidate.exists() and not candidate.is_file()):
+                return "file_not_regular"
+        except OSError:
+            return "file_stat_failed"
+    return None
+
+
 def _prepare_wrong_base_recovery_worktree(
     *,
     issue_number: int,
@@ -2364,8 +2433,18 @@ def _prepare_wrong_base_recovery_worktree(
         ensure_safe_target_repository_worktree_path(target_repository, recovery_path)
     except ValueError:
         return 1, "wrong_base_recovery_path_unsafe", recovery_path
-    if recovery_path.exists():
-        return 1, "wrong_base_recovery_path_exists", recovery_path
+    if recovery_path.exists() or recovery_path.is_symlink():
+        reason = _verify_existing_wrong_base_recovery(
+            path=recovery_path, retained_path=retained_path,
+            issue_number=issue_number, source_repository=source_repository,
+            target_repository=target_repository, branch=branch,
+            verified_base_sha=verified_base_sha, allowed_files=allowed_files,
+            base_ref=base_ref,
+        )
+        if reason is not None:
+            return 1, f"wrong_base_recovery_existing_{reason}", recovery_path
+        outputs.append("wrong_base_recovery=reused verified_existing_target=true")
+        return 0, None, recovery_path
 
     merge_base_command = ["git", "merge-base", "--all", "HEAD", verified_base_sha]
     code, output = run_command(merge_base_command, cwd=retained_path)
