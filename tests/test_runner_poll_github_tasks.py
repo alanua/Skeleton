@@ -30009,6 +30009,12 @@ def test_codex_primary_health_openai_api_mode_uses_registered_environment(
     ("fault", "reason"),
     [
         (None, None),
+        ("approved_metadata", None),
+        ("approved_codex", None),
+        ("approved_state", None),
+        ("approved_metadata_symlink", "file_not_regular"),
+        ("metadata_tracked", "file_path_unsafe"),
+        ("metadata_ignored", "file_path_unsafe"),
         ("repository", "repository_mismatch"),
         ("issue", "task_identity_mismatch"),
         ("source", "task_identity_mismatch"),
@@ -30042,6 +30048,30 @@ def test_wrong_base_recovery_existing_synthetic_lavalamp13(
     dirty.write_text("unique existing recovery edits plus unstaged\n", encoding="utf-8")
     (recovery / "tests/test_runner_poll_github_tasks.py").unlink()
     issue = 13
+    if fault in {"approved_metadata", "approved_metadata_symlink", "metadata_tracked", "metadata_ignored"}:
+        metadata = recovery / ".runner-codegen-trace-synthetic.log"
+        if fault == "approved_metadata_symlink":
+            metadata.symlink_to("scripts/runner_poll_github_tasks.py")
+        else:
+            metadata.write_text("synthetic executor bookkeeping\n", encoding="utf-8")
+        if fault == "metadata_tracked":
+            _run_git(recovery, "add", metadata.name)
+        elif fault == "metadata_ignored":
+            (recovery / ".git/info/exclude").write_text(
+                metadata.name + "\n", encoding="utf-8",
+            )
+    elif fault == "approved_codex":
+        metadata_dir = recovery / ".codex"
+        metadata_dir.mkdir()
+        (metadata_dir / "synthetic-state.json").write_text(
+            '{"status":"synthetic"}\n', encoding="utf-8",
+        )
+    elif fault == "approved_state":
+        metadata_dir = recovery / ".runner-codex-state-synthetic"
+        metadata_dir.mkdir()
+        (metadata_dir / "synthetic.json").write_text(
+            '{"status":"synthetic"}\n', encoding="utf-8",
+        )
     if fault == "repository":
         _run_git(recovery, "remote", "set-url", "origin", "https://github.com/alanua/Other.git")
     elif fault == "issue":

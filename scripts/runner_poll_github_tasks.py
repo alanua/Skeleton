@@ -2387,21 +2387,48 @@ def _verify_existing_wrong_base_recovery(
             return "lock_state_unknown"
     if not allowed_files or not all(_safe_changed_file(f) for f in allowed_files):
         return "allowlist_unsafe"
-    files: set[str] = set()
-    for args in (
-        ["diff", "--name-only", "HEAD", "--"],
-        ["diff", "--cached", "--name-only", "--"],
-        ["ls-files", "--others", "--exclude-standard"],
-        ["ls-files", "--others", "--ignored", "--exclude-standard"],
+    # Only UNTRACKED Runner/Codex bookkeeping may be exempt from the source
+    # allowlist. Tracked/staged changes and ignored files remain fail-closed.
+    tracked_files: set[str] = set()
+    untracked_files: set[str] = set()
+    ignored_files: set[str] = set()
+    for args, destination in (
+        (["diff", "--name-only", "HEAD", "--"], tracked_files),
+        (["diff", "--cached", "--name-only", "--"], tracked_files),
+        (["ls-files", "--others", "--exclude-standard"], untracked_files),
+        (["ls-files", "--others", "--ignored", "--exclude-standard"], ignored_files),
     ):
         code, names, _ = _git_name_lines(["git", *args], path)
         if code:
             return "status_discovery_failed"
-        files.update(names)
-    if not all(_safe_changed_file(f) for f in files):
+        destination.update(names)
+    if not all(_safe_changed_file(f) for f in tracked_files):
         return "file_path_unsafe"
-    if not files <= allowed_files:
+    if not tracked_files <= allowed_files:
         return "files_outside_allowlist"
+    # Ignored files may conceal unknown content; do not grant an exception.
+    if ignored_files:
+        if not all(_safe_changed_file(f) for f in ignored_files):
+            return "file_path_unsafe"
+        return "files_outside_allowlist"
+    source_untracked: set[str] = set()
+    metadata_untracked: set[str] = set()
+    for name in untracked_files:
+        if _is_approved_runner_codex_metadata_untracked_path(name):
+            # The approved metadata prefix alone is not path validation.
+            # Reject traversal, control/quoted names and path aliases.
+            if (name.startswith(("/", "~")) or "\\" in name or "://" in name
+                    or re.fullmatch(r"[A-Za-z0-9._/-]+", name) is None
+                    or any(part in {"", ".", ".."} for part in name.split("/"))):
+                return "file_path_unsafe"
+            metadata_untracked.add(name)
+        elif _safe_changed_file(name):
+            source_untracked.add(name)
+        else:
+            return "file_path_unsafe"
+    if not source_untracked <= allowed_files:
+        return "files_outside_allowlist"
+    files = tracked_files | source_untracked | metadata_untracked
     for name in files:
         candidate = path / name
         if not _path_is_relative_to(candidate, path):
