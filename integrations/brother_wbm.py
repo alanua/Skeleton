@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import http.client
 import re
 import ssl
@@ -125,6 +126,10 @@ class BrotherWBMClient:
         self._connection: http.client.HTTPSConnection | None = None
         self._cookies: dict[str, str] = {}
 
+    def prepare_tls(self) -> None:
+        """Establish TLS and finish CA/pin checks before resolving any password."""
+        self._connect()
+
     def close(self) -> None:
         if self._connection is not None:
             self._connection.close()
@@ -163,7 +168,7 @@ class BrotherWBMClient:
                 assert self.config.certificate_sha256 is not None
                 certificate = connection.sock.getpeercert(binary_form=True)  # type: ignore[union-attr]
                 actual = hashlib.sha256(certificate).hexdigest()
-                if not __import__("hmac").compare_digest(
+                if not hmac.compare_digest(
                     actual.lower(), self.config.certificate_sha256.lower()
                 ):
                     raise BrotherWBMError("certificate_pin_mismatch")
@@ -314,18 +319,19 @@ def read_brother_status_with_registered_credential(
     from integrations.credential_runtime import consume_registered_material_credential
 
     result: dict[str, object] = {}
+    with BrotherWBMClient(config) as client:
+        client.prepare_tls()
 
-    def consume(password: str) -> None:
-        with BrotherWBMClient(config) as client:
+        def consume(password: str) -> None:
             result.update(client.read_authenticated_status(password))
 
-    receipt = consume_registered_material_credential(
-        service_id="brother-mfc-j4540dw",
-        alias="wbm-admin",
-        action_id="read-authenticated-status",
-        consumer=consume,
-        authority_environment=authority_environment,
-    )
+        receipt = consume_registered_material_credential(
+            service_id="brother-mfc-j4540dw",
+            alias="wbm-admin",
+            action_id="read-authenticated-status",
+            consumer=consume,
+            authority_environment=authority_environment,
+        )
     broker_result = receipt.get("result")
     if not isinstance(broker_result, dict) or broker_result.get("status") != "USED":
         raise BrotherWBMError("credential_broker_use_failed")
