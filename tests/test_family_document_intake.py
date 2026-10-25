@@ -52,3 +52,24 @@ def test_local_classifier_routes_ambiguous_owner_to_review() -> None:
     )
     assert classification["route"] == "REVIEW"
     assert "OWNER_AMBIGUOUS" in classification["reason_codes"]
+
+
+def test_mutation_before_ocr_rejected(tmp_path, monkeypatch):
+    import core.family_document_intake as module
+
+    path = tmp_path / "synthetic.txt"
+    path.write_bytes(b"synthetic original")
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    original = module.read_snapshot
+    calls = []
+
+    def mutate(candidate, expected=()):
+        calls.append(1)
+        if len(calls) == 2:
+            path.write_bytes(b"synthetic replacement")
+        return original(candidate, expected)
+
+    monkeypatch.setattr(module, "read_snapshot", mutate)
+    monkeypatch.setattr(module, "read_local_document", lambda _: pytest.fail("OCR must not run"))
+    with pytest.raises(ValueError):
+        build_intake_request(path, source_id="synthetic", source_sha256=digest)

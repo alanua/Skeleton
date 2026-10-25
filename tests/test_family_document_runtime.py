@@ -174,3 +174,35 @@ def test_outbox_rejects_receipt_key_payload_conflict(tmp_path) -> None:
 
     with pytest.raises(ValueError):
         outbox.enqueue({**receipt, "message": "different"})
+
+
+def test_lost_event_reconciles_and_replay_preserves_original(tmp_path):
+    rt, inbox = runtime(tmp_path)
+    original = b"synthetic completed before worker scan"
+    path = inbox / "scan.txt"
+    path.write_bytes(original)
+    # No event is delivered; directory reconciliation alone discovers the file.
+    assert rt.scan_once(drain=False)["completed_intakes"] == 0
+    rt.source = LocalDirectoryDocumentSource(inbox)
+    assert rt.scan_once(drain=False)["completed_intakes"] == 0
+    assert rt.scan_once(drain=False)["completed_intakes"] == 1
+    assert rt.scan_once(drain=False)["completed_intakes"] == 0
+    assert path.read_bytes() == original
+
+
+def test_uncertain_archive_is_never_replayed(tmp_path):
+    rt, inbox = runtime(tmp_path)
+    (inbox / "scan.txt").write_bytes(b"synthetic")
+    calls = []
+
+    class UncertainArchive:
+        def archive(self, record, *, source_path=None):
+            calls.append(1)
+            raise RuntimeError("synthetic uncertain commit")
+
+    rt.archive_sink = UncertainArchive()
+    rt.scan_once(drain=False)
+    assert rt.scan_once(drain=False)["review_required"] == 1
+    rt.scan_once(drain=False)
+    assert calls == [1]
+    assert rt.state.work_state_counts() == {"REVIEW": 1}
