@@ -14,6 +14,7 @@ def profile(**kw):
         login_path="/home/status.html",
         protected_path="/general/print_head_cleaning.html",
         password_field="Baf9",
+        authenticated_marker=b"Print Head Cleaning",
         hidden_fields=(("loginurl", "/home/status.html"),),
     )
     values.update(kw)
@@ -84,3 +85,10 @@ def test_transport_exception_is_redacted():
     with pytest.raises(DeviceSessionError) as exc:
         acquire_device_session(profile(), secret_ref=REF, secrets=Vault(), context=CTX, opener=BadOpener())
     assert "internal-secret-data" not in str(exc.value)
+
+
+def test_unrecognized_successful_http_page_is_not_authenticated():
+    assert not acquire_device_session(
+        profile(), secret_ref=REF, secrets=Vault(), context=CTX,
+        opener=Opener(protected=b"<html>Generic page</html>"),
+    )
