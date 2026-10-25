@@ -107,4 +107,4 @@ def test_unverified_scan_provenance_blocks_ocr(tmp_path, monkeypatch):
     source.write_bytes(b'synthetic')
     monkeypatch.setattr('core.family_document_intake.read_local_document', lambda path: pytest.fail('unverified source reached OCR'))
     with pytest.raises(ValueError, match='unverified'):
-        build_intake_request(source, source_id='synthetic', source_sha256='a' * 64, scan_provenance={'readback_verified': False})
+        build_intake_request(source, source_id='synthetic', source_sha256=hashlib.sha256(source.read_bytes()).hexdigest(), scan_provenance={'readback_verified': False})
