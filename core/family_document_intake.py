@@ -24,12 +24,16 @@ class FamilyDocumentIntakeRequest:
     source_kind: str = "mfp"
     page_count: int = 1
     mime_type: str = "text/plain"
+    scan_provenance: Mapping[str, Any] | None = None
 
 
-def build_intake_request(path: Path, *, source_id: str, source_sha256: str, snapshot: tuple[int, ...] = ()) -> FamilyDocumentIntakeRequest:
+def build_intake_request(path: Path, *, source_id: str, source_sha256: str, snapshot: tuple[int, ...] = (), scan_provenance: Mapping[str, Any] | None = None) -> FamilyDocumentIntakeRequest:
     data = read_snapshot(path, snapshot)
-    if hashlib.sha256(data).hexdigest() != source_sha256:
+    data_sha256 = hashlib.sha256(data).hexdigest()
+    if data_sha256 != source_sha256:
         raise ValueError("source changed after stable-file gate")
+    if scan_provenance is not None and (scan_provenance.get("readback_verified") is not True or scan_provenance.get("sha256") != data_sha256):
+        raise ValueError("unverified scan source")
     with tempfile.TemporaryDirectory(prefix="skeleton-intake-") as directory:
         staged = Path(directory) / ("document" + path.suffix.lower())
         staged.write_bytes(data)
@@ -41,12 +45,15 @@ def build_intake_request(path: Path, *, source_id: str, source_sha256: str, snap
         raise ValueError("source changed after stable-file gate")
     if result.source_sha256 != source_sha256:
         raise ValueError("source changed after stable-file gate")
+    if scan_provenance is not None and result.page_count != scan_provenance.get("page_count"):
+        raise ValueError("scan page count changed before intake")
     return FamilyDocumentIntakeRequest(
         source_id=source_id,
         source_sha256=source_sha256,
         ocr_text=result.text,
         page_count=result.page_count,
         mime_type=result.mime_type,
+        scan_provenance=scan_provenance,
     )
 
 
