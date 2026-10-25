@@ -107,7 +107,22 @@ def execute_device_capability(
         raise DeviceCapabilityError("resolved operation identity mismatch")
     request = prepare_home_edge_request(plan, approval_verifier=verify_approval)
     receipt = execute_home_edge(request)
-    if receipt.get("status") != "ok" or receipt.get("idempotency") == "conflict":
+    if not isinstance(receipt, Mapping):
+        raise DeviceCapabilityError("invalid canonical gateway receipt")
+    if (
+        receipt.get("schema") != "skeleton.home_edge.exec_receipt.v1"
+        or receipt.get("request_id") != plan.request_id
+        or receipt.get("node_id") != plan.node_id
+        or receipt.get("execution_lane") != plan.execution_lane.value
+        or not isinstance(receipt.get("receipt_hash"), str)
+        or not receipt["receipt_hash"]
+    ):
+        raise DeviceCapabilityError("canonical gateway receipt mismatch")
+    if (
+        receipt.get("status") != "ok"
+        or receipt.get("exit_code") != 0
+        or receipt.get("idempotency") == "conflict"
+    ):
         return DeviceOperationResult(device_id, capability, "execution_failed", receipt, False)
     verified = verify_postcondition(plan, receipt) is True
     return DeviceOperationResult(
