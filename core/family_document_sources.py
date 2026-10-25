@@ -16,6 +16,7 @@ class StableDocument:
     mtime_ns: int
     stable: bool
     snapshot: tuple[int, ...] = ()
+    scan_provenance: dict | None = None
 
 
 class StableFileGate:
@@ -49,9 +50,11 @@ class LocalDirectoryDocumentSource:
         self,
         root: Path,
         *,
+        scan_sessions=None,
         suffixes: tuple[str, ...] = (".txt", ".pdf", ".png", ".jpg", ".jpeg", ".tif", ".tiff", ".doc", ".docx", ".odt", ".rtf"),
     ) -> None:
         self.root = root
+        self.scan_sessions = scan_sessions
         self.suffixes = tuple(suffix.lower() for suffix in suffixes)
         self.gate = StableFileGate()
 
@@ -67,6 +70,19 @@ class LocalDirectoryDocumentSource:
                 self.gate._seen.pop(path, None)
                 continue
             if observed.stable:
+                is_scan_output = path.name.startswith("scan-") and path.suffix.lower() == ".pdf"
+                if is_scan_output:
+                    if self.scan_sessions is None:
+                        continue
+                    from dataclasses import replace
+                    from core.family_document_scan_session import SessionReview
+                    try:
+                        receipt = self.scan_sessions.receipt_for_path(path)
+                    except (SessionReview, OSError):
+                        continue
+                    if receipt["sha256"] != observed.sha256:
+                        continue
+                    observed = replace(observed, scan_provenance=receipt)
                 documents.append(observed)
         return documents
 
