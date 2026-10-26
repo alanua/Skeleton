@@ -420,6 +420,10 @@ internal fun canonicalVideoHistoryDeletePath(item:JSONObject):String="/api/video
 // One saved work must have one stable card identity; legacy history_id is only a fallback.
 internal fun historyKey(item:JSONObject):String=item.cleanText("history_key",item.cleanText("content_key",item.cleanText("history_id")))
 private fun mediaHistoryDeletePath(endpointId:String,item:JSONObject):String="/api/media/history/${Uri.encode(historyKey(item))}?endpoint=${Uri.encode(endpointId)}"
+// A cached picker is always actionable even if an unrelated refresh is running.
+internal fun historyPickerCanOpen(online:Boolean,loading:Boolean,hasCache:Boolean):Boolean=
+    online && (hasCache || !loading)
+
 private suspend fun savedVideoHistoryItemsWithRetry(api:HomeApi,attempts:Int=2):List<JSONObject>{
     var lastError:Throwable?=null
     repeat(attempts.coerceAtLeast(1)){i->
@@ -2180,7 +2184,7 @@ private fun VideoScreen(api:HomeApi,active:Boolean,selectionRevision:Int,endpoin
         }
     }
     val historyByEndpoint=remember{mutableStateMapOf<String,List<JSONObject>>()}; val savedHistoryByEndpoint=remember{mutableStateMapOf<String,List<JSONObject>>()}; val historyHydratedByEndpoint=remember{mutableStateMapOf<String,Boolean>()}; val historyErrorByEndpoint=remember{mutableStateMapOf<String,String>()}
-    var history by remember(endpoint.endpointId){mutableStateOf(historyByEndpoint[endpoint.endpointId].orEmpty())}; var savedHistory by remember(endpoint.endpointId){mutableStateOf(savedHistoryByEndpoint[endpoint.endpointId].orEmpty())}; var historyHydrated by remember(endpoint.endpointId){mutableStateOf(historyHydratedByEndpoint[endpoint.endpointId] == true)}; var historyLoading by remember(endpoint.endpointId){mutableStateOf(false)}; var historyError by remember(endpoint.endpointId){mutableStateOf(historyErrorByEndpoint[endpoint.endpointId].orEmpty())}; var historyOpen by remember(endpoint.endpointId){mutableStateOf(false)}; var seasonOpen by remember{mutableStateOf(false)}; var detailOpen by remember{mutableStateOf(false)}; var loadingSeason by remember{mutableStateOf("")}
+    var history by remember(endpoint.endpointId){mutableStateOf(historyByEndpoint[endpoint.endpointId].orEmpty())}; var savedHistory by remember(endpoint.endpointId){mutableStateOf(savedHistoryByEndpoint[endpoint.endpointId].orEmpty())}; var historyHydrated by remember(endpoint.endpointId){mutableStateOf(historyHydratedByEndpoint[endpoint.endpointId] == true)}; var historyLoading by remember(endpoint.endpointId){mutableStateOf(false)}; var historyError by remember(endpoint.endpointId){mutableStateOf(historyErrorByEndpoint[endpoint.endpointId].orEmpty())}; var historyOpen by remember(endpoint.endpointId){mutableStateOf(false)}; var historyPickerSnapshot by remember(endpoint.endpointId){mutableStateOf(emptyList<JSONObject>())}; var seasonOpen by remember{mutableStateOf(false)}; var detailOpen by remember{mutableStateOf(false)}; var loadingSeason by remember{mutableStateOf("")}
     var selection by remember{mutableStateOf(JSONObject())}; var selectionIdentity by remember{mutableStateOf("")}; var pendingSelectionIdentity by remember{mutableStateOf("")}; var selectedHistoryItem by remember(endpoint.endpointId){mutableStateOf<JSONObject?>(null)}; var job by remember{mutableStateOf<JSONObject?>(null)}; var sources by remember{mutableStateOf(emptyList<JSONObject>())}; var jobId by remember{mutableStateOf("")}; var loading by remember{mutableStateOf(false)}
     var season by remember{mutableStateOf("")}; var episode by remember{mutableStateOf("")}; var quality by remember{mutableStateOf("")}; var voice by remember{mutableStateOf("")}; var autoplay by remember{mutableStateOf(false)}; var monitor by remember{mutableStateOf(false)}; var monitorReady by remember{mutableStateOf(false)}; var external by remember{mutableStateOf(JSONObject())}; var message by remember{mutableStateOf("")}; var currentPlayer by remember{mutableStateOf(JSONObject())}; var audioSel by remember{mutableStateOf("")}; var subSel by remember{mutableStateOf("")}
     fun setEndpointHistory(items:List<JSONObject>){history=items;historyByEndpoint[endpoint.endpointId]=items}
@@ -2214,7 +2218,7 @@ private fun VideoScreen(api:HomeApi,active:Boolean,selectionRevision:Int,endpoin
         if(reloadWork&&jobId.isNotBlank()){loadJob(jobId);loadMonitor()}
     }
     suspend fun loadHistoryForEndpoint():Boolean{
-        if(api.server==null)return false
+        if(api.server==null || historyLoading)return false
         historyLoading=true; setEndpointHistoryError("")
         // Both dialogs read the same work membership, regardless of output device.
         val saved=runCatching{savedVideoHistoryItemsWithRetry(api)}
@@ -2278,9 +2282,14 @@ private fun VideoScreen(api:HomeApi,active:Boolean,selectionRevision:Int,endpoin
             while(true){if(loadAll())break;delay(1500)}
         }
     }
+    // Load at most once per endpoint and server connection.
+    // On failure keep UI usable; retry only after explicit user action.
     LaunchedEffect(api.server,endpoint.endpointId){
-        setEndpointHistoryHydrated(historyByEndpoint.containsKey(endpoint.endpointId)); setEndpointHistoryError("")
-        if(api.server!=null)while(true){if(loadHistoryForEndpoint())break;delay(1500)}
+        setEndpointHistoryHydrated(historyByEndpoint.containsKey(endpoint.endpointId))
+        if(api.server!=null && historyByEndpoint[endpoint.endpointId]==null)loadHistoryForEndpoint()
+    }
+    LaunchedEffect(active) {
+        if(!active){historyOpen=false;seasonOpen=false;detailOpen=false}
     }
     LaunchedEffect(api.server,active,endpoint.endpointId){
         if(api.server!=null&&active)while(true){
@@ -2373,8 +2382,20 @@ private fun VideoScreen(api:HomeApi,active:Boolean,selectionRevision:Int,endpoin
                         job!=null->cat.optString("title","Обраний твір")
                         else->"Оберіть збережений твір"
                     }
-                    val historyActionable=api.server!=null&&!historyLoading
-                    HistoryPickerField(historyLabel,historyActionable,historyLoading,historyError.isNotBlank()){scope.launch{if(loadHistoryForEndpoint()&&history.isNotEmpty())historyOpen=true}}
+                    // Never refetch before showing cached history. A snapshot
+                    // prevents rows from changing underneath the user\x27s finger.
+                    val historyActionable=historyPickerCanOpen(api.server!=null,historyLoading,history.isNotEmpty())
+                    HistoryPickerField(historyLabel,historyActionable,historyLoading&&!historyHydrated,historyError.isNotBlank()){
+                        if(history.isNotEmpty()){
+                            historyPickerSnapshot=history.toList()
+                            historyOpen=true
+                        } else if(!historyLoading)scope.launch{
+                            if(loadHistoryForEndpoint()){
+                                historyPickerSnapshot=history.toList()
+                                historyOpen=true
+                            }
+                        }
+                    }
                     if(isSeries){
                         SeasonPickerField(season,seasonItems,loadedSeasons){seasonOpen=true}
                         SelectorField(ui("Серія"),"play",if(selectedIsTrailer)"Трейлер" else episode,if(selectedIsTrailer)listOf("Трейлер") else episodes,showCount=!selectedIsTrailer,trailing=if(selectedIsTrailer)"" else selectedDuration){if(!selectedIsTrailer)episode=it}
@@ -2424,7 +2445,7 @@ private fun VideoScreen(api:HomeApi,active:Boolean,selectionRevision:Int,endpoin
             }
         }
     }
-    if(historyOpen)HistoryPickerDialog(api,history,{item->
+    if(active&&historyOpen)HistoryPickerDialog(api,historyPickerSnapshot,{item->
         historyOpen=false
         scope.launch{
             runCatching{
@@ -2443,7 +2464,7 @@ private fun VideoScreen(api:HomeApi,active:Boolean,selectionRevision:Int,endpoin
                 .onFailure{message=it.message?:"Не вдалося вибрати запис історії"}
         }
     },{historyOpen=false})
-    if(seasonOpen)SeasonPickerDialog(api,cat,seasonItems,loadedSeasons,season,loadingSeason,{snum,load->
+    if(active&&seasonOpen)SeasonPickerDialog(api,cat,seasonItems,loadedSeasons,season,loadingSeason,{snum,load->
         season=snum
         if(load){
             loadingSeason=snum
@@ -2483,7 +2504,7 @@ private fun VideoScreen(api:HomeApi,active:Boolean,selectionRevision:Int,endpoin
             }
         } else seasonOpen=false
     },{seasonOpen=false})
-    if(detailOpen)VideoDetailDialog(context,cat,bm,external,onDismiss={detailOpen=false})
+    if(active&&detailOpen)VideoDetailDialog(context,cat,bm,external,onDismiss={detailOpen=false})
     }
 }
 
@@ -3476,8 +3497,8 @@ private fun orderNativeDevices(items:List<NativeDeviceUi>,prefs:android.content.
     var sharpRemoteOpen by rememberSaveable{mutableStateOf(false)}; var mfpOpen by rememberSaveable{mutableStateOf(false)}; var homeEdgeOpen by rememberSaveable{mutableStateOf(false)}; var devices by remember{mutableStateOf(emptyList<NativeDeviceUi>())}; var webState by remember{mutableStateOf(emptyMap<String,Boolean>())}; var loaded by remember{mutableStateOf(false)}
     val context=LocalContext.current; val devicePrefs=remember(context){context.getSharedPreferences("home_ui",Context.MODE_PRIVATE)}
     LaunchedEffect(Unit){if(deviceOrderIds(devicePrefs).isEmpty())devicePrefs.edit().putString(DEVICE_ORDER_PREF,"brother_printer").apply()}
-    LaunchedEffect(api.server,active){if(api.server!=null){suspend fun pull():Boolean{var ok=false;runCatching{api.get("/api/native/devices")}.onSuccess{j->devices=j.optJSONArray("items")?.objects().orEmpty().map{d->val id=d.cleanText("device_id");val role=d.cleanText("role");val adapter=d.cleanText("adapter");val location=d.cleanText("location");val deps=d.optJSONArray("dependency_names")?.strings().orEmpty();val controller=d.cleanText("controller_name",d.cleanText("controller"));NativeDeviceUi(id,d.cleanText("name",id),role,adapter,d.optBoolean("online"),location,deps,controller,nativeDeviceDomain(id,role,location),nativeDeviceConnection(id,role,adapter,location,deps,controller),d.cleanText("physical_parent_id"),d.cleanText("physical_medium"))};loaded=true;ok=true};return ok};while(!loaded){if(pull())break;delay(1500)};if(active)while(true){delay(15000);pull()}}}
-    LaunchedEffect(api.server,active,devices){
+    LaunchedEffect(api.server,active){if(api.server!=null){suspend fun pull():Boolean{var ok=false;runCatching{api.get("/api/native/devices")}.onSuccess{j->val fresh=j.optJSONArray("items")?.objects().orEmpty().map{d->val id=d.cleanText("device_id");val role=d.cleanText("role");val adapter=d.cleanText("adapter");val location=d.cleanText("location");val deps=d.optJSONArray("dependency_names")?.strings().orEmpty();val controller=d.cleanText("controller_name",d.cleanText("controller"));NativeDeviceUi(id,d.cleanText("name",id),role,adapter,d.optBoolean("online"),location,deps,controller,nativeDeviceDomain(id,role,location),nativeDeviceConnection(id,role,adapter,location,deps,controller),d.cleanText("physical_parent_id"),d.cleanText("physical_medium"))};if(fresh!=devices)devices=fresh;loaded=true;ok=true};return ok};while(!loaded){if(pull())break;delay(1500)};if(active)while(true){delay(15000);pull()}}}
+    LaunchedEffect(api.server,active,devices.map{it.id}){
         if(api.server!=null&&active&&devices.isNotEmpty()){
             val urls=nativeDeviceTopology(devices).flatMap{nativeDeviceWebLinks(it.id)}.map{it.url}.distinct()
             while(true){
@@ -3496,7 +3517,8 @@ private fun orderNativeDevices(items:List<NativeDeviceUi>,prefs:android.content.
             context.startActivity(Intent(Intent.ACTION_VIEW,u).addCategory(Intent.CATEGORY_BROWSABLE))
         }.onFailure{Toast.makeText(context,"Не вдалося відкрити вебпанель",Toast.LENGTH_SHORT).show()}
     }
-    if(homeEdgeOpen){HomeEdgeScreen(api,endpointId,endpoints,onEndpoint,onMenu){homeEdgeOpen=false};return}
+    LaunchedEffect(active){if(!active){homeEdgeOpen=false;mfpOpen=false;sharpRemoteOpen=false}}
+    if(active&&homeEdgeOpen){HomeEdgeScreen(api,endpointId,endpoints,onEndpoint,onMenu){homeEdgeOpen=false};return}
     Column(Modifier.fillMaxSize().background(Bg)){
         LazyColumn(Modifier.weight(1f).padding(horizontal=13.dp),contentPadding=PaddingValues(top=6.dp,bottom=18.dp),verticalArrangement=Arrangement.spacedBy(10.dp)){
             if(!loaded)item{SimpleSection("Домашня схема","Читаю актуальний список пристроїв…")}
@@ -3506,8 +3528,8 @@ private fun orderNativeDevices(items:List<NativeDeviceUi>,prefs:android.content.
                 item(key="physical_topology"){DeviceDomainCard("Пристрої та підтверджені з’єднання",ordered,webState,::openDeviceWebPage,{sharpRemoteOpen=true},{mfpOpen=true},{homeEdgeOpen=true})}
             }
         }
-        if(mfpOpen&&api.server!=null)MfpDialog(api){mfpOpen=false}
-        if(sharpRemoteOpen&&api.server!=null)SharpRemoteDialog("${api.server}/ir/sharp"){sharpRemoteOpen=false}
+        if(active&&mfpOpen&&api.server!=null)MfpDialog(api){mfpOpen=false}
+        if(active&&sharpRemoteOpen&&api.server!=null)SharpRemoteDialog("${api.server}/ir/sharp"){sharpRemoteOpen=false}
     }
 }
 
