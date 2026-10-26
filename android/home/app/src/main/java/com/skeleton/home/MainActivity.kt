@@ -2640,7 +2640,7 @@ private data class NativeDeviceUi(val id:String,val name:String,val role:String,
 
 private data class NativeDeviceWebLink(val label:String,val url:String)
 // URLs originate from confirmed Skeleton Device Registry services; IDs never from IPs.
-private fun nativeDeviceWebLinks(deviceId:String):List<NativeDeviceWebLink>=when(deviceId){
+private fun nativeDeviceWebLinks(deviceId:String):List<NativeDeviceWebLink> = when(deviceId){
     "brandenburg_proxmox"->listOf(NativeDeviceWebLink("Proxmox","https://192.168.1.179:8006/"))
     "brandenburg_haos"->listOf(NativeDeviceWebLink("Home Assistant","http://192.168.1.17:8123/"))
     "__service_ct101","anycubic_kobra_2022"->listOf(NativeDeviceWebLink("OctoPrint","http://192.168.1.237:5000/"))
