@@ -1151,9 +1151,13 @@ private fun HomeComposeApp(sharedUrl:String?,foregroundRevision:Int,consumeShare
                 if(discovered && p!=null){
                     PersistentTabSlot(tab==0) { HomeScreen(api, tab==0, hyperion, setHyperionFromHeader, endpointId, mediaEndpoints, ::selectMediaEndpoint, {menu=true}, mediaCharged, {mediaCharged=it}, ::refreshMediaTarget) }
                     PersistentTabSlot(tab==1) { VideoScreen(api, tab==1, videoSelectionRevision, endpointId, mediaEndpoints, ::selectMediaEndpoint, {menu=true}, {tab=0}, hyperion, setHyperionFromHeader, mediaCharged, {mediaCharged=it}, ::refreshMediaTarget) }
-                    PersistentTabSlot(tab==2) {
-                        if(p.hasSk) DevicesScreen(api, tab==2, endpointId, mediaEndpoints, ::selectMediaEndpoint, {menu=true})
-                        else FamilyScannerScreen(api, tab==2, endpointId, mediaEndpoints, ::selectMediaEndpoint, {menu=true})
+                    // Unlike ordinary screens, Scanner can display an Android Dialog.
+                    // It must NEVER be composed as a persistent inactive tab: Dialog
+                    // escapes the tab's Layout placement and overlays Home globally.
+                    if(p.hasSk) PersistentTabSlot(tab==2) {
+                        DevicesScreen(api, tab==2, endpointId, mediaEndpoints, ::selectMediaEndpoint, {menu=true})
+                    } else if(tab==2) {
+                        FamilyScannerScreen(api, true, endpointId, mediaEndpoints, ::selectMediaEndpoint, {menu=true})
                     }
                     if(p.hasSk) PersistentTabSlot(tab==3) { SkeletonScreen(api, tab==3, endpointId, mediaEndpoints, ::selectMediaEndpoint, {menu=true}) }
                 } else Box(Modifier.fillMaxSize(), contentAlignment=Alignment.Center) { CircularProgressIndicator(color=Accent,strokeWidth=2.dp,modifier=Modifier.size(28.dp)) }
@@ -3141,15 +3145,20 @@ private fun shareMfpPdf(context:Context,api:HomeApi,doc:JSONObject){
 }
 
 
+// Inactive tabs may still be measured but a Dialog has its own window;
+// both active-tab and explicit user-open state are required to show it.
+internal fun familyScannerDialogVisible(active:Boolean,open:Boolean,serverConnected:Boolean):Boolean=
+    active && open && serverConnected
+
 @Composable private fun FamilyScannerScreen(api:HomeApi,active:Boolean,endpointId:String,endpoints:List<MediaEndpointUi>,onEndpoint:(String)->Unit,onMenu:()->Unit){
-    var open by rememberSaveable{mutableStateOf(true)}
-    LaunchedEffect(active){if(active)open=true}
+    var open by remember { mutableStateOf(false) }
+    LaunchedEffect(active){open=active}
     Column(Modifier.fillMaxSize().background(Bg)){
         Header(ui("Сканувати"),api.server!=null,endpointId,endpoints,onEndpoint,onMenu)
         Box(Modifier.weight(1f),contentAlignment=Alignment.Center){
             Button(onClick={open=true},shape=RoundedCornerShape(14.dp),colors=ButtonDefaults.buttonColors(containerColor=Accent),modifier=Modifier.fillMaxWidth(.72f).height(56.dp)){Mdi("scanner",22.dp,Color.White);Spacer(Modifier.width(9.dp));Text(ui("Відкрити сканер"),fontWeight=FontWeight.Bold)}
         }
-        if(open&&api.server!=null)MfpDialog(api){open=false}
+        if(familyScannerDialogVisible(active,open,api.server!=null))MfpDialog(api){open=false}
     }
 }
 
