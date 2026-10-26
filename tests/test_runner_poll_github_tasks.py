@@ -30291,7 +30291,7 @@ def _synthetic_ff_publish(tmp_path, monkeypatch, suffix="mjs", test_dir="tests")
             return 0, '# tests 17\n# pass 17\n# fail 0\n# cancelled 0\n# skipped 0\n# todo 0\n'
         if cmd[:2] == ['git', 'ls-remote']:
             ref = cmd[-1]
-            return 0, f'{base if ref == "refs/heads/main" else old}\t{ref}\n'
+            return 0, f'{base if ref == "refs/heads/main" else (pushed[-1] if pushed else old)}\t{ref}\n'
         if cmd[:2] == ['git', 'push']:
             pushed.append(cmd[3].split(':')[0])
             return 0, ''
@@ -30529,3 +30529,89 @@ def test_publish_recovery_ff_rejects_noninherited_tree_modes(tmp_path, monkeypat
     assert "candidate_tree_unsafe" in runner.publish_registered_target_fast_forward(body)
     assert not pushed
     assert not any(cmd[:2] == ["node", "--test"] for cmd in calls)
+
+
+@pytest.mark.parametrize('stale_reads', [0, 1, 3, 4])
+def test_publish_recovery_ff_post_push_propagation(tmp_path, monkeypatch, stale_reads):
+    _, _, _, _, _, state, calls, pushed, body = _synthetic_ff_publish(tmp_path, monkeypatch)
+    actual = runner._registered_worktree_overlay_pr_state
+    polls = []
+    sleeps = []
+
+    def pr(*args):
+        if pushed:
+            polls.append(1)
+            if len(polls) <= stale_reads:
+                return dict(state)
+        return actual(*args)
+
+    monkeypatch.setattr(runner, '_registered_worktree_overlay_pr_state', pr)
+    monkeypatch.setattr(runner.time, 'sleep', sleeps.append)
+    report = runner.publish_registered_target_fast_forward(body)
+    assert ('DONE' if stale_reads < 4 else 'BLOCKED') in report
+    assert 'push_completed=true' in report
+    if stale_reads == 4:
+        assert 'post_push_pr_head_propagation_exhausted' in report
+    assert len(polls) == min(stale_reads + 1, 4)
+    assert len(sleeps) == min(stale_reads, 3)
+    duplicate_push_count = sum(cmd[:2] == ['git', 'push'] for cmd in calls)
+    assert duplicate_push_count == len(pushed) == 1
+    # Two preflight ref reads and exactly one post-push branch verification.
+    assert sum(cmd[:2] == ['git', 'ls-remote'] for cmd in calls) == 3
+
+
+@pytest.mark.parametrize('fault', [
+    'remote', 'remote_error', 'lookup', 'unknown_head', 'number', 'state',
+    'isDraft', 'baseRefName', 'baseRefOid', 'headRefName',
+    'headRepository', 'headRepositoryOwner', 'url', 'files', 'new_coverage',
+])
+def test_publish_recovery_ff_post_push_drift_no_retry(tmp_path, monkeypatch, fault):
+    _, _, _, _, _, state, calls, pushed, body = _synthetic_ff_publish(tmp_path, monkeypatch)
+    actual_pr = runner._registered_worktree_overlay_pr_state
+    actual_command = runner.run_command
+    polls = []
+    sleeps = []
+
+    def command(cmd, cwd=None, **kw):
+        if pushed and cmd[:2] == ['git', 'ls-remote']:
+            if fault == 'remote':
+                calls.append(cmd)
+                return 0, 'f' * 40 + '\t' + cmd[-1]
+            if fault == 'remote_error':
+                calls.append(cmd)
+                return 1, ''
+        return actual_command(cmd, cwd=cwd, **kw)
+
+    def pr(*args):
+        if not pushed:
+            return actual_pr(*args)
+        polls.append(1)
+        if fault == 'lookup':
+            raise RuntimeError('synthetic unavailable')
+        if fault == 'new_coverage':
+            result = actual_pr(*args)
+            result['files'] = []
+            return result
+        result = dict(state)
+        if fault == 'unknown_head':
+            result['headRefOid'] = 'f' * 40
+        elif fault in {'number', 'isDraft'}:
+            result[fault] = 99 if fault == 'number' else False
+        elif fault in {'headRepository', 'headRepositoryOwner'}:
+            result[fault] = {'nameWithOwner': 'synthetic/Other', 'login': 'other'}
+        elif fault == 'files':
+            result['files'] = []
+        else:
+            result[fault] = 'changed'
+        return result
+
+    monkeypatch.setattr(runner, 'run_command', command)
+    monkeypatch.setattr(runner, '_registered_worktree_overlay_pr_state', pr)
+    monkeypatch.setattr(runner.time, 'sleep', sleeps.append)
+    report = runner.publish_registered_target_fast_forward(body)
+    assert 'BLOCKED' in report
+    assert 'push_completed=true' in report
+    assert len(polls) == (0 if fault.startswith('remote') else 1)
+    assert not sleeps
+    duplicate_push_count = sum(cmd[:2] == ['git', 'push'] for cmd in calls)
+    assert duplicate_push_count == len(pushed) == 1

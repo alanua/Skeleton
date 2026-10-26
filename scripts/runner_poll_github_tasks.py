@@ -1169,6 +1169,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "focused_tests_passed",
         "parent_sha",
         "publication",
+        "push_completed",
         "verified_base_branch",
         "verified_base_sha",
         "validation_base_ref",
@@ -19623,9 +19624,10 @@ def publish_registered_target_fast_forward(body: str) -> str:
     """Source-only recovery route; never stage or move either retained worktree."""
     task_id = PUBLISH_REGISTERED_TARGET_FAST_FORWARD
     lines: list[str] = []
+    push_completed = False
 
     def blocked(reason: str) -> str:
-        return _maintenance_report("BLOCKED", task_id, [*lines, f"reason={reason}"], "not_met")
+        return _maintenance_report("BLOCKED", task_id, [*lines, f"push_completed={str(push_completed).lower()}", f"reason={reason}"], "not_met")
 
     request, reason = _issue_worktree_publish_inspection_metadata(body, target_project_route=True)
     if reason or request is None:
@@ -19813,10 +19815,27 @@ def publish_registered_target_fast_forward(body: str) -> str:
         code, _ = run_command(["git", "push", "origin", f"{candidate}:refs/heads/{branch}"], cwd=source)
         if code:
             return blocked("non_fast_forward_or_push_failed")
-        after = _registered_worktree_overlay_pr_state(binding, source)
-        reason = _registered_worktree_overlay_post_push_block_reason(binding, before, after, candidate)
-        if reason or after.get("url") != before.get("url") or _existing_pr_publish_file_paths(after) != coverage:
-            return blocked(reason or "post_push_coverage_mismatch")
+        push_completed = True
+        code, remote = run_command(
+            ["git", "ls-remote", "--exit-code", "origin", f"refs/heads/{branch}"], cwd=source)
+        if code or remote.split() != [candidate, f"refs/heads/{branch}"]:
+            return blocked("post_push_remote_head_mismatch")
+        for attempt in range(1, POST_PUSH_PR_HEAD_PROPAGATION_MAX_ATTEMPTS + 1):
+            after = _registered_worktree_overlay_pr_state(binding, source)
+            # Only an exact pre-push snapshot is evidence of propagation lag.
+            # Any simultaneous identity, state, base or coverage drift fails closed.
+            if after == before:
+                if attempt == POST_PUSH_PR_HEAD_PROPAGATION_MAX_ATTEMPTS:
+                    return blocked("post_push_pr_head_propagation_exhausted")
+                time.sleep(POST_PUSH_PR_HEAD_PROPAGATION_BACKOFF_SECONDS)
+                continue
+            reason = _registered_worktree_overlay_post_push_block_reason(binding, before, after, candidate)
+            stable_before = {k: v for k, v in before.items() if k not in {"headRefOid", "files"}}
+            stable_after = {k: v for k, v in after.items() if k not in {"headRefOid", "files"}}
+            if reason or stable_after != stable_before or _existing_pr_publish_file_paths(after) != coverage:
+                return blocked(reason or "post_push_metadata_or_coverage_mismatch")
+            break
+        lines.append("push_completed=true")
         lines.extend((f"pushed_head_sha={candidate}", f"parent_sha={old}", "publication=verified"))
         return _maintenance_report("DONE", task_id, lines, "met")
     except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired, json.JSONDecodeError):
