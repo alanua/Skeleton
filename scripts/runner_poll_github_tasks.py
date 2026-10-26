@@ -19754,12 +19754,20 @@ def publish_registered_target_fast_forward(body: str) -> str:
         rows = [row.split("\t", 1) for row in tree.splitlines()]
         if code or not rows or len(rows) > 10_000:
             return blocked("candidate_tree_unsafe")
+        # Executable blobs are inherited only from the exact bound old PR tree.
+        code, old_tree = run_command(["git", "ls-tree", "-rl", old], cwd=source)
+        old_rows = [row.split("\t", 1) for row in old_tree.splitlines()]
+        if code or not old_rows or any(len(row) != 2 for row in old_rows):
+            return blocked("old_pr_tree_unknown")
+        old_entries = {row[1]: row[0].split() for row in old_rows}
         total_bytes = 0
         for row in rows:
             fields = row[0].split()
             if (len(row) != 2 or len(fields) != 4
                     or fields[0] not in {"100644", "100755"} or fields[1] != "blob"
                     or not fields[3].isdigit() or not _safe_changed_file(row[1])):
+                return blocked("candidate_tree_unsafe")
+            if fields[0] == "100755" and old_entries.get(row[1]) != fields:
                 return blocked("candidate_tree_unsafe")
             total_bytes += int(fields[3])
         if total_bytes > 64 * 1024 * 1024:
@@ -19780,7 +19788,7 @@ def publish_registered_target_fast_forward(body: str) -> str:
                 data = (output / name).read_bytes()
                 lines.append(f"overlay_file={name} overlay_bytes={len(data)} overlay_sha256={hashlib.sha256(data).hexdigest()}")
             tests = sorted(name for name in packet.allowed_files
-                           if name.startswith("scripts/")
+                           if name.startswith("tests/")
                            and name.endswith((".test.js", ".test.cjs", ".test.mjs")))
             if not tests or len(tests) > 17:
                 return blocked("focused_tests_missing")

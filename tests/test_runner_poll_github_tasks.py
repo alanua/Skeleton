@@ -30217,20 +30217,24 @@ def test_wrong_base_recovery_existing_synthetic_lavalamp13(
     assert after == before
     assert (retained / "scripts/runner_poll_github_tasks.py").read_bytes() == retained_before
 
-def _synthetic_ff_publish(tmp_path, monkeypatch, suffix="mjs"):
+def _synthetic_ff_publish(tmp_path, monkeypatch, suffix="mjs", test_dir="tests"):
     source = tmp_path / 'recovery'
     source.mkdir()
     _run_git(source, 'init')
     _run_git(source, 'config', 'user.email', 'synthetic@example.com')
     _run_git(source, 'config', 'user.name', 'Synthetic')
-    names = ['src/file%d.py' % i for i in range(16)] + ['scripts/source.test.' + suffix]
-    for name in names + ['untouched.txt']:
+    names = ['src/file%d.py' % i for i in range(16)] + [test_dir + '/source.test.' + suffix]
+    prior_names = ['prior/file%d.txt' % i for i in range(5)]
+    for name in names + ['untouched.txt', 'tools/inherited.sh'] + prior_names:
         path = source / name
         path.parent.mkdir(exist_ok=True)
         path.write_text('old = 1\n')
+    (source / 'tools/inherited.sh').chmod(0o755)
     _run_git(source, 'add', '.')
     _run_git(source, 'commit', '-m', 'old PR')
     old = runner.run_command(['git', 'rev-parse', 'HEAD'], cwd=source)[1].strip()
+    for name in prior_names:
+        (source / name).write_text('main version\n')
     (source / 'later.txt').write_text('later main\n')
     _run_git(source, 'add', '.')
     _run_git(source, 'commit', '-m', 'later main')
@@ -30267,7 +30271,7 @@ def _synthetic_ff_publish(tmp_path, monkeypatch, suffix="mjs"):
     state = dict(number=14, state='OPEN', isDraft=True, baseRefName='main', baseRefOid=base,
                  headRefName=branch, headRefOid=old, headRepository={'nameWithOwner': 'alanua/Lavalamp'},
                  headRepositoryOwner={'login': 'alanua'}, url='https://github.com/alanua/Lavalamp/pull/14',
-                 files=[{'path': 'later.txt'}])
+                 files=[{'path': name} for name in prior_names])
     calls = []
     pushed = []
     actual = runner.run_command
@@ -30310,6 +30314,12 @@ def test_publish_recovery_ff_divergent_main_and_original_ancestry(tmp_path, monk
     report = runner.publish_registered_target_fast_forward(body)
     assert 'publication=verified' in report
     assert len(pushed) == 1
+    assert runner.run_command(['git', 'merge-base', '--is-ancestor', old, pushed[0]], cwd=source)[0] == 0
+    _, coverage = runner._git_changed_files_between(base, pushed[0], source)
+    assert {'prior/file%d.txt' % i for i in range(5)} <= coverage
+    assert runner.run_command(['git', 'ls-tree', pushed[0], '--', 'tools/inherited.sh'], cwd=source)[1].startswith('100755 blob ')
+    assert [cmd for cmd in calls if cmd[:2] == ['git', 'push']] == [
+        ['git', 'push', 'origin', pushed[0] + ':refs/heads/' + runner.issue_branch(13, 'alanua/Lavalamp')]]
     assert runner.run_command(['git', 'rev-list', '--parents', '-n', '1', pushed[0]], cwd=source)[1].split() == [pushed[0], old]
     assert runner.run_command(['git', 'show', f'{pushed[0]}:untouched.txt'], cwd=source)[1] == 'old = 1\n'
     assert len([line for line in report.splitlines() if line.startswith('overlay_file=')]) == 17
@@ -30382,7 +30392,7 @@ def test_publish_recovery_ff_node_selection(tmp_path, monkeypatch, suffix):
     report = runner.publish_registered_target_fast_forward(body)
     assert 'publication=verified' in report
     node_calls = [cmd for cmd in calls if cmd[:2] == ['node', '--test']]
-    assert node_calls == [['node', '--test', '--test-reporter=tap', 'scripts/source.test.' + suffix]]
+    assert node_calls == [['node', '--test', '--test-reporter=tap', 'tests/source.test.' + suffix]]
     assert pushed
 
 
@@ -30441,8 +30451,8 @@ def test_publish_recovery_ff_unsafe_paths(tmp_path, monkeypatch, fault):
     elif fault == 'executable':
         (source / names[-1]).chmod(0o755)
     elif fault == 'parent_symlink':
-        (source / 'scripts').rename(source / 'real-scripts')
-        (source / 'scripts').symlink_to('real-scripts', target_is_directory=True)
+        (source / 'tests').rename(source / 'real-tests')
+        (source / 'tests').symlink_to('real-tests', target_is_directory=True)
     else:
         monkeypatch.setattr(runner, '_git_name_lines', lambda *a: (0, [names[0], 'untouched.txt'], ''))
     assert 'BLOCKED' in runner.publish_registered_target_fast_forward(body)
@@ -30479,3 +30489,43 @@ def test_publish_recovery_ff_ambiguous_original_index(tmp_path, monkeypatch):
         0, [names[0]] if '--cached' in cmd else names[:2], ''))
     assert 'conflicting_original_index' in runner.publish_registered_target_fast_forward(body)
     assert not pushed
+
+
+def test_publish_recovery_ff_rejects_scripts_node_tests(tmp_path, monkeypatch):
+    _, _, _, _, _, _, calls, pushed, body = _synthetic_ff_publish(
+        tmp_path, monkeypatch, test_dir="scripts")
+    assert "focused_tests_missing" in runner.publish_registered_target_fast_forward(body)
+    assert not pushed
+    assert not any(cmd[:2] == ["node", "--test"] for cmd in calls)
+
+
+@pytest.mark.parametrize("fault", ["changed_blob", "new_executable", "changed_mode", "symlink"])
+def test_publish_recovery_ff_rejects_noninherited_tree_modes(tmp_path, monkeypatch, fault):
+    _, _, _, old, _, _, calls, pushed, body = _synthetic_ff_publish(tmp_path, monkeypatch)
+    actual = runner.run_command
+
+    def command(cmd, cwd=None, **kw):
+        code, output = actual(cmd, cwd=cwd, **kw)
+        if cmd[:3] == ["git", "ls-tree", "-rl"] and cmd[-1] != old:
+            rows = output.splitlines()
+            for i, row in enumerate(rows):
+                metadata, name = row.split("\t", 1)
+                fields = metadata.split()
+                if name == "tools/inherited.sh":
+                    if fault == "changed_blob":
+                        fields[2] = "f" * 40
+                    elif fault == "new_executable":
+                        name = "tools/new.sh"
+                    elif fault == "symlink":
+                        fields[0] = "120000"
+                    rows[i] = " ".join(fields) + "\t" + name
+                elif name == "untouched.txt" and fault == "changed_mode":
+                    fields[0] = "100755"
+                    rows[i] = " ".join(fields) + "\t" + name
+            output = "\n".join(rows) + "\n"
+        return code, output
+
+    monkeypatch.setattr(runner, "run_command", command)
+    assert "candidate_tree_unsafe" in runner.publish_registered_target_fast_forward(body)
+    assert not pushed
+    assert not any(cmd[:2] == ["node", "--test"] for cmd in calls)
