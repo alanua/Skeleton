@@ -2383,7 +2383,7 @@ private fun VideoScreen(api:HomeApi,active:Boolean,selectionRevision:Int,endpoin
                         else->"Оберіть збережений твір"
                     }
                     // Never refetch before showing cached history. A snapshot
-                    // prevents rows from changing underneath the user\x27s finger.
+                    // prevents rows from changing underneath the user's finger.
                     val historyActionable=historyPickerCanOpen(api.server!=null,historyLoading,history.isNotEmpty())
                     HistoryPickerField(historyLabel,historyActionable,historyLoading&&!historyHydrated,historyError.isNotBlank()){
                         if(history.isNotEmpty()){
