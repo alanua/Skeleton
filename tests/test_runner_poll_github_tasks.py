@@ -1756,6 +1756,97 @@ evidence text for recovery handling. Those words are not the final result.
     assert result == runner.CodexTaskResult("DONE")
 
 
+@pytest.mark.parametrize("position", ("first", "middle", "last"))
+def test_codex_final_result_done_precedes_benign_compliance_prose(position: str) -> None:
+    lines = [
+        "SKELETON_CODEGEN_PROVIDER=codex",
+        "No firmware build, OTA, device access or flash was performed.",
+    ]
+    lines.insert({"first": 0, "middle": 1, "last": 2}[position], "RESULT: DONE")
+    assert runner.classify_codex_task_result("\n".join(lines), 0) == runner.CodexTaskResult("DONE")
+
+
+@pytest.mark.parametrize("status", ("BLOCKED", "NEEDS_OPERATOR"))
+def test_codex_final_result_provider_prefix_preserves_blockers(status: str) -> None:
+    output = f"SKELETON_CODEGEN_PROVIDER=codex\nRESULT: {status}\nCannot proceed."
+    assert runner.classify_codex_task_result(output, 0) == runner.CodexTaskResult("BLOCKED", status)
+
+
+@pytest.mark.parametrize("declarations", (
+    "RESULT: DONE\nRESULT: BLOCKED",
+    "RESULT: BLOCKED\nRESULT: DONE",
+    "RESULT: DONE\nRESULT: NEEDS_OPERATOR",
+    "RESULT: DONE\nRESULT: DONE",
+    "RESULT: DONE extra",
+    "RESULT: DONE / BLOCKED",
+    "RESULT: done",
+    "result: DONE",
+    "RESULT : DONE",
+    "RESULT:DONE",
+    "RESULT: UNKNOWN",
+    "**RESULT: DONE**",
+    "- RESULT: DONE",
+    "  RESULT: DONE",
+    "RESULT: DONE\nRESULT: UNKNOWN",
+    "RESULT: DONE\nBLOCKED: cannot proceed",
+    "NEEDS_OPERATOR: missing authorization\nRESULT: DONE",
+    "RESULT: DONE\nBLOCKED",
+    "RESULT: DONE\nNEEDS_OPERATOR",
+))
+@pytest.mark.parametrize("transcript", (False, True))
+def test_codex_final_result_ambiguous_or_blocked_never_done(
+    declarations: str, transcript: bool
+) -> None:
+    output = f"SKELETON_CODEGEN_PROVIDER=codex\n{declarations}\nNo firmware build."
+    if transcript:
+        output = "OpenAI Codex v0.125.0\nuser\nRESULT: DONE\nassistant\n" + output
+    assert runner.classify_codex_task_result(output, 0).status == "BLOCKED"
+
+
+def test_codex_final_result_nonzero_exit_overrides_explicit_done() -> None:
+    output = "SKELETON_CODEGEN_PROVIDER=codex\nRESULT: DONE\nNo firmware build."
+    assert runner.classify_codex_task_result(output, 2) == runner.CodexTaskResult("BLOCKED", "exit code 2")
+
+
+def test_codex_final_result_ignores_synthetic_transcript_and_fenced_results() -> None:
+    output = """Reading additional input from stdin...
+OpenAI Codex v0.125.0
+user
+RESULT: BLOCKED
+assistant
+SKELETON_CODEGEN_PROVIDER=codex
+RESULT: DONE
+```text
+RESULT: BLOCKED
+RESULT: DONE
+```
+No firmware build.
+"""
+    assert runner.classify_codex_task_result(output, 0) == runner.CodexTaskResult("DONE")
+
+
+def test_codex_final_result_preserves_transcript_tail_truncation() -> None:
+    output = """SKELETON_CODEGEN_PROVIDER=codex
+RESULT: DONE
+No firmware build.
+Reading additional input from stdin...
+OpenAI Codex v0.125.0
+user
+RESULT: BLOCKED
+"""
+    assert runner.classify_codex_task_result(output, 0) == runner.CodexTaskResult("DONE")
+
+
+@pytest.mark.parametrize("prose, expected", (
+    ("Completed parser repair.", "DONE"),
+    ("No firmware target exists.", "BLOCKED"),
+    ("missing capability: synthetic-tool", "BLOCKED"),
+    ("BLOCKED: cannot proceed", "BLOCKED"),
+))
+def test_codex_final_result_absent_preserves_legacy(prose: str, expected: str) -> None:
+    assert runner.classify_codex_task_result(prose, 0).status == expected
+
+
 def test_private_memory_run_codex_preserves_safe_result_done_output(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
