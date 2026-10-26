@@ -30216,3 +30216,151 @@ def test_wrong_base_recovery_existing_synthetic_lavalamp13(
     }
     assert after == before
     assert (retained / "scripts/runner_poll_github_tasks.py").read_bytes() == retained_before
+
+def _synthetic_ff_publish(tmp_path, monkeypatch):
+    source = tmp_path / 'recovery'
+    source.mkdir()
+    _run_git(source, 'init')
+    _run_git(source, 'config', 'user.email', 'synthetic@example.com')
+    _run_git(source, 'config', 'user.name', 'Synthetic')
+    names = ['src/file%d.py' % i for i in range(16)] + ['tests/test_source.py']
+    for name in names + ['untouched.txt']:
+        path = source / name
+        path.parent.mkdir(exist_ok=True)
+        path.write_text('old = 1\n')
+    _run_git(source, 'add', '.')
+    _run_git(source, 'commit', '-m', 'old PR')
+    old = runner.run_command(['git', 'rev-parse', 'HEAD'], cwd=source)[1].strip()
+    (source / 'later.txt').write_text('later main\n')
+    _run_git(source, 'add', '.')
+    _run_git(source, 'commit', '-m', 'later main')
+    base = runner.run_command(['git', 'rev-parse', 'HEAD'], cwd=source)[1].strip()
+    original = tmp_path / runner._source_issue_slug(13, 'alanua/Lavalamp')
+    original.mkdir()
+    for name in names:
+        (source / name).write_text('retained = 2\n')
+    for name in names[:2]:
+        path = original / name
+        path.parent.mkdir(exist_ok=True)
+        path.write_bytes((source / name).read_bytes())
+    branch = runner.issue_branch(13, 'alanua/Lavalamp')
+    request = runner.IssueWorktreePublishInspectionRequest(
+        'alanua/Lavalamp', 13, branch, frozenset(names), 'Synthetic',
+        base_sha=base, target_project='lavalamp', worktree_root=tmp_path,
+        target_project_route=True, source_repository='alanua/Lavalamp', recovery_worktree='recovery')
+    monkeypatch.setattr(runner, '_issue_worktree_publish_inspection_metadata', lambda *a, **kw: (request, None))
+    monkeypatch.setattr(runner, '_ensure_safe_target_project_issue_publish_worktree_path', lambda r: source)
+    monkeypatch.setattr(runner, '_verify_existing_wrong_base_recovery', lambda **kw: None)
+    monkeypatch.setattr(runner, '_declared_existing_pr_number', lambda b: 14)
+    monkeypatch.setattr(runner, '_declared_existing_pr_expected_head_sha', lambda b: old)
+    monkeypatch.setattr(runner, '_declared_existing_pr_expected_head_branch', lambda b: branch)
+    monkeypatch.setattr(runner, '_git_name_lines', lambda cmd, path: (0, names[:2], ''))
+    state = dict(number=14, state='OPEN', isDraft=True, baseRefName='main', baseRefOid=base,
+                 headRefName=branch, headRefOid=old, headRepository={'nameWithOwner': 'alanua/Lavalamp'},
+                 headRepositoryOwner={'login': 'alanua'}, url='https://github.com/alanua/Lavalamp/pull/14',
+                 files=[{'path': 'later.txt'}])
+    calls = []
+    pushed = []
+    actual = runner.run_command
+    def command(cmd, cwd=None, **kw):
+        calls.append(cmd)
+        if cwd == original:
+            if cmd[1:3] == ['rev-parse', '--show-toplevel']:
+                return 0, str(original.resolve())
+            if cmd[1:3] == ['branch', '--show-current']:
+                return 0, branch
+            if cmd[1:3] == ['remote', 'get-url']:
+                return 0, 'https://github.com/alanua/Lavalamp.git'
+            return 0, ''
+        if cmd[:3] == ['python3', '-m', 'pytest']:
+            assert not (cwd / 'later.txt').exists()
+            assert (cwd / 'untouched.txt').read_text() == 'old = 1\n'
+            return 0, '17 passed in 0.01s'
+        if cmd[:2] == ['git', 'ls-remote']:
+            ref = cmd[-1]
+            return 0, f'{base if ref == "refs/heads/main" else old}\t{ref}\n'
+        if cmd[:2] == ['git', 'push']:
+            pushed.append(cmd[3].split(':')[0])
+            return 0, ''
+        return actual(cmd, cwd=cwd, **kw)
+    def pr(*args):
+        result = dict(state)
+        if pushed:
+            result['headRefOid'] = pushed[-1]
+            _, coverage = runner._git_changed_files_between(base, pushed[-1], source)
+            result['files'] = [{'path': n} for n in coverage]
+        return result
+    monkeypatch.setattr(runner, 'run_command', command)
+    monkeypatch.setattr(runner, '_registered_worktree_overlay_pr_state', pr)
+    body = f'Operator Approval: {runner.PUBLISH_REGISTERED_TARGET_FAST_FORWARD}'
+    return source, original, names, old, base, state, calls, pushed, body
+
+
+def test_publish_recovery_ff_divergent_main_and_original_ancestry(tmp_path, monkeypatch):
+    source, _, names, old, base, _, calls, pushed, body = _synthetic_ff_publish(tmp_path, monkeypatch)
+    report = runner.publish_registered_target_fast_forward(body)
+    assert 'publication=verified' in report
+    assert len(pushed) == 1
+    assert runner.run_command(['git', 'rev-list', '--parents', '-n', '1', pushed[0]], cwd=source)[1].split() == [pushed[0], old]
+    assert runner.run_command(['git', 'show', f'{pushed[0]}:untouched.txt'], cwd=source)[1] == 'old = 1\n'
+    assert len([line for line in report.splitlines() if line.startswith('overlay_file=')]) == 17
+    assert all(not any(arg.startswith('--force') for arg in cmd) for cmd in calls)
+
+
+@pytest.mark.parametrize('failure', ['original', 'symlink', 'missing', 'test', 'remote', 'push', 'lookup', 'post'])
+def test_publish_recovery_ff_fail_closed(tmp_path, monkeypatch, failure):
+    source, original, names, _, _, state, calls, pushed, body = _synthetic_ff_publish(tmp_path, monkeypatch)
+    if failure == 'original':
+        (original / names[0]).write_text('distinct original\n')
+    elif failure == 'symlink':
+        (source / names[-1]).unlink()
+        (source / names[-1]).symlink_to(source / names[0])
+    elif failure == 'missing':
+        state.pop('baseRefOid')
+    elif failure == 'lookup':
+        def unavailable(*args):
+            raise RuntimeError('unavailable')
+        monkeypatch.setattr(runner, '_registered_worktree_overlay_pr_state', unavailable)
+    else:
+        actual = runner.run_command
+        def command(cmd, cwd=None, **kw):
+            if failure == 'test' and cmd[:2] == ['python3', '-m']:
+                return 1, '1 failed'
+            if failure == 'remote' and cmd[:2] == ['git', 'ls-remote']:
+                return 0, 'changed\t' + cmd[-1]
+            if failure == 'push' and cmd[:2] == ['git', 'push']:
+                return 1, 'non-fast-forward'
+            result = actual(cmd, cwd=cwd, **kw)
+            if failure == 'post' and cmd[:2] == ['git', 'push']:
+                state['isDraft'] = False
+            return result
+        monkeypatch.setattr(runner, 'run_command', command)
+    report = runner.publish_registered_target_fast_forward(body)
+    assert 'BLOCKED' in report
+    if failure != 'post':
+        assert not pushed
+
+
+@pytest.mark.parametrize('field,value', [
+    ('headRefOid', 'f' * 40), ('headRefName', 'runner/other'),
+    ('baseRefOid', 'f' * 40), ('baseRefName', 'other'),
+    ('headRepository', {'nameWithOwner': 'alanua/Other'}),
+    ('number', 15), ('isDraft', False), ('files', None),
+])
+def test_publish_recovery_ff_rejects_pr_drift(tmp_path, monkeypatch, field, value):
+    _, _, _, _, _, state, _, pushed, body = _synthetic_ff_publish(tmp_path, monkeypatch)
+    state[field] = value
+    assert 'BLOCKED' in runner.publish_registered_target_fast_forward(body)
+    assert not pushed
+
+
+@pytest.mark.parametrize('reason', [
+    'locked', 'files_outside_allowlist', 'file_path_unsafe', 'file_not_regular',
+    'repository_mismatch', 'base_ref_mismatch', 'status_discovery_failed',
+])
+def test_publish_recovery_ff_honors_recovery_safety_gate(tmp_path, monkeypatch, reason):
+    _, _, _, _, _, _, calls, pushed, body = _synthetic_ff_publish(tmp_path, monkeypatch)
+    monkeypatch.setattr(runner, '_verify_existing_wrong_base_recovery', lambda **kw: reason)
+    assert f'reason={reason}' in runner.publish_registered_target_fast_forward(body)
+    assert not pushed
+    assert not any(cmd[:2] == ['git', 'commit-tree'] for cmd in calls)

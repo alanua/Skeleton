@@ -453,6 +453,7 @@ PUBLISH_ISSUE_WORKTREE_PR = "publish_issue_worktree_pr"
 PUBLISH_EXISTING_ISSUE_WORKTREE = "publish_existing_issue_worktree"
 PUBLISH_ISSUE_WORKTREE_TO_EXISTING_PR = "publish_issue_worktree_to_existing_pr"
 OVERLAY_REGISTERED_WORKTREE_TO_EXISTING_PR = "overlay_registered_worktree_to_existing_pr"
+PUBLISH_REGISTERED_TARGET_FAST_FORWARD = "publish_registered_target_fast_forward"
 PUBLISH_TARGET_PROJECT_ISSUE_WORKTREE_PR = "publish_target_project_issue_worktree_pr"
 PUBLISH_CONTAINER_VALIDATION_WORKTREE = "publish_container_validation_worktree"
 QUARANTINE_STALE_CLEAN_SKELETON_WORKTREES = (
@@ -519,6 +520,7 @@ RUNTIME_MAINTENANCE_TASK_IDS = frozenset(
         PUBLISH_EXISTING_ISSUE_WORKTREE,
         PUBLISH_ISSUE_WORKTREE_TO_EXISTING_PR,
         OVERLAY_REGISTERED_WORKTREE_TO_EXISTING_PR,
+        PUBLISH_REGISTERED_TARGET_FAST_FORWARD,
         PUBLISH_TARGET_PROJECT_ISSUE_WORKTREE_PR,
         PUBLISH_CONTAINER_VALIDATION_WORKTREE,
         QUARANTINE_STALE_CLEAN_SKELETON_WORKTREES,
@@ -550,6 +552,7 @@ PUBLISH_ONLY_MAINTENANCE_TASK_IDS = frozenset(
         PUBLISH_EXISTING_ISSUE_WORKTREE,
         PUBLISH_ISSUE_WORKTREE_TO_EXISTING_PR,
         OVERLAY_REGISTERED_WORKTREE_TO_EXISTING_PR,
+        PUBLISH_REGISTERED_TARGET_FAST_FORWARD,
         PUBLISH_TARGET_PROJECT_ISSUE_WORKTREE_PR,
         PUBLISH_CONTAINER_VALIDATION_WORKTREE,
     )
@@ -1160,6 +1163,12 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "post_push_pr_changed_files_count",
         "validated_publish_files",
         "validated_publish_files_count",
+        "overlay_file",
+        "overlay_bytes",
+        "overlay_sha256",
+        "focused_tests_passed",
+        "parent_sha",
+        "publication",
         "verified_base_branch",
         "verified_base_sha",
         "validation_base_ref",
@@ -19609,6 +19618,170 @@ def publish_existing_issue_worktree(body: str) -> str:
     )
 
 
+
+def publish_registered_target_fast_forward(body: str) -> str:
+    """Source-only recovery route; never stage or move either retained worktree."""
+    task_id = PUBLISH_REGISTERED_TARGET_FAST_FORWARD
+    lines: list[str] = []
+
+    def blocked(reason: str) -> str:
+        return _maintenance_report("BLOCKED", task_id, [*lines, f"reason={reason}"], "not_met")
+
+    request, reason = _issue_worktree_publish_inspection_metadata(body, target_project_route=True)
+    if reason or request is None:
+        return blocked(reason or "metadata_missing")
+    metadata = _metadata_before_task(body)
+    if (_body_field(metadata, "Operator Approval") != task_id
+            or request.target_project != "lavalamp"
+            or request.repository != "alanua/Lavalamp"
+            or request.source_repository != "alanua/Lavalamp"
+            or request.source_issue != 13 or not request.recovery_worktree
+            or len(request.allowed_files) != 17
+            or any(_is_approved_runner_codex_metadata_untracked_path(name)
+                   for name in request.allowed_files)
+            or _declared_existing_pr_number(body) != 14):
+        return blocked("recovery_identity_or_approval_mismatch")
+    old = _declared_existing_pr_expected_head_sha(body)
+    branch = _declared_existing_pr_expected_head_branch(body)
+    if not old or branch != request.expected_branch:
+        return blocked("existing_pr_binding_missing")
+    if request.base_sha is None or request.worktree_root is None:
+        return blocked("recovery_base_missing")
+    original = request.worktree_root / _source_issue_slug(13, request.source_repository)
+    raw_source = request.worktree_root / request.recovery_worktree
+    # Do not resolve away a symlink before checking the registered path.
+    if any(p.is_symlink() for p in (raw_source, *raw_source.parents)):
+        return blocked("source_path_unsafe")
+    try:
+        source = _ensure_safe_target_project_issue_publish_worktree_path(request)
+        reason = _verify_existing_wrong_base_recovery(
+            path=source, retained_path=original, issue_number=13,
+            source_repository=request.source_repository, target_repository=request.repository,
+            branch=request.expected_branch, verified_base_sha=request.base_sha,
+            allowed_files=request.allowed_files, base_ref="main")
+        if reason:
+            return blocked(reason)
+        if any(p.is_symlink() for p in (original, *original.parents)):
+            return blocked("original_path_unsafe")
+        for args, expected in (
+            (["rev-parse", "--show-toplevel"], str(original.resolve())),
+            (["branch", "--show-current"], branch),
+        ):
+            code, value = run_command(["git", *args], cwd=original)
+            if code or value.strip() != expected:
+                return blocked("original_identity_unknown")
+        code, value = run_command(["git", "remote", "get-url", "origin"], cwd=original)
+        if code or not _remote_url_matches_project_repo(value, request.repository):
+            return blocked("original_repository_mismatch")
+        # Original dirty contents must be present byte-for-byte in the overlay.
+        # A differing staged version is ambiguous too, even if the worktree matches.
+        code, dirty, _ = _git_name_lines(["git", "diff", "--name-only", "HEAD", "--"], original)
+        code2, staged, _ = _git_name_lines(["git", "diff", "--cached", "--name-only", "--"], original)
+        if code or code2 or len(set(dirty) | set(staged)) != 2:
+            return blocked("original_dirty_pair_unknown")
+        packet = RegisteredWorktreeOverlayPacket(task_id, 13, branch, 14, branch, old,
+                                                 tuple(sorted(request.allowed_files)))
+        for name in set(dirty) | set(staged):
+            if (not _registered_worktree_overlay_safe_source_file(packet, original, name)
+                    or not _registered_worktree_overlay_safe_source_file(packet, source, name)
+                    or (original / name).read_bytes() != (source / name).read_bytes()):
+                return blocked("conflicting_original_contents")
+            code, _ = run_command(["git", "diff", "--quiet", "--", name], cwd=original)
+            if name in staged and code != 0:
+                return blocked("conflicting_original_index")
+        for name in packet.allowed_files:
+            if (not _registered_worktree_overlay_safe_source_file(packet, source, name)
+                    or (source / name).stat().st_size > 1_048_576):
+                return blocked("unsafe_source_file")
+        binding = IssueWorktreeExistingPrPublishRequest(request.repository, 13, branch, 14,
+                                                        old, branch, request.allowed_files)
+        before = _registered_worktree_overlay_pr_state(binding, source)
+        if not _registered_worktree_overlay_pr_state_shape_valid(before, strict_values=True):
+            return blocked("pr_metadata_missing")
+        reason, _, _, _ = _issue_worktree_publish_target_existing_pr_binding_reason(
+            body, request, before, verified_base_sha=request.base_sha)
+        if reason:
+            return blocked(reason)
+        if before.get("url") != "https://github.com/alanua/Lavalamp/pull/14":
+            return blocked("pr_url_mismatch")
+        lines.extend((f"target_repository={request.repository}", "pull_request=14",
+                      f"verified_base_sha={request.base_sha}", f"target_head_sha={old}",
+                      f"target_branch={branch}", "validated_publish_files_count=17"))
+        specs = tuple(RegisteredWorktreeOverlaySourceSpec(name) for name in packet.allowed_files)
+        candidate, reason = _overlay_registered_worktree_commit(packet, source, specs)
+        if reason or candidate is None:
+            return blocked(reason or "candidate_missing")
+        code, parents = run_command(["git", "rev-list", "--parents", "-n", "1", candidate], cwd=source)
+        if code or parents.split() != [candidate, old]:
+            return blocked("candidate_parent_mismatch")
+        code, _ = run_command(["git", "merge-base", "--is-ancestor", old, candidate], cwd=source)
+        if code:
+            return blocked("candidate_ancestry_mismatch")
+        code, delta = _git_changed_files_between(old, candidate, source)
+        code2, coverage = _git_changed_files_between(request.base_sha, candidate, source)
+        prior = _existing_pr_publish_file_paths(before)
+        if code or code2 or not delta <= request.allowed_files or not prior <= coverage:
+            return blocked("candidate_coverage_mismatch")
+        # Materialize only regular blobs into a bounded disposable source tree.
+        code, tree = run_command(["git", "ls-tree", "-rl", candidate], cwd=source)
+        rows = [row.split("\t", 1) for row in tree.splitlines()]
+        if code or not rows or len(rows) > 10_000:
+            return blocked("candidate_tree_unsafe")
+        total_bytes = 0
+        for row in rows:
+            fields = row[0].split()
+            if (len(row) != 2 or len(fields) != 4
+                    or fields[0] not in {"100644", "100755"} or fields[1] != "blob"
+                    or not fields[3].isdigit() or not _safe_changed_file(row[1])):
+                return blocked("candidate_tree_unsafe")
+            total_bytes += int(fields[3])
+        if total_bytes > 64 * 1024 * 1024:
+            return blocked("candidate_tree_too_large")
+        with tempfile.TemporaryDirectory(prefix="runner-source-ff-") as temporary:
+            root = Path(temporary)
+            index = root / "index"
+            output = root / "source"
+            output.mkdir()
+            code, _ = _git_with_temporary_index(["git", "read-tree", candidate], source, index)
+            if code:
+                return blocked("candidate_checkout_failed")
+            code, _ = _git_with_temporary_index(
+                ["git", "checkout-index", "--all", f"--prefix={output}/"], source, index)
+            if code:
+                return blocked("candidate_checkout_failed")
+            for name in packet.allowed_files:
+                data = (output / name).read_bytes()
+                lines.append(f"overlay_file={name} overlay_bytes={len(data)} overlay_sha256={hashlib.sha256(data).hexdigest()}")
+            tests = sorted(name for name in packet.allowed_files
+                           if name.startswith("tests/test_") and name.endswith(".py"))
+            if not tests:
+                return blocked("focused_tests_missing")
+            code, result = run_command(["python3", "-m", "pytest", "-q", "-p", "no:cacheprovider", *tests], cwd=output)
+            totals = re.search(r"(\d+) passed", result)
+            if (code or not totals or int(totals.group(1)) == 0
+                    or re.search(r"\b(failed|errors?|skipped|xfailed|xpassed|warnings?)\b", result, re.I)):
+                return blocked("focused_tests_unsafe")
+            lines.append(f"focused_tests_passed={totals.group(1)}")
+        # Refresh metadata and exact refs immediately before the non-forced push.
+        if _registered_worktree_overlay_pr_state(binding, source) != before:
+            return blocked("pr_drift")
+        for ref, expected in (("main", request.base_sha), (branch, old)):
+            code, remote = run_command(["git", "ls-remote", "--exit-code", "origin", f"refs/heads/{ref}"], cwd=source)
+            if code or remote.split() != [expected, f"refs/heads/{ref}"]:
+                return blocked("remote_branch_changed")
+        code, _ = run_command(["git", "push", "origin", f"{candidate}:refs/heads/{branch}"], cwd=source)
+        if code:
+            return blocked("non_fast_forward_or_push_failed")
+        after = _registered_worktree_overlay_pr_state(binding, source)
+        reason = _registered_worktree_overlay_post_push_block_reason(binding, before, after, candidate)
+        if reason or after.get("url") != before.get("url") or _existing_pr_publish_file_paths(after) != coverage:
+            return blocked(reason or "post_push_coverage_mismatch")
+        lines.extend((f"pushed_head_sha={candidate}", f"parent_sha={old}", "publication=verified"))
+        return _maintenance_report("DONE", task_id, lines, "met")
+    except (OSError, ValueError, RuntimeError, json.JSONDecodeError):
+        return blocked("source_or_pr_lookup_unavailable")
+
+
 def publish_target_project_issue_worktree_pr(body: str) -> str:
     return _issue_worktree_publish_validated_report(
         body,
@@ -23098,6 +23271,8 @@ def dispatch_runtime_maintenance_task(
             return publish_issue_worktree_to_existing_pr(body)
         if task_id == OVERLAY_REGISTERED_WORKTREE_TO_EXISTING_PR:
             return overlay_registered_worktree_to_existing_pr(body)
+        if task_id == PUBLISH_REGISTERED_TARGET_FAST_FORWARD:
+            return publish_registered_target_fast_forward(body)
         if task_id == PUBLISH_TARGET_PROJECT_ISSUE_WORKTREE_PR:
             return publish_target_project_issue_worktree_pr(body)
         if task_id == PUBLISH_CONTAINER_VALIDATION_WORKTREE:
