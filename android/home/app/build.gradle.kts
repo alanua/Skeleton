@@ -4,6 +4,8 @@ val homeEdgeBaseUrls = providers.gradleProperty("homeEdgeBaseUrls").orElse("").g
 val escapedHomeEdgeBaseUrls = homeEdgeBaseUrls.replace("\\", "\\\\").replace("\"", "\\\"")
 val homeEdgeSecretBaseUrl = providers.gradleProperty("homeEdgeSecretBaseUrl").orElse("").get().trim()
 val escapedHomeEdgeSecretBaseUrl = homeEdgeSecretBaseUrl.replace("\\", "\\\\").replace("\"", "\\\"")
+val homeEdgeSecretTailscaleIp = providers.gradleProperty("homeEdgeSecretTailscaleIp").orElse("").get().trim()
+val escapedHomeEdgeSecretTailscaleIp = homeEdgeSecretTailscaleIp.replace("\\", "\\\\").replace("\"", "\\\"")
 
 fun validateHomeEdgeReleaseBaseUrls(raw: String) {
     val urls = raw.split(",").map { it.trim() }.filter { it.isNotEmpty() }
@@ -25,6 +27,9 @@ gradle.taskGraph.whenReady {
         require(secretUrl != null && secretUrl.scheme == "https" && !secretUrl.host.isNullOrBlank()) {
             "assembleRelease requires -PhomeEdgeSecretBaseUrl with one valid HTTPS base URL"
         }
+        require(Regex("""(?:\d{1,3}\.){3}\d{1,3}""").matches(homeEdgeSecretTailscaleIp)) {
+            "assembleRelease requires -PhomeEdgeSecretTailscaleIp with one IPv4 address"
+        }
     }
 }
 
@@ -36,10 +41,11 @@ android {
         applicationId = "com.skeleton.home"
         minSdk = 26
         targetSdk = 34
-        versionCode = 160
-        versionName = "1.4.44"
+        versionCode = 164
+        versionName = "1.4.48"
         buildConfigField("String", "HOME_EDGE_BASE_URLS", "\"$escapedHomeEdgeBaseUrls\"")
         buildConfigField("String", "HOME_EDGE_SECRET_BASE_URL", "\"$escapedHomeEdgeSecretBaseUrl\"")
+        buildConfigField("String", "HOME_EDGE_SECRET_TAILSCALE_IP", "\"$escapedHomeEdgeSecretTailscaleIp\"")
     }
     buildFeatures { compose = true; buildConfig = true }
     composeOptions { kotlinCompilerExtensionVersion = "1.5.14" }
