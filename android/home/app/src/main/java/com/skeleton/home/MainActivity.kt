@@ -1029,11 +1029,13 @@ private fun parseHomeProfile(j:JSONObject)=HomeClientProfile(j.optString("profil
 /** Keep every tab composed so remember/LazyListState/API-loaded UI state survives tab changes.
  * Inactive tabs are measured but deliberately not placed, so they cannot draw or receive input.
  */
+private val LocalHomeTabActive=compositionLocalOf { true }
 @Composable
 private fun PersistentTabSlot(active:Boolean, content:@Composable ()->Unit){
+    val parentActive=LocalHomeTabActive.current
     Layout(
         modifier=Modifier.fillMaxSize(),
-        content=content
+        content={ CompositionLocalProvider(LocalHomeTabActive provides (parentActive&&active)){ content() } }
     ){measurables,constraints->
         val placeables=measurables.map{it.measure(constraints)}
         val width=if(constraints.hasBoundedWidth)constraints.maxWidth else placeables.maxOfOrNull{it.width}?:0
@@ -1079,7 +1081,15 @@ private fun HomeComposeApp(sharedUrl:String?,foregroundRevision:Int,consumeShare
     var profile by remember { mutableStateOf<HomeClientProfile?>(null) }
     var videoSelectionRevision by rememberSaveable { mutableIntStateOf(0) }
     LaunchedEffect(foregroundRevision,profile?.hasSk) {
-        tab=homeTabOnForeground(profile?.hasSk,tab)
+        if(profile?.hasSk==false && sharedUrl.isNullOrBlank()){
+            tab=0
+            // Warm launcher return must show only Home, not stale modal windows.
+            menu=false;info=false;historyEditor=false;channelEditor=false
+            deviceOrderEditor=false;screensaver=false;familySecurity=false
+            languageDialog=""
+        } else if(profile?.hasSk==true) {
+            tab=homeTabOnForeground(true,tab)
+        }
     }
     suspend fun refreshMediaTarget():Boolean{
         if(api.server==null)return false
@@ -1530,6 +1540,8 @@ private fun idleLabel(v:Int)=when(v){60->"1 хвилина";120->"2 хвилин
 @Composable
 private fun SaverSelectRow(label:String,value:String,options:List<String>,enabled:Boolean,onSelect:(String)->Unit){
     var open by remember{mutableStateOf(false)}
+    val tabActive=LocalHomeTabActive.current
+    LaunchedEffect(tabActive){if(!tabActive)open=false}
     Row(Modifier.fillMaxWidth().height(64.dp),verticalAlignment=Alignment.CenterVertically){
         Text(label,fontSize=13.sp,color=Text,modifier=Modifier.width(120.dp))
         Box(Modifier.weight(1f)){
@@ -1540,7 +1552,7 @@ private fun SaverSelectRow(label:String,value:String,options:List<String>,enable
                 Text(value,fontSize=13.sp,color=if(enabled)Text else Muted,modifier=Modifier.weight(1f))
                 Mdi("chevron-down",16.dp,Muted)
             }
-            DropdownMenu(expanded=open,onDismissRequest={open=false},modifier=Modifier.background(Color(0xFF252A30))){
+            DropdownMenu(expanded=open&&tabActive,onDismissRequest={open=false},modifier=Modifier.background(Color(0xFF252A30))){
                 options.forEach{x->DropdownMenuItem(text={Text(x,color=Text,fontSize=13.sp)},onClick={open=false;onSelect(x)})}
             }
         }
@@ -1593,6 +1605,8 @@ private fun Header(title:String, connected:Boolean, endpointId:String, endpoints
 
 @Composable private fun OutputTargetSelector(endpointId:String,endpoints:List<MediaEndpointUi>,onEndpoint:(String)->Unit){
     var open by remember{mutableStateOf(false)}
+    val tabActive=LocalHomeTabActive.current
+    LaunchedEffect(tabActive){if(!tabActive)open=false}
     val selected=endpointById(endpoints,endpointId)
     Box{
         Row(Modifier.height(38.dp).width(148.dp).clip(RoundedCornerShape(19.dp)).background(Color(0xFF171D23)).border(1.dp,Line,RoundedCornerShape(19.dp)).clickable{open=true}.padding(horizontal=12.dp),verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(8.dp)){
@@ -1600,7 +1614,7 @@ private fun Header(title:String, connected:Boolean, endpointId:String, endpoints
             Text(selected.label,fontSize=11.sp,fontWeight=FontWeight.SemiBold,color=Text,maxLines=1,modifier=Modifier.weight(1f),overflow=TextOverflow.Ellipsis)
             Mdi("chevron-down",14.dp,Muted)
         }
-        DropdownMenu(expanded=open,onDismissRequest={open=false},modifier=Modifier.width(148.dp).background(Color(0xFF171B20)).border(1.dp,Line,RoundedCornerShape(12.dp))){
+        DropdownMenu(expanded=open&&tabActive,onDismissRequest={open=false},modifier=Modifier.width(148.dp).background(Color(0xFF171B20)).border(1.dp,Line,RoundedCornerShape(12.dp))){
             endpoints.forEach{endpoint->
                 DropdownMenuItem(text={Text(endpoint.label,color=Text,fontSize=13.sp,maxLines=1,overflow=TextOverflow.Ellipsis)},leadingIcon={Mdi(endpoint.icon,19.dp,if(endpoint.endpointId==endpointId)Accent else Muted)},onClick={open=false;if(endpoint.endpointId!=endpointId)onEndpoint(endpoint.endpointId)})
             }
@@ -2610,6 +2624,8 @@ private fun openCatalogUrl(context:Context,url:String){if(url.isBlank())return;r
 
 @Composable private fun SelectorField(label:String,icon:String,value:String,options:List<String>,showCount:Boolean=false,trailing:String="",iconAction:(()->Unit)?=null,onSelect:(String)->Unit){
     var expanded by remember{mutableStateOf(false)}
+    val tabActive=LocalHomeTabActive.current
+    LaunchedEffect(tabActive){if(!tabActive)expanded=false}
     val selectedIndex=options.indexOf(value)
     val labelText=if(showCount&&options.isNotEmpty()) "$label · ${options.size} серій" else label
     val valueText=if(showCount&&selectedIndex>=0&&options.size>1) "$value · ${selectedIndex+1}/${options.size}" else value
@@ -2625,7 +2641,7 @@ private fun openCatalogUrl(context:Context,url:String){if(url.isBlank())return;r
                     if(trailing.isNotBlank())Text(trailing,fontSize=11.sp,fontWeight=FontWeight.SemiBold,color=Muted,modifier=Modifier.padding(horizontal=8.dp))
                     Mdi("chevron-down",16.dp,Muted.copy(alpha=if(options.isNotEmpty())1f else .55f))
                 }
-                DropdownMenu(expanded=expanded,onDismissRequest={expanded=false},modifier=Modifier.heightIn(max=menuMax).background(Color(0xFF171B20)).border(1.dp,Color(0xFF31363C),RoundedCornerShape(12.dp))){
+                DropdownMenu(expanded=expanded&&tabActive,onDismissRequest={expanded=false},modifier=Modifier.heightIn(max=menuMax).background(Color(0xFF171B20)).border(1.dp,Color(0xFF31363C),RoundedCornerShape(12.dp))){
                     options.forEachIndexed{i,v->DropdownMenuItem(text={Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically){Text(v,color=Text,fontSize=14.sp,modifier=Modifier.weight(1f));if(showCount)Text("${i+1}/${options.size}",color=Muted,fontSize=11.sp)}},onClick={expanded=false;onSelect(v)})}
                 }
             }
@@ -3454,7 +3470,7 @@ internal fun familyScannerDialogVisible(active:Boolean,open:Boolean,serverConnec
                 val secretTypeLabels=mapOf("api_key" to "API key","token" to "Token","password" to "Пароль","login_password" to "Логін + пароль","json" to "JSON","text" to "Текст","other" to "Інше")
                 Box(Modifier.fillMaxWidth().padding(top=8.dp)){
                     OutlinedButton(onClick={secretTypeMenu=true},enabled=!busy,modifier=Modifier.fillMaxWidth(),shape=RoundedCornerShape(12.dp),border=BorderStroke(1.dp,Line)){Text("Тип: ${secretTypeLabels[secretType]?:secretType}",color=Text,modifier=Modifier.weight(1f));Mdi("chevron-down",18.dp,Muted)}
-                    DropdownMenu(expanded=secretTypeMenu,onDismissRequest={secretTypeMenu=false}){secretTypeLabels.forEach{(key,label)->DropdownMenuItem(text={Text(label)},onClick={secretType=key;secretTypeMenu=false;secretValue="";secretLogin="";secretPassword=""})}}
+                    DropdownMenu(expanded=secretTypeMenu&&LocalHomeTabActive.current,onDismissRequest={secretTypeMenu=false}){secretTypeLabels.forEach{(key,label)->DropdownMenuItem(text={Text(label)},onClick={secretType=key;secretTypeMenu=false;secretValue="";secretLogin="";secretPassword=""})}}
                 }
                 if(secretType=="login_password"){
                     OutlinedTextField(value=secretLogin,onValueChange={if(it.length<=4096)secretLogin=it},enabled=!busy,label={Text("Логін")},singleLine=true,modifier=Modifier.fillMaxWidth().padding(top=8.dp),colors=OutlinedTextFieldDefaults.colors(focusedTextColor=Text,unfocusedTextColor=Text,focusedBorderColor=Accent,unfocusedBorderColor=Line,focusedLabelColor=Accent,unfocusedLabelColor=Muted,cursorColor=Accent))
