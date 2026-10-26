@@ -2703,7 +2703,7 @@ private data class NativeDeviceUi(val id:String,val name:String,val role:String,
 private data class NativeDeviceWebLink(val label:String,val url:String)
 // URLs originate from confirmed Skeleton Device Registry services; IDs never from IPs.
 private fun nativeDeviceWebLinks(deviceId:String):List<NativeDeviceWebLink> = when(deviceId){
-    "brandenburg_proxmox"->listOf(NativeDeviceWebLink("Proxmox","https://192.168.1.179:8006/"))
+    "__software_proxmox"->listOf(NativeDeviceWebLink("Proxmox","https://192.168.1.179:8006/"))
     "brandenburg_haos"->listOf(NativeDeviceWebLink("Home Assistant","http://192.168.1.17:8123/"))
     "__service_ct101","anycubic_kobra_2022"->listOf(NativeDeviceWebLink("OctoPrint","http://192.168.1.237:5000/"))
     "kobra_logitech_webcam"->listOf(NativeDeviceWebLink("Камера · знімок","http://192.168.1.237:8080/snapshot"))
@@ -2713,7 +2713,7 @@ private fun nativeDeviceWebLinks(deviceId:String):List<NativeDeviceWebLink> = wh
     "lavalamp"->listOf(NativeDeviceWebLink("WLED","http://192.168.1.164/"))
     "tv_wled"->listOf(NativeDeviceWebLink("WLED","http://192.168.1.16/"))
     "matrix_wled"->listOf(NativeDeviceWebLink("WLED","http://192.168.1.41/"))
-    "home_edge_01"->listOf(NativeDeviceWebLink("Home Edge Web","http://192.168.1.54:8100/view/phone"))
+    "__software_homeedge"->listOf(NativeDeviceWebLink("Home Edge Web","http://192.168.1.54:8100/view/phone"))
     else->emptyList()
 }
 // Bounded reachability only, no device commands, credentials or TLS bypass.
@@ -2728,23 +2728,25 @@ private suspend fun nativeWebReachable(url:String):Boolean=withContext(Dispatche
 }
 private fun nativeDeviceTopology(items:List<NativeDeviceUi>):List<NativeDeviceUi>{
     val unique=items.filter{it.id.isNotBlank()}.distinctBy{it.id}
-    val hasProxmox=unique.any{it.id=="brandenburg_proxmox"}
-    val hasCtClients=unique.any{it.id in setOf("anycubic_kobra_2022","kobra_logitech_webcam")}
-    val ctId="__service_ct101"
-    val translated=unique.map{d->
-        when(d.id){
-            "home_edge_01"->d.copy(parentId="",connection="Окремий медіавузол LAN · HDMI 1 → Sharp TV")
-            "brandenburg_haos"->d.copy(parentId=if(hasProxmox)"brandenburg_proxmox" else "",medium="virtual_machine",connection="VM100 · Home Assistant OS (Proxmox)")
-            "anycubic_kobra_2022"->d.copy(parentId=if(hasProxmox)ctId else "",medium="usb",connection="USB до CT101 · OctoPrint окремо від підключення USB")
-            "kobra_logitech_webcam"->d.copy(parentId=if(hasProxmox)ctId else "",medium="usb",connection="USB до CT101 · стан відеопотоку перевіряється окремо")
-            "home_edge_gyromouse_remote","cherry_usb_keyboard","sharkoon_wireless_mouse","gamesir_nova_lite"->d.copy(parentId=if(unique.any{it.id=="home_edge_01"})"home_edge_01" else "")
-            "sharp_tv_living_room"->d.copy(parentId="",connection="HDMI 1 ← Home Edge · окремий телевізор")
-            else->d
-        }
+    val q558=unique.any{it.id=="brandenburg_proxmox"}
+    val q556=unique.any{it.id=="home_edge_01"}
+    val physical=unique.map{d->when(d.id){
+        "brandenburg_proxmox"->d.copy(name="Fujitsu ESPRIMO Q558",parentId="",connection="Фізичний сервер")
+        "home_edge_01"->d.copy(name="Fujitsu ESPRIMO Q556/2",parentId="",connection="Фізичний медіакомп’ютер")
+        "brandenburg_haos"->d.copy(name="VM100 · Home Assistant OS",parentId=if(q558)"__software_proxmox" else "",medium="virtual_machine")
+        "anycubic_kobra_2022"->d.copy(parentId=if(q558)"brandenburg_proxmox" else "",medium="usb",connection="USB до Fujitsu Q558 · сервіс CT101")
+        "kobra_logitech_webcam"->d.copy(parentId=if(q558)"brandenburg_proxmox" else "",medium="usb",connection="USB до Fujitsu Q558 · камера CT101")
+        "sharp_tv_living_room"->d.copy(parentId=if(q556)"home_edge_01" else "",medium="hdmi",connection="HDMI 1 від Fujitsu Q556/2")
+        "home_edge_gyromouse_remote","cherry_usb_keyboard","sharkoon_wireless_mouse","gamesir_nova_lite"->d.copy(parentId=if(q556)"home_edge_01" else "")
+        else->d
+    }}
+    val services=mutableListOf<NativeDeviceUi>()
+    if(q558){
+        services.add(NativeDeviceUi("__software_proxmox","Proxmox VE","software_service","network",false,"",emptyList(),"","Мережа","Платформа віртуалізації","brandenburg_proxmox","software"))
+        services.add(NativeDeviceUi("__service_ct101","CT101 · OctoPrint","virtualization_service","network",false,"",emptyList(),"","Мережа","LXC-контейнер Proxmox","__software_proxmox","container"))
     }
-    if(!hasProxmox||!hasCtClients)return translated
-    val ct=NativeDeviceUi(ctId,"CT101 · OctoPrint","virtualization_service","network",false,"",emptyList(),"","Мережа","LXC-контейнер · сервер друку та камери","brandenburg_proxmox","container")
-    return translated+ct
+    if(q556)services.add(NativeDeviceUi("__software_homeedge","Home Edge · медіасистема","software_service","network",false,"",emptyList(),"","Мережа","Медіапрограма","home_edge_01","software"))
+    return physical+services
 }
 
 private val deviceDomainOrder=listOf("Житло","Мережа","Керування","Документи","Київ / поза домом")
@@ -2801,6 +2803,37 @@ private fun nativeDeviceIcon(role:String)=when(role){
     "gateway_router_modem","secondary_router","media_pc","virtualization_host"->"cast-connected"
     else->"devices"
 }
+private data class DeviceSection(val id:String,val title:String,val items:List<NativeDeviceUi>)
+internal fun hardwareFirstRank(medium:String):Int=when(medium){
+    "software","container","virtual_machine"->10
+    "usb","hdmi","ethernet","wifi","bluetooth"->1
+    else->2
+}
+private fun nativeDeviceSections(items:List<NativeDeviceUi>):List<DeviceSection>{
+    val byId=items.associateBy{it.id}
+    val children=items.groupBy{it.parentId}
+    val done=mutableSetOf<String>()
+    val sections=mutableListOf<DeviceSection>()
+    fun subtree(id:String,rows:MutableList<NativeDeviceUi>){
+        val d=byId[id]?:return
+        if(!done.add(id))return
+        rows.add(d)
+        children[id].orEmpty().sortedWith(compareBy<NativeDeviceUi>{hardwareFirstRank(it.medium)}.thenBy{it.name}).forEach{subtree(it.id,rows)}
+    }
+    fun group(id:String,title:String){
+        if(id !in byId)return
+        val rows=mutableListOf<NativeDeviceUi>()
+        subtree(id,rows)
+        sections.add(DeviceSection(id,title,rows))
+    }
+    group("asus_router_modem","Мережа · фізичні роутери")
+    group("brandenburg_proxmox","Fujitsu Q558 · сервер")
+    group("home_edge_01","Fujitsu Q556/2 · медіасистема")
+    val rest=mutableListOf<NativeDeviceUi>()
+    items.filter{it.id !in done}.forEach{subtree(it.id,rest)}
+    if(rest.isNotEmpty())sections.add(DeviceSection("other","Інші пристрої",rest))
+    return sections
+}
 @Composable private fun DeviceDomainCard(title:String,items:List<NativeDeviceUi>,webState:Map<String,Boolean>,onOpenWeb:(String)->Unit,onSharp:()->Unit,onMfp:()->Unit,onHomeEdge:()->Unit){
     Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(Card)){
         Row(Modifier.fillMaxWidth().padding(horizontal=15.dp,vertical=12.dp),verticalAlignment=Alignment.CenterVertically){Text(title,fontSize=15.sp,fontWeight=FontWeight.Bold,color=Text,modifier=Modifier.weight(1f));Text(ui("${items.count{it.online&&!it.id.startsWith("__")}}/${items.count{!it.id.startsWith("__")}} на зв’язку"),fontSize=10.sp,color=Muted)}
@@ -2811,7 +2844,7 @@ private fun nativeDeviceIcon(role:String)=when(role){
         fun visit(d:NativeDeviceUi,depth:Int){
             if(!visited.add(d.id))return
             ordered.add(d to depth)
-            children[d.id].orEmpty().sortedBy{it.name}.forEach{visit(it,(depth+1).coerceAtMost(5))}
+            children[d.id].orEmpty().sortedWith(compareBy<NativeDeviceUi>{hardwareFirstRank(it.medium)}.thenBy{it.name}).forEach{visit(it,(depth+1).coerceAtMost(5))}
         }
         items.filter{it.parentId !in byId}.sortedWith(compareBy<NativeDeviceUi>{it.role!="gateway_router_modem"}.thenBy{it.id!="brandenburg_proxmox"}.thenBy{it.name}).forEach{visit(it,0)}
         items.filter{it.id !in visited}.sortedBy{it.name}.forEach{visit(it,0)}
@@ -2821,7 +2854,11 @@ private fun nativeDeviceIcon(role:String)=when(role){
             val webLinks=nativeDeviceWebLinks(d.id).filter{webState[it.url]==true}
             val octoprintState=webState["http://192.168.1.237:5000/"]
             val cameraState=webState["http://192.168.1.237:8080/snapshot"]
-            val effectiveOnline=if(d.id=="__service_ct101")octoprintState==true else d.online
+            val effectiveOnline=when(d.id){
+                "__service_ct101"->octoprintState==true
+                "__software_proxmox","__software_homeedge"->byId[d.parentId]?.online==true
+                else->d.online
+            }
             val serviceDescription=when(d.id){
                 "__service_ct101"->when(octoprintState){true->"OctoPrint: доступний";false->"OctoPrint: недоступний";else->"OctoPrint: перевіряється"}
                 "anycubic_kobra_2022"->"USB: ${if(d.online)"підключено" else "не підтверджено"} · OctoPrint: ${when(octoprintState){true->"доступний";false->"недоступний";else->"перевіряється"}}"
@@ -2830,26 +2867,29 @@ private fun nativeDeviceIcon(role:String)=when(role){
             }
             if(index>0)Box(Modifier.fillMaxWidth().height(1.dp).background(Line))
             Row(Modifier.fillMaxWidth().heightIn(min=76.dp).clickable(enabled=d.id=="sharp_tv_living_room"||d.id=="brother_printer"||d.id=="home_edge_01"){when(d.id){"sharp_tv_living_room"->onSharp();"brother_printer"->onMfp();"home_edge_01"->onHomeEdge()}}.padding(horizontal=14.dp,vertical=10.dp),verticalAlignment=Alignment.CenterVertically){
-                val linkColor=when(d.medium){"ethernet"->Color(0xFF41A9EA);"wifi"->Color(0xFF4AC67F);"usb"->Color(0xFFF5A746);"bluetooth"->Color(0xFFAB85F5);"hdmi"->Color(0xFFE97092);"virtual_machine"->Color(0xFF859EB2);"tailscale"->Color(0xFF42C6CF);else->Color(0xFF4E5863)}
-                Canvas(Modifier.width((18+depth*18).dp).height(72.dp)){
-                    val step=18.dp.toPx()
-                    val x=9.dp.toPx()+depth*step
-                    val mid=size.height/2f
-                    val sw=2.5.dp.toPx()
-                    if(depth>0){
-                        val parentX=x-step
-                        drawLine(linkColor,Offset(parentX,0f),Offset(parentX,size.height),strokeWidth=sw)
-                        drawLine(linkColor,Offset(parentX,mid),Offset(x,mid),strokeWidth=sw)
-                    }else drawCircle(Color(0xFF4E5863),radius=3.dp.toPx(),center=Offset(x,mid))
-                }
+                val software=d.medium in setOf("software","container","virtual_machine")
+                if(depth>0)Text("↳",fontSize=18.sp,color=if(software)Muted else Accent,modifier=Modifier.width((16+depth*6).dp))
+                else Spacer(Modifier.width(12.dp))
                 Box(Modifier.size(42.dp).clip(RoundedCornerShape(12.dp)).background(Action),contentAlignment=Alignment.Center){Mdi(nativeDeviceIcon(d.role),23.dp,if(d.online)Text else Muted)}
                 Column(Modifier.weight(1f).padding(start=12.dp)){
-                    Text(d.name,fontSize=15.sp,lineHeight=19.sp,fontWeight=FontWeight.SemiBold,color=Text,maxLines=2,overflow=TextOverflow.Ellipsis)
-                    Text((if(d.medium.isNotBlank())when(d.medium){"usb"->"USB";"ethernet"->"LAN";"wifi"->"Wi-Fi";"virtual_machine"->"VM";"container"->"CT";"bluetooth"->"Bluetooth";"hdmi"->"HDMI";else->d.medium}+" · " else "")+d.connection,fontSize=10.sp,lineHeight=14.sp,color=Muted,maxLines=3,overflow=TextOverflow.Ellipsis,modifier=Modifier.padding(top=4.dp))
+                    Text(if(software)"ПРОГРАМНЕ" else "АПАРАТНЕ",fontSize=9.sp,fontWeight=FontWeight.Bold,color=if(software)Muted else Accent)
+                    Text(d.name,fontSize=15.sp,lineHeight=19.sp,fontWeight=FontWeight.SemiBold,color=Text,maxLines=3,overflow=TextOverflow.Ellipsis)
+                    val relation=when(d.id){
+                        "__software_proxmox"->"ПЗ на Fujitsu ESPRIMO Q558"
+                        "__software_homeedge"->"ПЗ на Fujitsu ESPRIMO Q556/2"
+                        "brandenburg_haos"->"VM100 у Proxmox"
+                        "__service_ct101"->"LXC-контейнер у Proxmox"
+                        "mikrotik_home"->"Ethernet від ASUS"
+                        "sharp_tv_living_room"->"HDMI 1 від Fujitsu Q556/2"
+                        "anycubic_kobra_2022","kobra_logitech_webcam"->d.connection
+                        else->d.connection
+                    }
+                    Text(relation,fontSize=11.sp,lineHeight=16.sp,color=Muted,maxLines=4,overflow=TextOverflow.Ellipsis,modifier=Modifier.padding(top=4.dp))
+                    Text(when(d.id){"anycubic_kobra_2022","kobra_logitech_webcam"->if(d.online)"USB підтверджено" else "USB не перевірено";else->if(effectiveOnline)"На зв’язку" else "Не на зв’язку"},fontSize=10.sp,color=if(effectiveOnline)Green else Muted,modifier=Modifier.padding(top=5.dp))
                     if(serviceDescription.isNotBlank())Text(serviceDescription,fontSize=10.sp,color=if((d.id=="__service_ct101"&&octoprintState==true)||(d.id=="kobra_logitech_webcam"&&cameraState==true))Green else Muted,modifier=Modifier.padding(top=3.dp))
                     webLinks.forEach{link->Text("Відкрити ${link.label} ↗",fontSize=12.sp,fontWeight=FontWeight.Medium,color=Accent,modifier=Modifier.clickable{onOpenWeb(link.url)}.padding(top=7.dp,bottom=3.dp))}
                 }
-                Column(horizontalAlignment=Alignment.End){Box(Modifier.size(8.dp).clip(CircleShape).background(if(effectiveOnline)Green else Muted));Text(if(effectiveOnline)"На зв’язку" else "Не на зв’язку",fontSize=9.sp,color=if(effectiveOnline)Green else Muted,modifier=Modifier.padding(top=4.dp));if(d.id=="sharp_tv_living_room"||d.id=="brother_printer"||d.id=="home_edge_01")Mdi("chevron-right",18.dp,Muted,Modifier.padding(top=5.dp))}
+                Box(Modifier.size(8.dp).clip(CircleShape).background(if(effectiveOnline)Green else Muted))
             }
         }
     }
@@ -3540,8 +3580,10 @@ private fun orderNativeDevices(items:List<NativeDeviceUi>,prefs:android.content.
             if(!loaded)item{SimpleSection("Домашня схема","Читаю актуальний список пристроїв…")}
             val ordered=nativeDeviceTopology(orderNativeDevices(devices,devicePrefs))
             if(ordered.isNotEmpty()){
-                item{Text("Proxmox → VM100 / CT101 → USB · Home Edge окремо. Вебпосилання з’являються лише після перевірки порту.",fontSize=11.sp,lineHeight=16.sp,color=Muted,modifier=Modifier.padding(horizontal=3.dp,vertical=4.dp))}
-                item(key="physical_topology"){DeviceDomainCard("Пристрої та підтверджені з’єднання",ordered,webState,::openDeviceWebPage,{sharpRemoteOpen=true},{mfpOpen=true},{homeEdgeOpen=true})}
+                item{Text("Спочатку апаратне обладнання, потім встановлене на ньому ПЗ, VM і контейнери.",fontSize=11.sp,color=Muted,modifier=Modifier.padding(horizontal=3.dp,vertical=4.dp))}
+                nativeDeviceSections(ordered).forEach{section->
+                    item(key="devices_"+section.id){DeviceDomainCard(section.title,section.items,webState,::openDeviceWebPage,{sharpRemoteOpen=true},{mfpOpen=true},{homeEdgeOpen=true})}
+                }
             }
         }
         if(active&&mfpOpen&&api.server!=null)MfpDialog(api){mfpOpen=false}
