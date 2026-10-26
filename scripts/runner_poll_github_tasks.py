@@ -3251,7 +3251,7 @@ def report_runner_lane(report: str, task: RunnerTask | None) -> str:
     return "\n".join((heading, *metadata, *details))
 
 
-def final_codex_answer(output: str) -> str:
+def final_codex_answer(output: str, *, preserve_status_lines: bool = False) -> str:
     """Return the final Codex answer without echoed prompt/transcript text."""
     text = _ANSI_ESCAPE_RE.sub("", output or "")
 
@@ -3267,6 +3267,21 @@ def final_codex_answer(output: str) -> str:
         if prefix:
             return prefix
 
+    if preserve_status_lines:
+        # Keep every explicit result in the final assistant turn so a later
+        # result cannot hide an earlier conflicting or malformed declaration.
+        in_fence = False
+        assistant_offset: int | None = None
+        offset = 0
+        for line in text.splitlines(keepends=True):
+            if line.lstrip().startswith("```"):
+                in_fence = not in_fence
+            elif not in_fence and line.strip() == "assistant":
+                assistant_offset = offset + len(line)
+            offset += len(line)
+        if assistant_offset is not None and _CODEX_TRANSCRIPT_TAIL_RE.match(text):
+            text = text[assistant_offset:]
+
     lines = text.splitlines(keepends=True)
     in_fence = False
     final_status_index: int | None = None
@@ -3280,7 +3295,7 @@ def final_codex_answer(output: str) -> str:
         ):
             final_status_index = offset
         offset += len(line)
-    if final_status_index is not None:
+    if final_status_index is not None and not preserve_status_lines:
         text = text[final_status_index:]
 
     transcript_tail = _CODEX_TRANSCRIPT_TAIL_RE.search(text)
@@ -3323,17 +3338,33 @@ def _first_final_status(output: str) -> str | None:
 
 
 def _final_result_status(output: str) -> str | None:
-    final_answer = _without_fenced_blocks(final_codex_answer(output))
-    lines = [line for line in final_answer.splitlines() if line.strip()]
-    if not lines:
+    final_answer = _without_fenced_blocks(
+        final_codex_answer(output, preserve_status_lines=True)
+    )
+    result_lines = [
+        line for line in final_answer.splitlines()
+        if re.match(
+            r"^\s*(?:[*_>`#-]+\s*|[0-9]+[.)]\s*)?RESULT\b", line, re.IGNORECASE
+        )
+    ]
+    if not result_lines:
         return None
-    for line in (lines[0], lines[-1]):
-        match = _FINAL_RESULT_LINE_RE.match(line)
-        if match is None:
-            continue
-        result = match.group("result").upper()
-        return result
-    return None
+    if len(result_lines) != 1:
+        return "BLOCKED"
+    match = re.fullmatch(r"RESULT: (DONE|BLOCKED|NEEDS_OPERATOR)", result_lines[0])
+    if match is None:
+        return "BLOCKED"
+    status = match.group(1)
+    if status == "DONE":
+        # Actual status declarations remain authoritative; ordinary prose
+        # (including compliance notes such as "No firmware build") does not.
+        for line in final_answer.splitlines():
+            blocker = re.match(
+                r"^\s*(BLOCKED|NEEDS_OPERATOR)(?:\s*:|\s*$)", line, re.IGNORECASE
+            )
+            if blocker is not None:
+                return blocker.group(1).upper()
+    return status
 
 
 def blocked_output_marker(output: str) -> str | None:
