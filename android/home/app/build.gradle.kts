@@ -41,8 +41,8 @@ android {
         applicationId = "com.skeleton.home"
         minSdk = 26
         targetSdk = 34
-        versionCode = 165
-        versionName = "1.4.49"
+        versionCode = 166
+        versionName = "1.4.50"
         buildConfigField("String", "HOME_EDGE_BASE_URLS", "\"$escapedHomeEdgeBaseUrls\"")
         buildConfigField("String", "HOME_EDGE_SECRET_BASE_URL", "\"$escapedHomeEdgeSecretBaseUrl\"")
         buildConfigField("String", "HOME_EDGE_SECRET_TAILSCALE_IP", "\"$escapedHomeEdgeSecretTailscaleIp\"")
