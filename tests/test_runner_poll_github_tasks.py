@@ -30217,13 +30217,13 @@ def test_wrong_base_recovery_existing_synthetic_lavalamp13(
     assert after == before
     assert (retained / "scripts/runner_poll_github_tasks.py").read_bytes() == retained_before
 
-def _synthetic_ff_publish(tmp_path, monkeypatch):
+def _synthetic_ff_publish(tmp_path, monkeypatch, suffix="mjs"):
     source = tmp_path / 'recovery'
     source.mkdir()
     _run_git(source, 'init')
     _run_git(source, 'config', 'user.email', 'synthetic@example.com')
     _run_git(source, 'config', 'user.name', 'Synthetic')
-    names = ['src/file%d.py' % i for i in range(16)] + ['tests/test_source.py']
+    names = ['src/file%d.py' % i for i in range(16)] + ['scripts/source.test.' + suffix]
     for name in names + ['untouched.txt']:
         path = source / name
         path.parent.mkdir(exist_ok=True)
@@ -30237,6 +30237,15 @@ def _synthetic_ff_publish(tmp_path, monkeypatch):
     base = runner.run_command(['git', 'rev-parse', 'HEAD'], cwd=source)[1].strip()
     original = tmp_path / runner._source_issue_slug(13, 'alanua/Lavalamp')
     original.mkdir()
+    _run_git(original, 'init')
+    _run_git(original, 'config', 'user.email', 'synthetic@example.com')
+    _run_git(original, 'config', 'user.name', 'Synthetic')
+    for name in names[:2]:
+        path = original / name
+        path.parent.mkdir(exist_ok=True)
+        path.write_text('old = 1\n')
+    _run_git(original, 'add', '.')
+    _run_git(original, 'commit', '-m', 'original base')
     for name in names:
         (source / name).write_text('retained = 2\n')
     for name in names[:2]:
@@ -30254,7 +30263,7 @@ def _synthetic_ff_publish(tmp_path, monkeypatch):
     monkeypatch.setattr(runner, '_declared_existing_pr_number', lambda b: 14)
     monkeypatch.setattr(runner, '_declared_existing_pr_expected_head_sha', lambda b: old)
     monkeypatch.setattr(runner, '_declared_existing_pr_expected_head_branch', lambda b: branch)
-    monkeypatch.setattr(runner, '_git_name_lines', lambda cmd, path: (0, names[:2], ''))
+    monkeypatch.setattr(runner, '_git_name_lines', lambda cmd, path: (0, [] if '--cached' in cmd else names[:2], ''))
     state = dict(number=14, state='OPEN', isDraft=True, baseRefName='main', baseRefOid=base,
                  headRefName=branch, headRefOid=old, headRepository={'nameWithOwner': 'alanua/Lavalamp'},
                  headRepositoryOwner={'login': 'alanua'}, url='https://github.com/alanua/Lavalamp/pull/14',
@@ -30271,11 +30280,11 @@ def _synthetic_ff_publish(tmp_path, monkeypatch):
                 return 0, branch
             if cmd[1:3] == ['remote', 'get-url']:
                 return 0, 'https://github.com/alanua/Lavalamp.git'
-            return 0, ''
-        if cmd[:3] == ['python3', '-m', 'pytest']:
+            return actual(cmd, cwd=cwd, **kw)
+        if cmd[:2] == ['node', '--test']:
             assert not (cwd / 'later.txt').exists()
             assert (cwd / 'untouched.txt').read_text() == 'old = 1\n'
-            return 0, '17 passed in 0.01s'
+            return 0, '# tests 17\n# pass 17\n# fail 0\n# cancelled 0\n# skipped 0\n# todo 0\n'
         if cmd[:2] == ['git', 'ls-remote']:
             ref = cmd[-1]
             return 0, f'{base if ref == "refs/heads/main" else old}\t{ref}\n'
@@ -30324,7 +30333,7 @@ def test_publish_recovery_ff_fail_closed(tmp_path, monkeypatch, failure):
     else:
         actual = runner.run_command
         def command(cmd, cwd=None, **kw):
-            if failure == 'test' and cmd[:2] == ['python3', '-m']:
+            if failure == 'test' and cmd[:2] == ['node', '--test']:
                 return 1, '1 failed'
             if failure == 'remote' and cmd[:2] == ['git', 'ls-remote']:
                 return 0, 'changed\t' + cmd[-1]
@@ -30364,3 +30373,109 @@ def test_publish_recovery_ff_honors_recovery_safety_gate(tmp_path, monkeypatch, 
     assert f'reason={reason}' in runner.publish_registered_target_fast_forward(body)
     assert not pushed
     assert not any(cmd[:2] == ['git', 'commit-tree'] for cmd in calls)
+
+
+@pytest.mark.parametrize("suffix", ["js", "cjs", "mjs"])
+def test_publish_recovery_ff_node_selection(tmp_path, monkeypatch, suffix):
+    source, _, names, _, _, _, calls, pushed, body = _synthetic_ff_publish(tmp_path, monkeypatch, suffix)
+    # Selection is explicit, bounded, and independent of automatic Node discovery.
+    report = runner.publish_registered_target_fast_forward(body)
+    assert 'publication=verified' in report
+    node_calls = [cmd for cmd in calls if cmd[:2] == ['node', '--test']]
+    assert node_calls == [['node', '--test', '--test-reporter=tap', 'scripts/source.test.' + suffix]]
+    assert pushed
+
+
+@pytest.mark.parametrize('output,code', [
+    ('# tests 0\n# pass 0\n', 0),
+    ('# tests 2\n# pass 1\n# fail 1\n', 0),
+    ('# tests 1\n# pass 1\n# skipped 1\n', 0),
+    ('# tests 1\n# pass 1\n', 1),
+    ('', 127),
+    ('# tests 1\n# pass 1\n# todo 1\n', 0),
+])
+def test_publish_recovery_ff_node_fail_closed(tmp_path, monkeypatch, output, code):
+    _, _, _, _, _, _, _, pushed, body = _synthetic_ff_publish(tmp_path, monkeypatch)
+    actual = runner.run_command
+    def command(cmd, cwd=None, **kw):
+        if cmd[:2] == ['node', '--test']:
+            return code, output
+        return actual(cmd, cwd=cwd, **kw)
+    monkeypatch.setattr(runner, 'run_command', command)
+    assert 'focused_tests_unsafe' in runner.publish_registered_target_fast_forward(body)
+    assert not pushed
+
+
+@pytest.mark.parametrize('conflict', [False, True])
+def test_publish_recovery_ff_original_three_way(tmp_path, monkeypatch, conflict):
+    source, original, names, _, _, _, _, pushed, body = _synthetic_ff_publish(tmp_path, monkeypatch)
+    base = 'first = 1\n' + '\n'.join('middle%d = 1' % i for i in range(12)) + '\nlast = 1\n'
+    for name in names[:2]:
+        (original / name).write_text(base)
+    _run_git(original, 'add', '.')
+    _run_git(original, 'commit', '-m', 'multiline original base')
+    for name in names[:2]:
+        (original / name).write_text(base.replace('first = 1', 'first = 2'))
+        (source / name).write_text(base.replace('first = 1', 'first = 3') if conflict
+                                   else base.replace('last = 1', 'last = 2'))
+    before = {(root, name): (root / name).read_bytes()
+              for root in (original, source) for name in names[:2]}
+    report = runner.publish_registered_target_fast_forward(body)
+    assert all((root / name).read_bytes() == data for (root, name), data in before.items())
+    if conflict:
+        assert 'conflicting_original_contents' in report
+        assert not pushed
+    else:
+        assert 'publication=verified' in report
+        for name in names[:2]:
+            code, merged = runner.run_command(['git', 'show', f'{pushed[0]}:{name}'], cwd=source)
+            assert code == 0
+            assert merged == base.replace('first = 1', 'first = 2').replace('last = 1', 'last = 2')
+
+
+@pytest.mark.parametrize('fault', ['missing', 'executable', 'parent_symlink', 'outside'])
+def test_publish_recovery_ff_unsafe_paths(tmp_path, monkeypatch, fault):
+    source, _, names, _, _, _, _, pushed, body = _synthetic_ff_publish(tmp_path, monkeypatch)
+    if fault == 'missing':
+        (source / names[-1]).unlink()
+    elif fault == 'executable':
+        (source / names[-1]).chmod(0o755)
+    elif fault == 'parent_symlink':
+        (source / 'scripts').rename(source / 'real-scripts')
+        (source / 'scripts').symlink_to('real-scripts', target_is_directory=True)
+    else:
+        monkeypatch.setattr(runner, '_git_name_lines', lambda *a: (0, [names[0], 'untouched.txt'], ''))
+    assert 'BLOCKED' in runner.publish_registered_target_fast_forward(body)
+    assert not pushed
+
+
+@pytest.mark.parametrize('fault', ['missing_node', 'timeout'])
+def test_publish_recovery_ff_node_unavailable(tmp_path, monkeypatch, fault):
+    source, _, names, _, _, _, _, pushed, body = _synthetic_ff_publish(tmp_path, monkeypatch)
+    actual = runner.run_command
+    def command(cmd, cwd=None, **kw):
+        if cmd[:2] == ['node', '--test']:
+            if fault == 'missing_node':
+                raise FileNotFoundError('synthetic missing node')
+            raise runner.subprocess.TimeoutExpired(cmd, 120)
+        return actual(cmd, cwd=cwd, **kw)
+    monkeypatch.setattr(runner, 'run_command', command)
+    assert 'BLOCKED' in runner.publish_registered_target_fast_forward(body)
+    assert not pushed
+
+
+def test_publish_recovery_ff_missing_node_tests(tmp_path, monkeypatch):
+    _, _, _, _, _, _, calls, pushed, body = _synthetic_ff_publish(tmp_path, monkeypatch, 'txt')
+    assert 'focused_tests_missing' in runner.publish_registered_target_fast_forward(body)
+    assert not pushed
+    assert not any(cmd[:2] == ['node', '--test'] for cmd in calls)
+
+
+def test_publish_recovery_ff_ambiguous_original_index(tmp_path, monkeypatch):
+    _, original, names, _, _, _, _, pushed, body = _synthetic_ff_publish(tmp_path, monkeypatch)
+    _run_git(original, 'add', names[0])
+    (original / names[0]).write_text('unstaged third version\n')
+    monkeypatch.setattr(runner, '_git_name_lines', lambda cmd, path: (
+        0, [names[0]] if '--cached' in cmd else names[:2], ''))
+    assert 'conflicting_original_index' in runner.publish_registered_target_fast_forward(body)
+    assert not pushed

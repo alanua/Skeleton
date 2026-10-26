@@ -19673,22 +19673,48 @@ def publish_registered_target_fast_forward(body: str) -> str:
         code, value = run_command(["git", "remote", "get-url", "origin"], cwd=original)
         if code or not _remote_url_matches_project_repo(value, request.repository):
             return blocked("original_repository_mismatch")
-        # Original dirty contents must be present byte-for-byte in the overlay.
-        # A differing staged version is ambiguous too, even if the worktree matches.
+        # Preserve both dirty versions using the original HEAD as their common base.
+        # A differing staged version remains ambiguous and must fail closed.
         code, dirty, _ = _git_name_lines(["git", "diff", "--name-only", "HEAD", "--"], original)
         code2, staged, _ = _git_name_lines(["git", "diff", "--cached", "--name-only", "--"], original)
         if code or code2 or len(set(dirty) | set(staged)) != 2:
             return blocked("original_dirty_pair_unknown")
         packet = RegisteredWorktreeOverlayPacket(task_id, 13, branch, 14, branch, old,
                                                  tuple(sorted(request.allowed_files)))
+        merged_blobs: dict[str, str] = {}
         for name in set(dirty) | set(staged):
             if (not _registered_worktree_overlay_safe_source_file(packet, original, name)
                     or not _registered_worktree_overlay_safe_source_file(packet, source, name)
-                    or (original / name).read_bytes() != (source / name).read_bytes()):
+                    or max((original / name).stat().st_size,
+                           (source / name).stat().st_size) > 1_048_576):
                 return blocked("conflicting_original_contents")
             code, _ = run_command(["git", "diff", "--quiet", "--", name], cwd=original)
             if name in staged and code != 0:
                 return blocked("conflicting_original_index")
+            if (original / name).read_bytes() != (source / name).read_bytes():
+                code, entry = run_command(["git", "ls-tree", "HEAD", "--", name], cwd=original)
+                fields = entry.split()
+                if code or len(fields) != 4 or fields[:2] != ["100644", "blob"]:
+                    return blocked("original_base_unknown")
+                with tempfile.TemporaryDirectory(prefix="runner-source-merge-") as temporary:
+                    root = Path(temporary)
+                    ours, base_file, theirs = (root / n for n in ("ours", "base", "theirs"))
+                    # cat-file through a binary stream avoids text decoding/newline changes.
+                    with base_file.open("wb") as stream:
+                        result = subprocess.run(
+                            ["git", "cat-file", "blob", fields[2]], cwd=original,
+                            stdout=stream, stderr=subprocess.PIPE, timeout=30, check=False)
+                    if result.returncode or base_file.stat().st_size > 1_048_576:
+                        return blocked("original_base_unknown")
+                    ours.write_bytes((source / name).read_bytes())
+                    theirs.write_bytes((original / name).read_bytes())
+                    code, _ = run_command(["git", "merge-file", str(ours), str(base_file), str(theirs)], cwd=source)
+                    if code:
+                        return blocked("conflicting_original_contents")
+                    code, blob = run_command(["git", "hash-object", "-w", "--no-filters", str(ours)], cwd=source)
+                    if code or not _HEAD_SHA_RE.fullmatch(blob.strip()):
+                        return blocked("merged_blob_failed")
+                    merged_blobs[name] = blob.strip()
         for name in packet.allowed_files:
             if (not _registered_worktree_overlay_safe_source_file(packet, source, name)
                     or (source / name).stat().st_size > 1_048_576):
@@ -19707,7 +19733,8 @@ def publish_registered_target_fast_forward(body: str) -> str:
         lines.extend((f"target_repository={request.repository}", "pull_request=14",
                       f"verified_base_sha={request.base_sha}", f"target_head_sha={old}",
                       f"target_branch={branch}", "validated_publish_files_count=17"))
-        specs = tuple(RegisteredWorktreeOverlaySourceSpec(name) for name in packet.allowed_files)
+        specs = tuple(RegisteredWorktreeOverlaySourceSpec(name, merged_blobs.get(name))
+                      for name in packet.allowed_files)
         candidate, reason = _overlay_registered_worktree_commit(packet, source, specs)
         if reason or candidate is None:
             return blocked(reason or "candidate_missing")
@@ -19753,15 +19780,21 @@ def publish_registered_target_fast_forward(body: str) -> str:
                 data = (output / name).read_bytes()
                 lines.append(f"overlay_file={name} overlay_bytes={len(data)} overlay_sha256={hashlib.sha256(data).hexdigest()}")
             tests = sorted(name for name in packet.allowed_files
-                           if name.startswith("tests/test_") and name.endswith(".py"))
-            if not tests:
+                           if name.startswith("scripts/")
+                           and name.endswith((".test.js", ".test.cjs", ".test.mjs")))
+            if not tests or len(tests) > 17:
                 return blocked("focused_tests_missing")
-            code, result = run_command(["python3", "-m", "pytest", "-q", "-p", "no:cacheprovider", *tests], cwd=output)
-            totals = re.search(r"(\d+) passed", result)
-            if (code or not totals or int(totals.group(1)) == 0
-                    or re.search(r"\b(failed|errors?|skipped|xfailed|xpassed|warnings?)\b", result, re.I)):
+            code, result = run_command(
+                ["node", "--test", "--test-reporter=tap", *tests], cwd=output, timeout=120)
+            totals = re.findall(r"(?m)^# tests (\d+)\s*$", result)
+            passes = re.findall(r"(?m)^# pass (\d+)\s*$", result)
+            if (code or len(totals) != 1 or len(passes) != 1
+                    or int(totals[0]) == 0 or totals != passes
+                    or any(re.findall(rf"(?m)^# {key} (\d+)\s*$", result) != ["0"]
+                           for key in ("fail", "cancelled", "skipped", "todo"))
+                    or re.search(r"(?m)^not ok\b", result)):
                 return blocked("focused_tests_unsafe")
-            lines.append(f"focused_tests_passed={totals.group(1)}")
+            lines.append(f"focused_tests_passed={totals[0]}")
         # Refresh metadata and exact refs immediately before the non-forced push.
         if _registered_worktree_overlay_pr_state(binding, source) != before:
             return blocked("pr_drift")
@@ -19778,7 +19811,7 @@ def publish_registered_target_fast_forward(body: str) -> str:
             return blocked(reason or "post_push_coverage_mismatch")
         lines.extend((f"pushed_head_sha={candidate}", f"parent_sha={old}", "publication=verified"))
         return _maintenance_report("DONE", task_id, lines, "met")
-    except (OSError, ValueError, RuntimeError, json.JSONDecodeError):
+    except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired, json.JSONDecodeError):
         return blocked("source_or_pr_lookup_unavailable")
 
 
