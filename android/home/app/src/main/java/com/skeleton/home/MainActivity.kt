@@ -111,6 +111,11 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.net.ServerSocket
 import java.net.InetAddress
+import java.net.InetSocketAddress
+import java.net.Socket
+import java.io.ByteArrayOutputStream
+import javax.net.ssl.SSLSocket
+import javax.net.ssl.SSLSocketFactory
 import java.time.LocalDate
 import java.util.Locale
 import kotlin.math.min
@@ -238,18 +243,74 @@ private class HomeApi {
     suspend fun patch(path: String, body: JSONObject = JSONObject()) = json("PATCH", path, body)
     suspend fun put(path: String, body: JSONObject = JSONObject()) = json("PUT", path, body)
     suspend fun delete(path: String) = json("DELETE", path)
-    private suspend fun secretJson(path:String,body:JSONObject):JSONObject=withContext(Dispatchers.IO){
+    private fun directSecretRequest(path:String,contentType:String,payload:ByteArray):JSONObject{
         val base=BuildConfig.HOME_EDGE_SECRET_BASE_URL.trim().trimEnd('/')
         if(!base.startsWith("https://"))throw IllegalStateException("Захищений канал Secrets недоступний")
-        val c=URL(base+path).openConnection() as HttpURLConnection
-        c.connectTimeout=5000;c.readTimeout=95000;c.requestMethod="POST";c.doOutput=true
-        c.setRequestProperty("Accept","application/json");c.setRequestProperty("Content-Type","application/json")
-        c.outputStream.use{it.write(body.toString().toByteArray(Charsets.UTF_8))}
-        val code=c.responseCode;val input=if(code>=400)c.errorStream else c.inputStream
-        val text=input?.bufferedReader(Charsets.UTF_8)?.use(BufferedReader::readText).orEmpty();c.disconnect()
-        val obj=if(text.isBlank())JSONObject() else JSONObject(text)
-        if(code>=400)throw IllegalStateException(obj.optString("error","HTTP $code"))
-        obj
+        val endpoint=URL(base)
+        val tlsHost=endpoint.host.takeIf{it.isNotBlank()}?:throw IllegalStateException("Некоректний Secrets host")
+        val fixedIp=BuildConfig.HOME_EDGE_SECRET_TAILSCALE_IP.trim()
+        if(fixedIp.isBlank())throw IllegalStateException("Secrets Tailscale IP не налаштований")
+        val raw=Socket()
+        try{
+            raw.connect(InetSocketAddress(fixedIp,443),5000)
+            raw.soTimeout=95000
+            val factory=SSLSocketFactory.getDefault() as SSLSocketFactory
+            val ssl=factory.createSocket(raw,tlsHost,443,true) as SSLSocket
+            val params=ssl.sslParameters
+            params.endpointIdentificationAlgorithm="HTTPS"
+            if(android.os.Build.VERSION.SDK_INT>=29)params.applicationProtocols=arrayOf("http/1.1")
+            ssl.sslParameters=params
+            ssl.soTimeout=95000
+            ssl.startHandshake()
+            val header=buildString{
+                append("POST ").append(path).append(" HTTP/1.1\r\n")
+                append("Host: ").append(tlsHost).append("\r\n")
+                append("Accept: application/json\r\n")
+                append("Accept-Encoding: identity\r\n")
+                append("Content-Type: ").append(contentType).append("\r\n")
+                append("Content-Length: ").append(payload.size).append("\r\n")
+                append("Connection: close\r\n\r\n")
+            }.toByteArray(Charsets.UTF_8)
+            ssl.outputStream.write(header)
+            ssl.outputStream.write(payload)
+            ssl.outputStream.flush()
+            val buffer=ByteArray(8192)
+            val response=ByteArrayOutputStream()
+            while(true){
+                val n=ssl.inputStream.read(buffer)
+                if(n<0)break
+                response.write(buffer,0,n)
+                if(response.size()>1024*1024)throw IllegalStateException("Secrets response завелика")
+            }
+            ssl.close()
+            val bytes=response.toByteArray()
+            var split=-1
+            if(bytes.size>=4){
+                for(i in 0..bytes.size-4){
+                    if(bytes[i]==13.toByte()&&bytes[i+1]==10.toByte()&&bytes[i+2]==13.toByte()&&bytes[i+3]==10.toByte()){
+                        split=i
+                        break
+                    }
+                }
+            }
+            if(split<0)throw IllegalStateException("Некоректна HTTPS-відповідь Secrets")
+            val headers=String(bytes,0,split,Charsets.ISO_8859_1)
+            val statusLine=headers.lineSequence().firstOrNull().orEmpty()
+            val code=statusLine.split(' ').getOrNull(1)?.toIntOrNull()
+                ?:throw IllegalStateException("Некоректний HTTP status Secrets")
+            if(headers.lineSequence().any{it.startsWith("Transfer-Encoding:",true)&&it.contains("chunked",true)})
+                throw IllegalStateException("Непідтримувана chunked-відповідь Secrets")
+            val bodyBytes=bytes.copyOfRange(split+4,bytes.size)
+            val text=bodyBytes.toString(Charsets.UTF_8)
+            val obj=if(text.isBlank())JSONObject() else JSONObject(text)
+            if(code>=400)throw IllegalStateException(obj.optString("error","HTTP $code"))
+            return obj
+        }finally{
+            runCatching{raw.close()}
+        }
+    }
+    private suspend fun secretJson(path:String,body:JSONObject):JSONObject=withContext(Dispatchers.IO){
+        directSecretRequest(path,"application/json",body.toString().toByteArray(Charsets.UTF_8))
     }
     suspend fun postGenericSecret(service:String,alias:String,type:String,values:JSONObject)=secretJson(
         "/api/native/home-edge/secrets/generic",
@@ -270,20 +331,29 @@ private class HomeApi {
         val obj=if(text.isBlank())JSONObject() else JSONObject(text);if(code>=400)throw IllegalStateException(obj.optString("error","HTTP $code"));obj
     }
     suspend fun uploadSecretFile(context:Context,uri:Uri):JSONObject=withContext(Dispatchers.IO){
-        val base=BuildConfig.HOME_EDGE_SECRET_BASE_URL.trim().trimEnd('/').takeIf{it.startsWith("https://")}
-            ?:throw IllegalStateException("Захищений канал Secrets недоступний")
-        val boundary="SkeletonSecret${System.currentTimeMillis()}"
-        val c=URL(base+"/api/native/home-edge/secrets/file").openConnection() as HttpURLConnection
-        c.connectTimeout=5000;c.readTimeout=20000;c.requestMethod="POST";c.doOutput=true;c.setRequestProperty("Accept","application/json");c.setRequestProperty("Content-Type","multipart/form-data; boundary=$boundary")
-        c.outputStream.buffered().use{out->
-            fun text(v:String){out.write(v.toByteArray(Charsets.UTF_8))}
-            text("--$boundary\r\nContent-Disposition: form-data; name=\"secret\"; filename=\"secret.json\"\r\nContent-Type: application/octet-stream\r\n\r\n")
-            context.contentResolver.openInputStream(uri)?.use{input->val buf=ByteArray(32*1024);var total=0;while(true){val n=input.read(buf);if(n<=0)break;total+=n;if(total>131072)throw IllegalStateException("Файл секрету завеликий");out.write(buf,0,n)}}?:throw IllegalStateException("Не вдалося прочитати файл")
-            text("\r\n--$boundary--\r\n")
-        }
-        val code=c.responseCode;val input=if(code>=400)c.errorStream else c.inputStream;val text=input?.bufferedReader(Charsets.UTF_8)?.use(BufferedReader::readText).orEmpty();c.disconnect()
-        val obj=if(text.isBlank())JSONObject() else JSONObject(text);if(code>=400)throw IllegalStateException(obj.optString("error","HTTP $code"));obj
+        val boundary="SkeletonSecret"+System.currentTimeMillis()
+        val payload=ByteArrayOutputStream()
+        fun text(v:String){payload.write(v.toByteArray(Charsets.UTF_8))}
+        text("--$boundary\r\nContent-Disposition: form-data; name=\"secret\"; filename=\"secret.json\"\r\nContent-Type: application/octet-stream\r\n\r\n")
+        context.contentResolver.openInputStream(uri)?.use{input->
+            val buf=ByteArray(32*1024)
+            var total=0
+            while(true){
+                val n=input.read(buf)
+                if(n<=0)break
+                total+=n
+                if(total>131072)throw IllegalStateException("Файл секрету завеликий")
+                payload.write(buf,0,n)
+            }
+        }?:throw IllegalStateException("Не вдалося прочитати файл")
+        text("\r\n--$boundary--\r\n")
+        directSecretRequest(
+            "/api/native/home-edge/secrets/file",
+            "multipart/form-data; boundary=$boundary",
+            payload.toByteArray(),
+        )
     }
+
 }
 
 private data class MediaEndpointUi(
@@ -967,7 +1037,8 @@ private fun HomeComposeApp(sharedUrl:String?, consumeShare:()->Unit) {
     activeUiLanguage=uiLanguage
     var contentLanguage by rememberSaveable { mutableStateOf("uk") }
     var languageDialog by remember { mutableStateOf("") }
-    var tab by rememberSaveable { mutableIntStateOf(0) }
+    // Always launch Home on the main tab rather than restoring Scanner.
+    var tab by remember { mutableIntStateOf(0) }
     var hyperion by remember { mutableStateOf(false) }
     var mediaEndpoints by remember { mutableStateOf(defaultMediaEndpoints()) }
     var endpointId by rememberSaveable { mutableStateOf("home_edge_tv") }
@@ -1671,7 +1742,8 @@ private fun Header(title:String, connected:Boolean, endpointId:String, endpoints
                 onRemote={act->scope.launch{runCatching{api.post(endpointPath(endpoint.endpointId,"/remote/control"),endpointMutation(endpoint.endpointId,"action" to act,"phase" to "tap"))}}},
                 onControl={ctl->scope.launch{runCatching{api.post(endpointPath(endpoint.endpointId,"/control/$ctl"),endpointMutation(endpoint.endpointId))};refresh()}},
                 onSeek={pos->scope.launch{runCatching{api.post(endpointPath(endpoint.endpointId,"/seek"),endpointMutation(endpoint.endpointId,"position" to pos))};refresh()}},
-                onMute={if(volumeReady)scope.launch{val v=if(volume==0)lastNonzero.coerceAtLeast(1) else 0;setEndpointVolume(v);runCatching{api.post(endpointPath(endpoint.endpointId,"/volume"),endpointMutation(endpoint.endpointId,"level" to v))};refresh()}}
+                onMute={if(volumeReady)scope.launch{val v=if(volume==0)lastNonzero.coerceAtLeast(1) else 0;setEndpointVolume(v);runCatching{api.post(endpointPath(endpoint.endpointId,"/volume"),endpointMutation(endpoint.endpointId,"level" to v))};refresh()}},
+                onEpisodeStepped={scope.launch{refresh()}}
             )
         }
         }
@@ -1681,12 +1753,12 @@ private fun Header(title:String, connected:Boolean, endpointId:String, endpoints
 @OptIn(ExperimentalFoundationApi::class)
 @Composable private fun PlayerTitleLine(title:String,top:Dp){Text(title,Modifier.fillMaxWidth().padding(top=top).basicMarquee(iterations=Int.MAX_VALUE),fontSize=14.sp,fontWeight=FontWeight.SemiBold,color=Text,maxLines=1,softWrap=false,textAlign=androidx.compose.ui.text.style.TextAlign.Center)}
 
-@Composable private fun PersistentHomeRemotes(api:HomeApi,active:Boolean,endpointId:String,mode:String,youtubePlayer:JSONObject,youtubeRemotePlayer:JSONObject,videoPlayer:JSONObject,tvPlayer:JSONObject,volume:Int,onVolume:(Int)->Unit,onRemote:(String)->Unit,onControl:(String)->Unit,onSeek:(Int)->Unit,onMute:()->Unit){
+@Composable private fun PersistentHomeRemotes(api:HomeApi,active:Boolean,endpointId:String,mode:String,youtubePlayer:JSONObject,youtubeRemotePlayer:JSONObject,videoPlayer:JSONObject,tvPlayer:JSONObject,volume:Int,onVolume:(Int)->Unit,onRemote:(String)->Unit,onControl:(String)->Unit,onSeek:(Int)->Unit,onMute:()->Unit,onEpisodeStepped:()->Unit){
     // Exactly three permanent remote surfaces. Games reuses the video surface; it never creates a fourth remote.
     val panel=when(mode){"kiosk"->0;"tv"->2;else->1}
     Box(Modifier.fillMaxSize()){
         PersistentTabSlot(panel==0){YoutubeRemoteCard(api,endpointId,youtubePlayer,youtubeRemotePlayer,volume,onVolume,onRemote,onSeek,onMute)}
-        PersistentTabSlot(panel==1){VideoRemoteCard(api,endpointId,videoPlayer,volume,onVolume,onControl,onSeek,onMute)}
+        PersistentTabSlot(panel==1){VideoRemoteCard(api,endpointId,videoPlayer,volume,onVolume,onControl,onSeek,onMute,onEpisodeStepped)}
         PersistentTabSlot(panel==2){TvRemoteCard(api,active,endpointId,tvPlayer,volume,onVolume,onControl,onMute)}
     }
 }
@@ -1782,7 +1854,7 @@ private fun Header(title:String, connected:Boolean, endpointId:String, endpoints
     }
 }
 
-@Composable private fun VideoRemoteCard(api:HomeApi,endpointId:String,p:JSONObject,volume:Int,onVolume:(Int)->Unit,onControl:(String)->Unit,onSeek:(Int)->Unit,onMute:()->Unit){
+@Composable private fun VideoRemoteCard(api:HomeApi,endpointId:String,p:JSONObject,volume:Int,onVolume:(Int)->Unit,onControl:(String)->Unit,onSeek:(Int)->Unit,onMute:()->Unit,onEpisodeStepped:()->Unit){
     val running=p.optBoolean("running")
     val title=if(running)p.optString("display-title",p.optString("media-title","Відео")) else "Нічого не відтворюється"
     val se=if(running&&p.has("season")&&!p.isNull("season")){val s=p.optString("season","").takeUnless{it.equals("null",true)}.orEmpty();val e=if(p.has("episode")&&!p.isNull("episode"))p.optString("episode","").filter{it.isDigit()} else "";if(s.isNotBlank())"S$s"+(if(e.isNotBlank())" · E$e" else "") else ""}else ""
@@ -1793,17 +1865,37 @@ private fun Header(title:String, connected:Boolean, endpointId:String, endpoints
     LaunchedEffect(serverPos){seek=serverPos}
     val duration=p.optDouble("duration",0.0).toFloat().coerceAtLeast(1f)
     val scope=rememberCoroutineScope()
+    val context=LocalContext.current
     var episodeStepping by remember{mutableStateOf(false)}
     val seriesNav=running&&se.isNotBlank()
     Column(Modifier.fillMaxSize().clip(RoundedCornerShape(16.dp)).background(Card)){
         BoxWithConstraints(Modifier.weight(1f).fillMaxWidth().padding(top=10.dp,start=12.dp,end=12.dp),contentAlignment=Alignment.Center){
-            val posterWidth=minOf(maxWidth,maxHeight*(2f/3f))
+            val posterWidth=minOf((maxWidth-104.dp).coerceAtLeast(0.dp),maxHeight*(2f/3f))
             val frameSide=((maxWidth-posterWidth)/2f).coerceAtLeast(0.dp)
             Box(Modifier.fillMaxHeight().width(posterWidth).clip(RoundedCornerShape(14.dp)).background(Bg).border(1.dp,Line,RoundedCornerShape(14.dp)),contentAlignment=Alignment.Center){if(bitmap!=null)Image(bitmap,null,Modifier.fillMaxSize(),contentScale=ContentScale.Crop) else Mdi("television-play",48.dp,Color(0xFFD7DCE1))}
             if(seriesNav){
-                fun step(direction:Int){if(episodeStepping)return;episodeStepping=true;scope.launch{runCatching{api.post(endpointPath(endpointId,"/video/episode/step"),endpointMutation(endpointId,"direction" to direction))};episodeStepping=false}}
-                Box(Modifier.align(Alignment.CenterStart).width(frameSide).fillMaxHeight().clickable(enabled=!episodeStepping){step(-1)},contentAlignment=Alignment.Center){Text("‹",fontSize=27.sp,lineHeight=28.sp,fontWeight=FontWeight.Medium,color=Color(0xFFF4F7FA))}
-                Box(Modifier.align(Alignment.CenterEnd).width(frameSide).fillMaxHeight().clickable(enabled=!episodeStepping){step(1)},contentAlignment=Alignment.Center){Text("›",fontSize=27.sp,lineHeight=28.sp,fontWeight=FontWeight.Medium,color=Color(0xFFF4F7FA))}
+                fun step(direction:Int){
+                    if(episodeStepping)return
+                    episodeStepping=true
+                    scope.launch{
+                        try{
+                            // The live endpoint is global. Never act on a different device.
+                            val target=api.get("/api/media/target").optString("target","")
+                            if(endpointId!="home_edge_tv"||target!="tv")
+                                throw IllegalStateException("Перехід серії доступний лише для активного Home Edge TV")
+                            val result=api.post("/api/video/episode/step",JSONObject().put("direction",direction))
+                            if(result.optString("status")!="started")
+                                throw IllegalStateException(result.optString("error","Не вдалося перемкнути серію"))
+                            onEpisodeStepped()
+                        }catch(error:Exception){
+                            android.widget.Toast.makeText(context,error.message?.take(140)?:"Сусідня серія недоступна",android.widget.Toast.LENGTH_SHORT).show()
+                        }finally{episodeStepping=false}
+                    }
+                }
+                // Center the chevron in the full screen-edge-to-poster gutter.
+                // Home column is inset by 13dp and the poster stage by 12dp.
+                Box(Modifier.align(Alignment.CenterStart).offset(x=(-12).dp).width(frameSide).fillMaxHeight().clickable(enabled=!episodeStepping){step(-1)},contentAlignment=Alignment.Center){Text("‹",fontSize=36.sp,lineHeight=39.sp,fontWeight=FontWeight.Medium,color=Color(0xFFF4F7FA))}
+                Box(Modifier.align(Alignment.CenterEnd).offset(x=12.dp).width(frameSide).fillMaxHeight().clickable(enabled=!episodeStepping){step(1)},contentAlignment=Alignment.Center){Text("›",fontSize=36.sp,lineHeight=39.sp,fontWeight=FontWeight.Medium,color=Color(0xFFF4F7FA))}
             }
         }
         Column(Modifier.fillMaxWidth().padding(horizontal=12.dp).padding(bottom=12.dp)){
@@ -2545,6 +2637,54 @@ private fun openProviderApp(context:Context,trakt:Boolean,pkg:String?,ext:JSONOb
 }
 
 private data class NativeDeviceUi(val id:String,val name:String,val role:String,val adapter:String,val online:Boolean,val location:String,val dependencies:List<String>,val controller:String,val domain:String,val connection:String,val parentId:String="",val medium:String="")
+
+private data class NativeDeviceWebLink(val label:String,val url:String)
+// URLs originate from confirmed Skeleton Device Registry services; IDs never from IPs.
+private fun nativeDeviceWebLinks(deviceId:String):List<NativeDeviceWebLink>=when(deviceId){
+    "brandenburg_proxmox"->listOf(NativeDeviceWebLink("Proxmox","https://192.168.1.179:8006/"))
+    "brandenburg_haos"->listOf(NativeDeviceWebLink("Home Assistant","http://192.168.1.17:8123/"))
+    "__service_ct101","anycubic_kobra_2022"->listOf(NativeDeviceWebLink("OctoPrint","http://192.168.1.237:5000/"))
+    "kobra_logitech_webcam"->listOf(NativeDeviceWebLink("Камера · знімок","http://192.168.1.237:8080/snapshot"))
+    "asus_router_modem"->listOf(NativeDeviceWebLink("ASUS","http://192.168.1.1/"))
+    "mikrotik_home"->listOf(NativeDeviceWebLink("MikroTik","http://192.168.1.70/"))
+    "brother_printer"->listOf(NativeDeviceWebLink("Brother Web","http://192.168.1.165/"))
+    "lavalamp"->listOf(NativeDeviceWebLink("WLED","http://192.168.1.164/"))
+    "tv_wled"->listOf(NativeDeviceWebLink("WLED","http://192.168.1.16/"))
+    "matrix_wled"->listOf(NativeDeviceWebLink("WLED","http://192.168.1.41/"))
+    "home_edge_01"->listOf(NativeDeviceWebLink("Home Edge Web","http://192.168.1.54:8100/view/phone"))
+    else->emptyList()
+}
+// Bounded reachability only, no device commands, credentials or TLS bypass.
+private suspend fun nativeWebReachable(url:String):Boolean=withContext(Dispatchers.IO){
+    runCatching{
+        val parsed=java.net.URI(url)
+        require(parsed.scheme in setOf("http","https")&&parsed.host?.startsWith("192.168.1.")==true)
+        val port=if(parsed.port>0)parsed.port else if(parsed.scheme=="https")443 else 80
+        java.net.Socket().use{socket->socket.connect(java.net.InetSocketAddress(parsed.host,port),1400)}
+        true
+    }.getOrDefault(false)
+}
+private fun nativeDeviceTopology(items:List<NativeDeviceUi>):List<NativeDeviceUi>{
+    val unique=items.filter{it.id.isNotBlank()}.distinctBy{it.id}
+    val hasProxmox=unique.any{it.id=="brandenburg_proxmox"}
+    val hasCtClients=unique.any{it.id in setOf("anycubic_kobra_2022","kobra_logitech_webcam")}
+    val ctId="__service_ct101"
+    val translated=unique.map{d->
+        when(d.id){
+            "home_edge_01"->d.copy(parentId="",connection="Окремий медіавузол LAN · HDMI 1 → Sharp TV")
+            "brandenburg_haos"->d.copy(parentId=if(hasProxmox)"brandenburg_proxmox" else "",medium="virtual_machine",connection="VM100 · Home Assistant OS (Proxmox)")
+            "anycubic_kobra_2022"->d.copy(parentId=if(hasProxmox)ctId else "",medium="usb",connection="USB до CT101 · OctoPrint окремо від підключення USB")
+            "kobra_logitech_webcam"->d.copy(parentId=if(hasProxmox)ctId else "",medium="usb",connection="USB до CT101 · стан відеопотоку перевіряється окремо")
+            "home_edge_gyromouse_remote","cherry_usb_keyboard","sharkoon_wireless_mouse","gamesir_nova_lite"->d.copy(parentId=if(unique.any{it.id=="home_edge_01"})"home_edge_01" else "")
+            "sharp_tv_living_room"->d.copy(parentId="",connection="HDMI 1 ← Home Edge · окремий телевізор")
+            else->d
+        }
+    }
+    if(!hasProxmox||!hasCtClients)return translated
+    val ct=NativeDeviceUi(ctId,"CT101 · OctoPrint","virtualization_service","network",false,"",emptyList(),"","Мережа","LXC-контейнер · сервер друку та камери","brandenburg_proxmox","container")
+    return translated+ct
+}
+
 private val deviceDomainOrder=listOf("Житло","Мережа","Керування","Документи","Київ / поза домом")
 private fun nativeDeviceDomain(id:String,role:String,location:String):String{
     if(id=="hetzner_runner"||location=="hetzner_cloud")return "Віддалені сервери"
@@ -2593,14 +2733,15 @@ private fun nativeDeviceConnection(id:String,role:String,adapter:String,location
 private fun nativeDeviceIcon(role:String)=when(role){
     "television_display"->"television"
     "physical_gamepad"->"gamepad-variant"
+    "virtualization_service"->"server"
     "air_mouse_remote","maintenance_keyboard","maintenance_mouse","android_phone","ios_phone","tablet_kiosk"->"devices"
     "tv_backlight","decorative_planter_light","lava_lamp"->"lightbulb-outline"
     "gateway_router_modem","secondary_router","media_pc","virtualization_host"->"cast-connected"
     else->"devices"
 }
-@Composable private fun DeviceDomainCard(title:String,items:List<NativeDeviceUi>,onSharp:()->Unit,onMfp:()->Unit,onHomeEdge:()->Unit){
+@Composable private fun DeviceDomainCard(title:String,items:List<NativeDeviceUi>,webState:Map<String,Boolean>,onOpenWeb:(String)->Unit,onSharp:()->Unit,onMfp:()->Unit,onHomeEdge:()->Unit){
     Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(Card)){
-        Row(Modifier.fillMaxWidth().padding(horizontal=15.dp,vertical=12.dp),verticalAlignment=Alignment.CenterVertically){Text(title,fontSize=15.sp,fontWeight=FontWeight.Bold,color=Text,modifier=Modifier.weight(1f));Text(ui("${items.count{it.online}}/${items.size} на зв’язку"),fontSize=10.sp,color=Muted)}
+        Row(Modifier.fillMaxWidth().padding(horizontal=15.dp,vertical=12.dp),verticalAlignment=Alignment.CenterVertically){Text(title,fontSize=15.sp,fontWeight=FontWeight.Bold,color=Text,modifier=Modifier.weight(1f));Text(ui("${items.count{it.online&&!it.id.startsWith("__")}}/${items.count{!it.id.startsWith("__")}} на зв’язку"),fontSize=10.sp,color=Muted)}
         val byId=items.associateBy{it.id}
         val children=items.groupBy{it.parentId}
         val visited=mutableSetOf<String>()
@@ -2610,11 +2751,21 @@ private fun nativeDeviceIcon(role:String)=when(role){
             ordered.add(d to depth)
             children[d.id].orEmpty().sortedBy{it.name}.forEach{visit(it,(depth+1).coerceAtMost(5))}
         }
-        items.filter{it.parentId !in byId}.sortedWith(compareBy<NativeDeviceUi>{it.role!="gateway_router_modem"}.thenBy{it.name}).forEach{visit(it,0)}
+        items.filter{it.parentId !in byId}.sortedWith(compareBy<NativeDeviceUi>{it.role!="gateway_router_modem"}.thenBy{it.id!="brandenburg_proxmox"}.thenBy{it.name}).forEach{visit(it,0)}
         items.filter{it.id !in visited}.sortedBy{it.name}.forEach{visit(it,0)}
         ordered.forEachIndexed{index,pair->
             val d=pair.first
             val depth=pair.second
+            val webLinks=nativeDeviceWebLinks(d.id).filter{webState[it.url]==true}
+            val octoprintState=webState["http://192.168.1.237:5000/"]
+            val cameraState=webState["http://192.168.1.237:8080/snapshot"]
+            val effectiveOnline=if(d.id=="__service_ct101")octoprintState==true else d.online
+            val serviceDescription=when(d.id){
+                "__service_ct101"->when(octoprintState){true->"OctoPrint: доступний";false->"OctoPrint: недоступний";else->"OctoPrint: перевіряється"}
+                "anycubic_kobra_2022"->"USB: ${if(d.online)"підключено" else "не підтверджено"} · OctoPrint: ${when(octoprintState){true->"доступний";false->"недоступний";else->"перевіряється"}}"
+                "kobra_logitech_webcam"->"USB: ${if(d.online)"підключено" else "не підтверджено"} · Відеопотік: ${when(cameraState){true->"порт доступний";false->"недоступний";else->"перевіряється"}}"
+                else->""
+            }
             if(index>0)Box(Modifier.fillMaxWidth().height(1.dp).background(Line))
             Row(Modifier.fillMaxWidth().heightIn(min=76.dp).clickable(enabled=d.id=="sharp_tv_living_room"||d.id=="brother_printer"||d.id=="home_edge_01"){when(d.id){"sharp_tv_living_room"->onSharp();"brother_printer"->onMfp();"home_edge_01"->onHomeEdge()}}.padding(horizontal=14.dp,vertical=10.dp),verticalAlignment=Alignment.CenterVertically){
                 val linkColor=when(d.medium){"ethernet"->Color(0xFF41A9EA);"wifi"->Color(0xFF4AC67F);"usb"->Color(0xFFF5A746);"bluetooth"->Color(0xFFAB85F5);"hdmi"->Color(0xFFE97092);"virtual_machine"->Color(0xFF859EB2);"tailscale"->Color(0xFF42C6CF);else->Color(0xFF4E5863)}
@@ -2630,8 +2781,13 @@ private fun nativeDeviceIcon(role:String)=when(role){
                     }else drawCircle(Color(0xFF4E5863),radius=3.dp.toPx(),center=Offset(x,mid))
                 }
                 Box(Modifier.size(42.dp).clip(RoundedCornerShape(12.dp)).background(Action),contentAlignment=Alignment.Center){Mdi(nativeDeviceIcon(d.role),23.dp,if(d.online)Text else Muted)}
-                Column(Modifier.weight(1f).padding(start=12.dp)){Text(d.name,fontSize=17.sp,lineHeight=22.sp,fontWeight=FontWeight.SemiBold,color=Text,maxLines=2,overflow=TextOverflow.Ellipsis);Text((if(d.medium.isNotBlank())when(d.medium){"usb"->"USB";"ethernet"->"LAN";"wifi"->"Wi-Fi";"virtual_machine"->"VM";"bluetooth"->"Bluetooth";"hdmi"->"HDMI";else->d.medium}+" · " else "")+d.connection,fontSize=10.sp,lineHeight=14.sp,color=Muted,maxLines=3,overflow=TextOverflow.Ellipsis,modifier=Modifier.padding(top=4.dp))}
-                Column(horizontalAlignment=Alignment.End){Box(Modifier.size(8.dp).clip(CircleShape).background(if(d.online)Green else Muted));Text(if(d.online)"На зв’язку" else "Не на зв’язку",fontSize=9.sp,color=if(d.online)Green else Muted,modifier=Modifier.padding(top=4.dp));if(d.id=="sharp_tv_living_room"||d.id=="brother_printer"||d.id=="home_edge_01")Mdi("chevron-right",18.dp,Muted,Modifier.padding(top=5.dp))}
+                Column(Modifier.weight(1f).padding(start=12.dp)){
+                    Text(d.name,fontSize=15.sp,lineHeight=19.sp,fontWeight=FontWeight.SemiBold,color=Text,maxLines=2,overflow=TextOverflow.Ellipsis)
+                    Text((if(d.medium.isNotBlank())when(d.medium){"usb"->"USB";"ethernet"->"LAN";"wifi"->"Wi-Fi";"virtual_machine"->"VM";"container"->"CT";"bluetooth"->"Bluetooth";"hdmi"->"HDMI";else->d.medium}+" · " else "")+d.connection,fontSize=10.sp,lineHeight=14.sp,color=Muted,maxLines=3,overflow=TextOverflow.Ellipsis,modifier=Modifier.padding(top=4.dp))
+                    if(serviceDescription.isNotBlank())Text(serviceDescription,fontSize=10.sp,color=if((d.id=="__service_ct101"&&octoprintState==true)||(d.id=="kobra_logitech_webcam"&&cameraState==true))Green else Muted,modifier=Modifier.padding(top=3.dp))
+                    webLinks.forEach{link->Text("Відкрити ${link.label} ↗",fontSize=12.sp,fontWeight=FontWeight.Medium,color=Accent,modifier=Modifier.clickable{onOpenWeb(link.url)}.padding(top=7.dp,bottom=3.dp))}
+                }
+                Column(horizontalAlignment=Alignment.End){Box(Modifier.size(8.dp).clip(CircleShape).background(if(effectiveOnline)Green else Muted));Text(if(effectiveOnline)"На зв’язку" else "Не на зв’язку",fontSize=9.sp,color=if(effectiveOnline)Green else Muted,modifier=Modifier.padding(top=4.dp));if(d.id=="sharp_tv_living_room"||d.id=="brother_printer"||d.id=="home_edge_01")Mdi("chevron-right",18.dp,Muted,Modifier.padding(top=5.dp))}
             }
         }
     }
@@ -3287,16 +3443,38 @@ private fun orderNativeDevices(items:List<NativeDeviceUi>,prefs:android.content.
 }
 
 @Composable private fun DevicesScreen(api:HomeApi,active:Boolean,endpointId:String,endpoints:List<MediaEndpointUi>,onEndpoint:(String)->Unit,onMenu:()->Unit){
-    var sharpRemoteOpen by rememberSaveable{mutableStateOf(false)}; var mfpOpen by rememberSaveable{mutableStateOf(false)}; var homeEdgeOpen by rememberSaveable{mutableStateOf(false)}; var devices by remember{mutableStateOf(emptyList<NativeDeviceUi>())}; var loaded by remember{mutableStateOf(false)}
+    var sharpRemoteOpen by rememberSaveable{mutableStateOf(false)}; var mfpOpen by rememberSaveable{mutableStateOf(false)}; var homeEdgeOpen by rememberSaveable{mutableStateOf(false)}; var devices by remember{mutableStateOf(emptyList<NativeDeviceUi>())}; var webState by remember{mutableStateOf(emptyMap<String,Boolean>())}; var loaded by remember{mutableStateOf(false)}
     val context=LocalContext.current; val devicePrefs=remember(context){context.getSharedPreferences("home_ui",Context.MODE_PRIVATE)}
     LaunchedEffect(Unit){if(deviceOrderIds(devicePrefs).isEmpty())devicePrefs.edit().putString(DEVICE_ORDER_PREF,"brother_printer").apply()}
     LaunchedEffect(api.server,active){if(api.server!=null){suspend fun pull():Boolean{var ok=false;runCatching{api.get("/api/native/devices")}.onSuccess{j->devices=j.optJSONArray("items")?.objects().orEmpty().map{d->val id=d.cleanText("device_id");val role=d.cleanText("role");val adapter=d.cleanText("adapter");val location=d.cleanText("location");val deps=d.optJSONArray("dependency_names")?.strings().orEmpty();val controller=d.cleanText("controller_name",d.cleanText("controller"));NativeDeviceUi(id,d.cleanText("name",id),role,adapter,d.optBoolean("online"),location,deps,controller,nativeDeviceDomain(id,role,location),nativeDeviceConnection(id,role,adapter,location,deps,controller),d.cleanText("physical_parent_id"),d.cleanText("physical_medium"))};loaded=true;ok=true};return ok};while(!loaded){if(pull())break;delay(1500)};if(active)while(true){delay(15000);pull()}}}
+    LaunchedEffect(api.server,active,devices){
+        if(api.server!=null&&active&&devices.isNotEmpty()){
+            val urls=nativeDeviceTopology(devices).flatMap{nativeDeviceWebLinks(it.id)}.map{it.url}.distinct()
+            while(true){
+                val fresh=mutableMapOf<String,Boolean>()
+                for(url in urls)fresh[url]=nativeWebReachable(url)
+                webState=fresh
+                delay(45000)
+            }
+        }
+    }
+    fun openDeviceWebPage(url:String){
+        if(webState[url]!=true)return
+        runCatching{
+            val u=Uri.parse(url)
+            require(u.scheme in listOf("http","https")&&u.host?.startsWith("192.168.1.")==true)
+            context.startActivity(Intent(Intent.ACTION_VIEW,u).addCategory(Intent.CATEGORY_BROWSABLE))
+        }.onFailure{Toast.makeText(context,"Не вдалося відкрити вебпанель",Toast.LENGTH_SHORT).show()}
+    }
     if(homeEdgeOpen){HomeEdgeScreen(api,endpointId,endpoints,onEndpoint,onMenu){homeEdgeOpen=false};return}
     Column(Modifier.fillMaxSize().background(Bg)){
         LazyColumn(Modifier.weight(1f).padding(horizontal=13.dp),contentPadding=PaddingValues(top=6.dp,bottom=18.dp),verticalArrangement=Arrangement.spacedBy(10.dp)){
             if(!loaded)item{SimpleSection("Домашня схема","Читаю актуальний список пристроїв…")}
-            val ordered=orderNativeDevices(devices,devicePrefs)
-            if(ordered.isNotEmpty())item(key="physical_topology"){DeviceDomainCard("Пристрої та підтверджені з’єднання",ordered,{sharpRemoteOpen=true},{mfpOpen=true},{homeEdgeOpen=true})}
+            val ordered=nativeDeviceTopology(orderNativeDevices(devices,devicePrefs))
+            if(ordered.isNotEmpty()){
+                item{Text("Proxmox → VM100 / CT101 → USB · Home Edge окремо. Вебпосилання з’являються лише після перевірки порту.",fontSize=11.sp,lineHeight=16.sp,color=Muted,modifier=Modifier.padding(horizontal=3.dp,vertical=4.dp))}
+                item(key="physical_topology"){DeviceDomainCard("Пристрої та підтверджені з’єднання",ordered,webState,::openDeviceWebPage,{sharpRemoteOpen=true},{mfpOpen=true},{homeEdgeOpen=true})}
+            }
         }
         if(mfpOpen&&api.server!=null)MfpDialog(api){mfpOpen=false}
         if(sharpRemoteOpen&&api.server!=null)SharpRemoteDialog("${api.server}/ir/sharp"){sharpRemoteOpen=false}
