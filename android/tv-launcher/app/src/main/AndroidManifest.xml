@@ -11,15 +11,19 @@
       android:label="Skeleton TV" android:icon="@drawable/tv_icon"
       android:banner="@drawable/tv_banner" android:usesCleartextTraffic="true"
       android:allowBackup="false">
-    <activity android:name=".MainActivity" android:exported="true" android:screenOrientation="landscape">
+    <activity android:name=".MainActivity" android:exported="false" android:screenOrientation="landscape"/>
+    <activity android:name=".VideoEntry" android:exported="true" android:screenOrientation="landscape"
+        android:label="Відео" android:icon="@drawable/tv_video_icon" android:banner="@drawable/tv_video_banner">
       <intent-filter>
         <action android:name="android.intent.action.MAIN"/>
         <category android:name="android.intent.category.LEANBACK_LAUNCHER"/>
       </intent-filter>
+    </activity>
+    <activity android:name=".TvEntry" android:exported="true" android:screenOrientation="landscape"
+        android:label="ТВ" android:icon="@drawable/tv_live_icon" android:banner="@drawable/tv_live_banner">
       <intent-filter>
         <action android:name="android.intent.action.MAIN"/>
-        <category android:name="android.intent.category.HOME"/>
-        <category android:name="android.intent.category.DEFAULT"/>
+        <category android:name="android.intent.category.LEANBACK_LAUNCHER"/>
       </intent-filter>
     </activity>
   </application>
