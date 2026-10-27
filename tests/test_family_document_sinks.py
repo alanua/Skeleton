@@ -100,3 +100,25 @@ def test_verified_archive_rejects_source_changed_before_mutation(tmp_path) -> No
 
     with pytest.raises(Exception):
         _stack.get(namespace="family_document", fact_id="doc-synthetic")
+
+
+def test_memorygateway_readback_requires_same_canonical_value_hash(tmp_path) -> None:
+    source = tmp_path / "scan.txt"
+    source.write_text("synthetic canonical document", encoding="utf-8")
+    source_hash = hashlib.sha256(source.read_bytes()).hexdigest()
+    _stack, gateway = _private_gateway(tmp_path)
+    original_execute = gateway.execute
+
+    def corrupt_readback(request):
+        response = original_execute(request)
+        if request["command"] == "skeleton.memory.private_read_exact":
+            payload = dict(response["payload"])
+            payload["value_hash"] = "0" * 64
+            return {**response, "payload": payload}
+        return response
+
+    gateway.execute = corrupt_readback
+    sink = VerifiedMemoryGatewayFamilyDocumentArchive(tmp_path / "originals", gateway)
+
+    with pytest.raises(FamilyDocumentArchiveError, match="value hash mismatch"):
+        sink.archive(record(source_sha256=source_hash), source_path=source)
