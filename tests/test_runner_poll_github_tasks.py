@@ -30231,13 +30231,19 @@ def _synthetic_ff_publish(tmp_path, monkeypatch, suffix="mjs", test_dir="tests")
         path.write_text('old = 1\n')
     (source / 'tools/inherited.sh').chmod(0o755)
     _run_git(source, 'add', '.')
+    _run_git(source, 'commit', '-m', 'synthetic old PR base 9df2')
+    pr_base = runner.run_command(['git', 'rev-parse', 'HEAD'], cwd=source)[1].strip()
+    for name in prior_names:
+        (source / name).write_text('old PR change\n')
+    _run_git(source, 'add', '.')
     _run_git(source, 'commit', '-m', 'old PR')
     old = runner.run_command(['git', 'rev-parse', 'HEAD'], cwd=source)[1].strip()
+    _run_git(source, 'checkout', '--detach', pr_base)
     for name in prior_names:
         (source / name).write_text('main version\n')
     (source / 'later.txt').write_text('later main\n')
     _run_git(source, 'add', '.')
-    _run_git(source, 'commit', '-m', 'later main')
+    _run_git(source, 'commit', '-m', 'synthetic recovery main cf27')
     base = runner.run_command(['git', 'rev-parse', 'HEAD'], cwd=source)[1].strip()
     original = tmp_path / runner._source_issue_slug(13, 'alanua/Lavalamp')
     original.mkdir()
@@ -30268,7 +30274,7 @@ def _synthetic_ff_publish(tmp_path, monkeypatch, suffix="mjs", test_dir="tests")
     monkeypatch.setattr(runner, '_declared_existing_pr_expected_head_sha', lambda b: old)
     monkeypatch.setattr(runner, '_declared_existing_pr_expected_head_branch', lambda b: branch)
     monkeypatch.setattr(runner, '_git_name_lines', lambda cmd, path: (0, [] if '--cached' in cmd else names[:2], ''))
-    state = dict(number=14, state='OPEN', isDraft=True, baseRefName='main', baseRefOid=base,
+    state = dict(number=14, state='OPEN', isDraft=True, baseRefName='main', baseRefOid=pr_base,
                  headRefName=branch, headRefOid=old, headRepository={'nameWithOwner': 'alanua/Lavalamp'},
                  headRepositoryOwner={'login': 'alanua'}, url='https://github.com/alanua/Lavalamp/pull/14',
                  files=[{'path': name} for name in prior_names])
@@ -30300,7 +30306,7 @@ def _synthetic_ff_publish(tmp_path, monkeypatch, suffix="mjs", test_dir="tests")
         result = dict(state)
         if pushed:
             result['headRefOid'] = pushed[-1]
-            _, coverage = runner._git_changed_files_between(base, pushed[-1], source)
+            _, coverage = runner._git_changed_files_between(pr_base, pushed[-1], source)
             result['files'] = [{'path': n} for n in coverage]
         return result
     monkeypatch.setattr(runner, 'run_command', command)
@@ -30615,3 +30621,100 @@ def test_publish_recovery_ff_post_push_drift_no_retry(tmp_path, monkeypatch, fau
     assert not sleeps
     duplicate_push_count = sum(cmd[:2] == ['git', 'push'] for cmd in calls)
     assert duplicate_push_count == len(pushed) == 1
+
+
+@pytest.mark.parametrize("fault", [None, "head", "base", "errors", "null", "large",
+                                  "refresh", "auth", "graphql_failure", "owner",
+                                  "repository", "repository_null", "repository_name_type",
+                                  "owner_type", "graphql_repository"])
+def test_registered_target_gh245_graphql_base_ref_oid(tmp_path, monkeypatch, fault):
+    request = runner.IssueWorktreeExistingPrPublishRequest(
+        "synthetic/Example", 13, "runner/test", 14, "a" * 40,
+        "runner/test", frozenset({"tests/example.test.mjs"}))
+    identity = dict(number=14, state="OPEN", isDraft=True, baseRefName="main",
+                    headRefName="runner/test", headRefOid="a" * 40,
+                    headRepository={"name": "Example", "id": "synthetic-repo-id"},
+                    headRepositoryOwner={"id": "synthetic-id", "login": "synthetic"},
+                    url="https://github.com/synthetic/Example/pull/14",
+                    files=[{"path": "tests/example.test.mjs"}])
+    graphql = {k: v for k, v in identity.items() if k != "files"}
+    graphql["headRepositoryOwner"] = {"login": "other" if fault == "owner" else "synthetic"}
+    graphql["headRepository"] = {"nameWithOwner": "synthetic/Example"}
+    if fault == "repository":
+        identity["headRepository"]["name"] = "Other"
+    if fault == "repository_null":
+        identity["headRepository"] = None
+    if fault == "repository_name_type":
+        identity["headRepository"]["name"] = 42
+    if fault == "owner_type":
+        identity["headRepositoryOwner"]["login"] = 42
+    if fault == "graphql_repository":
+        graphql["headRepository"] = {"nameWithOwner": "synthetic/Other"}
+    graphql["baseRefOid"] = "9df2" + "b" * 36
+    if fault == "head":
+        graphql["headRefOid"] = "f" * 40
+    if fault == "base":
+        graphql["baseRefOid"] = "invalid"
+    envelope = {"data": {"repository": {"pullRequest": graphql}}}
+    if fault == "errors":
+        envelope["errors"] = [{"message": "synthetic failure"}]
+    if fault == "null":
+        envelope["data"] = None
+    calls = []
+    def command(cmd, cwd=None, **kwargs):
+        calls.append(cmd)
+        assert cwd == tmp_path
+        assert kwargs == ({} if len(calls) == 1 else {"timeout": 30})
+        if len(calls) == 1:
+            assert "baseRefOid" in cmd[-1]
+            return 1, ('authentication failed' if fault == "auth" else
+                       'Unknown JSON field: "baseRefOid"')
+        if cmd[:3] == ["gh", "api", "graphql"]:
+            assert "-F" in cmd and "number=14" in cmd
+            assert not any("paginate" in arg for arg in cmd)
+            if fault == "graphql_failure":
+                return 1, "synthetic failure"
+            return 0, ("x" * 65_537 if fault == "large" else json.dumps(envelope))
+        assert "baseRefOid" not in cmd[-1]
+        result = dict(identity)
+        if fault == "refresh" and len(calls) == 4:
+            result["headRefOid"] = "f" * 40
+        return 0, json.dumps(result)
+    monkeypatch.setattr(runner, "run_command", command)
+    if fault:
+        with pytest.raises(RuntimeError):
+            runner._registered_worktree_overlay_pr_state(request, tmp_path)
+    else:
+        assert runner._registered_worktree_overlay_pr_state(request, tmp_path) == {
+            **identity, "baseRefOid": graphql["baseRefOid"]}
+        assert len(calls) == 4
+    assert len(calls) <= 4
+
+
+def test_publish_recovery_ff_old_pr_base_9df2_recovery_cf27_split(tmp_path, monkeypatch):
+    source, _, _, old, recovery, state, calls, pushed, body = _synthetic_ff_publish(tmp_path, monkeypatch)
+    pr_base = state["baseRefOid"]
+    assert pr_base != recovery
+    assert runner.run_command(["git", "merge-base", "--all", old, recovery], cwd=source)[1].strip() == pr_base
+    report = runner.publish_registered_target_fast_forward(body)
+    assert "publication=verified" in report
+    assert f"existing_pr_base_sha={pr_base}" in report
+    assert f"verified_base_sha={recovery}" in report
+    assert len(pushed) == 1
+    assert runner.run_command(["git", "rev-list", "--parents", "-n", "1", pushed[0]], cwd=source)[1].split() == [pushed[0], old]
+    assert all(not arg.startswith("--force") and not arg.startswith("+")
+               for cmd in calls if cmd[:2] == ["git", "push"] for arg in cmd)
+
+
+@pytest.mark.parametrize("failure", ["error", "ambiguous", "empty"])
+def test_publish_recovery_ff_merge_base_fail_closed(tmp_path, monkeypatch, failure):
+    _, _, _, _, _, state, calls, pushed, body = _synthetic_ff_publish(tmp_path, monkeypatch)
+    actual = runner.run_command
+    def command(cmd, **kwargs):
+        if cmd[:3] == ["git", "merge-base", "--all"]:
+            return (1, "") if failure == "error" else (0, "" if failure == "empty" else state["baseRefOid"] + "\n" + "f" * 40)
+        return actual(cmd, **kwargs)
+    monkeypatch.setattr(runner, "run_command", command)
+    assert "existing_pr_merge_base_mismatch" in runner.publish_registered_target_fast_forward(body)
+    assert not pushed
+    assert not any(cmd[:2] == ["git", "push"] for cmd in calls)
