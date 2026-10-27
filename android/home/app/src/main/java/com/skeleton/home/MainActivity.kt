@@ -111,6 +111,11 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.net.ServerSocket
 import java.net.InetAddress
+import java.net.InetSocketAddress
+import java.net.Socket
+import java.io.ByteArrayOutputStream
+import javax.net.ssl.SSLSocket
+import javax.net.ssl.SSLSocketFactory
 import java.time.LocalDate
 import java.util.Locale
 import kotlin.math.min
@@ -145,15 +150,28 @@ private val SkeletonTypography = Typography(
 
 class MainActivity : ComponentActivity() {
     private val sharedUrl = mutableStateOf<String?>(null)
+    // A warm launcher return reuses the same Compose tree. Count foreground entries
+    // separately from saved UI state; the family tab is reset only on re-entry.
+    private val foregroundRevision = mutableIntStateOf(0)
     private var pendingInstallUri: Uri? = null
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.statusBarColor = android.graphics.Color.BLACK
         window.navigationBarColor = android.graphics.Color.rgb(10,13,16)
         captureShare(intent)
-        setContent { MaterialTheme(colorScheme = SkeletonScheme, typography = SkeletonTypography) { HomeComposeApp(sharedUrl.value) { sharedUrl.value = null } } }
+        setContent { MaterialTheme(colorScheme = SkeletonScheme, typography = SkeletonTypography) { HomeComposeApp(sharedUrl.value,foregroundRevision.intValue) { sharedUrl.value = null } } }
     }
-    override fun onNewIntent(intent: Intent) { super.onNewIntent(intent); setIntent(intent); captureShare(intent) }
+    override fun onStart() {
+        super.onStart()
+        foregroundRevision.intValue++
+    }
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        captureShare(intent)
+        // Explicit launcher re-entry can arrive without onStart on an existing task.
+        if(intent.action==Intent.ACTION_MAIN && intent.hasCategory(Intent.CATEGORY_LAUNCHER)) foregroundRevision.intValue++
+    }
     override fun onResume() {
         super.onResume()
         if(Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && packageManager.canRequestPackageInstalls()) {
@@ -238,18 +256,74 @@ private class HomeApi {
     suspend fun patch(path: String, body: JSONObject = JSONObject()) = json("PATCH", path, body)
     suspend fun put(path: String, body: JSONObject = JSONObject()) = json("PUT", path, body)
     suspend fun delete(path: String) = json("DELETE", path)
-    private suspend fun secretJson(path:String,body:JSONObject):JSONObject=withContext(Dispatchers.IO){
+    private fun directSecretRequest(path:String,contentType:String,payload:ByteArray):JSONObject{
         val base=BuildConfig.HOME_EDGE_SECRET_BASE_URL.trim().trimEnd('/')
         if(!base.startsWith("https://"))throw IllegalStateException("Захищений канал Secrets недоступний")
-        val c=URL(base+path).openConnection() as HttpURLConnection
-        c.connectTimeout=5000;c.readTimeout=95000;c.requestMethod="POST";c.doOutput=true
-        c.setRequestProperty("Accept","application/json");c.setRequestProperty("Content-Type","application/json")
-        c.outputStream.use{it.write(body.toString().toByteArray(Charsets.UTF_8))}
-        val code=c.responseCode;val input=if(code>=400)c.errorStream else c.inputStream
-        val text=input?.bufferedReader(Charsets.UTF_8)?.use(BufferedReader::readText).orEmpty();c.disconnect()
-        val obj=if(text.isBlank())JSONObject() else JSONObject(text)
-        if(code>=400)throw IllegalStateException(obj.optString("error","HTTP $code"))
-        obj
+        val endpoint=URL(base)
+        val tlsHost=endpoint.host.takeIf{it.isNotBlank()}?:throw IllegalStateException("Некоректний Secrets host")
+        val fixedIp=BuildConfig.HOME_EDGE_SECRET_TAILSCALE_IP.trim()
+        if(fixedIp.isBlank())throw IllegalStateException("Secrets Tailscale IP не налаштований")
+        val raw=Socket()
+        try{
+            raw.connect(InetSocketAddress(fixedIp,443),5000)
+            raw.soTimeout=95000
+            val factory=SSLSocketFactory.getDefault() as SSLSocketFactory
+            val ssl=factory.createSocket(raw,tlsHost,443,true) as SSLSocket
+            val params=ssl.sslParameters
+            params.endpointIdentificationAlgorithm="HTTPS"
+            if(android.os.Build.VERSION.SDK_INT>=29)params.applicationProtocols=arrayOf("http/1.1")
+            ssl.sslParameters=params
+            ssl.soTimeout=95000
+            ssl.startHandshake()
+            val header=buildString{
+                append("POST ").append(path).append(" HTTP/1.1\r\n")
+                append("Host: ").append(tlsHost).append("\r\n")
+                append("Accept: application/json\r\n")
+                append("Accept-Encoding: identity\r\n")
+                append("Content-Type: ").append(contentType).append("\r\n")
+                append("Content-Length: ").append(payload.size).append("\r\n")
+                append("Connection: close\r\n\r\n")
+            }.toByteArray(Charsets.UTF_8)
+            ssl.outputStream.write(header)
+            ssl.outputStream.write(payload)
+            ssl.outputStream.flush()
+            val buffer=ByteArray(8192)
+            val response=ByteArrayOutputStream()
+            while(true){
+                val n=ssl.inputStream.read(buffer)
+                if(n<0)break
+                response.write(buffer,0,n)
+                if(response.size()>1024*1024)throw IllegalStateException("Secrets response завелика")
+            }
+            ssl.close()
+            val bytes=response.toByteArray()
+            var split=-1
+            if(bytes.size>=4){
+                for(i in 0..bytes.size-4){
+                    if(bytes[i]==13.toByte()&&bytes[i+1]==10.toByte()&&bytes[i+2]==13.toByte()&&bytes[i+3]==10.toByte()){
+                        split=i
+                        break
+                    }
+                }
+            }
+            if(split<0)throw IllegalStateException("Некоректна HTTPS-відповідь Secrets")
+            val headers=String(bytes,0,split,Charsets.ISO_8859_1)
+            val statusLine=headers.lineSequence().firstOrNull().orEmpty()
+            val code=statusLine.split(' ').getOrNull(1)?.toIntOrNull()
+                ?:throw IllegalStateException("Некоректний HTTP status Secrets")
+            if(headers.lineSequence().any{it.startsWith("Transfer-Encoding:",true)&&it.contains("chunked",true)})
+                throw IllegalStateException("Непідтримувана chunked-відповідь Secrets")
+            val bodyBytes=bytes.copyOfRange(split+4,bytes.size)
+            val text=bodyBytes.toString(Charsets.UTF_8)
+            val obj=if(text.isBlank())JSONObject() else JSONObject(text)
+            if(code>=400)throw IllegalStateException(obj.optString("error","HTTP $code"))
+            return obj
+        }finally{
+            runCatching{raw.close()}
+        }
+    }
+    private suspend fun secretJson(path:String,body:JSONObject):JSONObject=withContext(Dispatchers.IO){
+        directSecretRequest(path,"application/json",body.toString().toByteArray(Charsets.UTF_8))
     }
     suspend fun postGenericSecret(service:String,alias:String,type:String,values:JSONObject)=secretJson(
         "/api/native/home-edge/secrets/generic",
@@ -270,20 +344,29 @@ private class HomeApi {
         val obj=if(text.isBlank())JSONObject() else JSONObject(text);if(code>=400)throw IllegalStateException(obj.optString("error","HTTP $code"));obj
     }
     suspend fun uploadSecretFile(context:Context,uri:Uri):JSONObject=withContext(Dispatchers.IO){
-        val base=BuildConfig.HOME_EDGE_SECRET_BASE_URL.trim().trimEnd('/').takeIf{it.startsWith("https://")}
-            ?:throw IllegalStateException("Захищений канал Secrets недоступний")
-        val boundary="SkeletonSecret${System.currentTimeMillis()}"
-        val c=URL(base+"/api/native/home-edge/secrets/file").openConnection() as HttpURLConnection
-        c.connectTimeout=5000;c.readTimeout=20000;c.requestMethod="POST";c.doOutput=true;c.setRequestProperty("Accept","application/json");c.setRequestProperty("Content-Type","multipart/form-data; boundary=$boundary")
-        c.outputStream.buffered().use{out->
-            fun text(v:String){out.write(v.toByteArray(Charsets.UTF_8))}
-            text("--$boundary\r\nContent-Disposition: form-data; name=\"secret\"; filename=\"secret.json\"\r\nContent-Type: application/octet-stream\r\n\r\n")
-            context.contentResolver.openInputStream(uri)?.use{input->val buf=ByteArray(32*1024);var total=0;while(true){val n=input.read(buf);if(n<=0)break;total+=n;if(total>131072)throw IllegalStateException("Файл секрету завеликий");out.write(buf,0,n)}}?:throw IllegalStateException("Не вдалося прочитати файл")
-            text("\r\n--$boundary--\r\n")
-        }
-        val code=c.responseCode;val input=if(code>=400)c.errorStream else c.inputStream;val text=input?.bufferedReader(Charsets.UTF_8)?.use(BufferedReader::readText).orEmpty();c.disconnect()
-        val obj=if(text.isBlank())JSONObject() else JSONObject(text);if(code>=400)throw IllegalStateException(obj.optString("error","HTTP $code"));obj
+        val boundary="SkeletonSecret"+System.currentTimeMillis()
+        val payload=ByteArrayOutputStream()
+        fun text(v:String){payload.write(v.toByteArray(Charsets.UTF_8))}
+        text("--$boundary\r\nContent-Disposition: form-data; name=\"secret\"; filename=\"secret.json\"\r\nContent-Type: application/octet-stream\r\n\r\n")
+        context.contentResolver.openInputStream(uri)?.use{input->
+            val buf=ByteArray(32*1024)
+            var total=0
+            while(true){
+                val n=input.read(buf)
+                if(n<=0)break
+                total+=n
+                if(total>131072)throw IllegalStateException("Файл секрету завеликий")
+                payload.write(buf,0,n)
+            }
+        }?:throw IllegalStateException("Не вдалося прочитати файл")
+        text("\r\n--$boundary--\r\n")
+        directSecretRequest(
+            "/api/native/home-edge/secrets/file",
+            "multipart/form-data; boundary=$boundary",
+            payload.toByteArray(),
+        )
     }
+
 }
 
 private data class MediaEndpointUi(
@@ -337,6 +420,10 @@ internal fun canonicalVideoHistoryDeletePath(item:JSONObject):String="/api/video
 // One saved work must have one stable card identity; legacy history_id is only a fallback.
 internal fun historyKey(item:JSONObject):String=item.cleanText("history_key",item.cleanText("content_key",item.cleanText("history_id")))
 private fun mediaHistoryDeletePath(endpointId:String,item:JSONObject):String="/api/media/history/${Uri.encode(historyKey(item))}?endpoint=${Uri.encode(endpointId)}"
+// A cached picker is always actionable even if an unrelated refresh is running.
+internal fun historyPickerCanOpen(online:Boolean,loading:Boolean,hasCache:Boolean):Boolean=
+    online && (hasCache || !loading)
+
 private suspend fun savedVideoHistoryItemsWithRetry(api:HomeApi,attempts:Int=2):List<JSONObject>{
     var lastError:Throwable?=null
     repeat(attempts.coerceAtLeast(1)){i->
@@ -942,11 +1029,13 @@ private fun parseHomeProfile(j:JSONObject)=HomeClientProfile(j.optString("profil
 /** Keep every tab composed so remember/LazyListState/API-loaded UI state survives tab changes.
  * Inactive tabs are measured but deliberately not placed, so they cannot draw or receive input.
  */
+private val LocalHomeTabActive=compositionLocalOf { true }
 @Composable
 private fun PersistentTabSlot(active:Boolean, content:@Composable ()->Unit){
+    val parentActive=LocalHomeTabActive.current
     Layout(
         modifier=Modifier.fillMaxSize(),
-        content=content
+        content={ CompositionLocalProvider(LocalHomeTabActive provides (parentActive&&active)){ content() } }
     ){measurables,constraints->
         val placeables=measurables.map{it.measure(constraints)}
         val width=if(constraints.hasBoundedWidth)constraints.maxWidth else placeables.maxOfOrNull{it.width}?:0
@@ -957,8 +1046,13 @@ private fun PersistentTabSlot(active:Boolean, content:@Composable ()->Unit){
     }
 }
 
+// Cold composition, process recreation and foreground launcher return must all
+// start the family shell on Home. The operator shell keeps its in-session tab.
+internal fun homeTabOnForeground(hasSk:Boolean?,currentTab:Int):Int=
+    if(hasSk==false) 0 else currentTab
+
 @Composable
-private fun HomeComposeApp(sharedUrl:String?, consumeShare:()->Unit) {
+private fun HomeComposeApp(sharedUrl:String?,foregroundRevision:Int,consumeShare:()->Unit) {
     val api = remember { HomeApi() }
     val scope = rememberCoroutineScope()
     val context=LocalContext.current
@@ -967,7 +1061,8 @@ private fun HomeComposeApp(sharedUrl:String?, consumeShare:()->Unit) {
     activeUiLanguage=uiLanguage
     var contentLanguage by rememberSaveable { mutableStateOf("uk") }
     var languageDialog by remember { mutableStateOf("") }
-    var tab by rememberSaveable { mutableIntStateOf(0) }
+    // Cold start never restores Scanner; warm start resets on foregroundRevision.
+    var tab by remember { mutableIntStateOf(0) }
     var hyperion by remember { mutableStateOf(false) }
     var mediaEndpoints by remember { mutableStateOf(defaultMediaEndpoints()) }
     var endpointId by rememberSaveable { mutableStateOf("home_edge_tv") }
@@ -985,6 +1080,17 @@ private fun HomeComposeApp(sharedUrl:String?, consumeShare:()->Unit) {
     var discovered by remember { mutableStateOf(false) }
     var profile by remember { mutableStateOf<HomeClientProfile?>(null) }
     var videoSelectionRevision by rememberSaveable { mutableIntStateOf(0) }
+    LaunchedEffect(foregroundRevision,profile?.hasSk) {
+        if(profile?.hasSk==false && sharedUrl.isNullOrBlank()){
+            tab=0
+            // Warm launcher return must show only Home, not stale modal windows.
+            menu=false;info=false;historyEditor=false;channelEditor=false
+            deviceOrderEditor=false;screensaver=false;familySecurity=false
+            languageDialog=""
+        } else if(profile?.hasSk==true) {
+            tab=homeTabOnForeground(true,tab)
+        }
+    }
     suspend fun refreshMediaTarget():Boolean{
         if(api.server==null)return false
         return runCatching{parseMediaTarget(api.get("/api/media/target"),endpointId,mediaEndpoints)}.fold(
@@ -1059,9 +1165,13 @@ private fun HomeComposeApp(sharedUrl:String?, consumeShare:()->Unit) {
                 if(discovered && p!=null){
                     PersistentTabSlot(tab==0) { HomeScreen(api, tab==0, hyperion, setHyperionFromHeader, endpointId, mediaEndpoints, ::selectMediaEndpoint, {menu=true}, mediaCharged, {mediaCharged=it}, ::refreshMediaTarget) }
                     PersistentTabSlot(tab==1) { VideoScreen(api, tab==1, videoSelectionRevision, endpointId, mediaEndpoints, ::selectMediaEndpoint, {menu=true}, {tab=0}, hyperion, setHyperionFromHeader, mediaCharged, {mediaCharged=it}, ::refreshMediaTarget) }
-                    PersistentTabSlot(tab==2) {
-                        if(p.hasSk) DevicesScreen(api, tab==2, endpointId, mediaEndpoints, ::selectMediaEndpoint, {menu=true})
-                        else FamilyScannerScreen(api, tab==2, endpointId, mediaEndpoints, ::selectMediaEndpoint, {menu=true})
+                    // Unlike ordinary screens, Scanner can display an Android Dialog.
+                    // It must NEVER be composed as a persistent inactive tab: Dialog
+                    // escapes the tab's Layout placement and overlays Home globally.
+                    if(p.hasSk) PersistentTabSlot(tab==2) {
+                        DevicesScreen(api, tab==2, endpointId, mediaEndpoints, ::selectMediaEndpoint, {menu=true})
+                    } else if(tab==2) {
+                        FamilyScannerScreen(api, true, endpointId, mediaEndpoints, ::selectMediaEndpoint, {menu=true})
                     }
                     if(p.hasSk) PersistentTabSlot(tab==3) { SkeletonScreen(api, tab==3, endpointId, mediaEndpoints, ::selectMediaEndpoint, {menu=true}) }
                 } else Box(Modifier.fillMaxSize(), contentAlignment=Alignment.Center) { CircularProgressIndicator(color=Accent,strokeWidth=2.dp,modifier=Modifier.size(28.dp)) }
@@ -1430,6 +1540,8 @@ private fun idleLabel(v:Int)=when(v){60->"1 хвилина";120->"2 хвилин
 @Composable
 private fun SaverSelectRow(label:String,value:String,options:List<String>,enabled:Boolean,onSelect:(String)->Unit){
     var open by remember{mutableStateOf(false)}
+    val tabActive=LocalHomeTabActive.current
+    LaunchedEffect(tabActive){if(!tabActive)open=false}
     Row(Modifier.fillMaxWidth().height(64.dp),verticalAlignment=Alignment.CenterVertically){
         Text(label,fontSize=13.sp,color=Text,modifier=Modifier.width(120.dp))
         Box(Modifier.weight(1f)){
@@ -1440,7 +1552,7 @@ private fun SaverSelectRow(label:String,value:String,options:List<String>,enable
                 Text(value,fontSize=13.sp,color=if(enabled)Text else Muted,modifier=Modifier.weight(1f))
                 Mdi("chevron-down",16.dp,Muted)
             }
-            DropdownMenu(expanded=open,onDismissRequest={open=false},modifier=Modifier.background(Color(0xFF252A30))){
+            DropdownMenu(expanded=open&&tabActive,onDismissRequest={open=false},modifier=Modifier.background(Color(0xFF252A30))){
                 options.forEach{x->DropdownMenuItem(text={Text(x,color=Text,fontSize=13.sp)},onClick={open=false;onSelect(x)})}
             }
         }
@@ -1493,6 +1605,8 @@ private fun Header(title:String, connected:Boolean, endpointId:String, endpoints
 
 @Composable private fun OutputTargetSelector(endpointId:String,endpoints:List<MediaEndpointUi>,onEndpoint:(String)->Unit){
     var open by remember{mutableStateOf(false)}
+    val tabActive=LocalHomeTabActive.current
+    LaunchedEffect(tabActive){if(!tabActive)open=false}
     val selected=endpointById(endpoints,endpointId)
     Box{
         Row(Modifier.height(38.dp).width(148.dp).clip(RoundedCornerShape(19.dp)).background(Color(0xFF171D23)).border(1.dp,Line,RoundedCornerShape(19.dp)).clickable{open=true}.padding(horizontal=12.dp),verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(8.dp)){
@@ -1500,7 +1614,7 @@ private fun Header(title:String, connected:Boolean, endpointId:String, endpoints
             Text(selected.label,fontSize=11.sp,fontWeight=FontWeight.SemiBold,color=Text,maxLines=1,modifier=Modifier.weight(1f),overflow=TextOverflow.Ellipsis)
             Mdi("chevron-down",14.dp,Muted)
         }
-        DropdownMenu(expanded=open,onDismissRequest={open=false},modifier=Modifier.width(148.dp).background(Color(0xFF171B20)).border(1.dp,Line,RoundedCornerShape(12.dp))){
+        DropdownMenu(expanded=open&&tabActive,onDismissRequest={open=false},modifier=Modifier.width(148.dp).background(Color(0xFF171B20)).border(1.dp,Line,RoundedCornerShape(12.dp))){
             endpoints.forEach{endpoint->
                 DropdownMenuItem(text={Text(endpoint.label,color=Text,fontSize=13.sp,maxLines=1,overflow=TextOverflow.Ellipsis)},leadingIcon={Mdi(endpoint.icon,19.dp,if(endpoint.endpointId==endpointId)Accent else Muted)},onClick={open=false;if(endpoint.endpointId!=endpointId)onEndpoint(endpoint.endpointId)})
             }
@@ -1671,7 +1785,8 @@ private fun Header(title:String, connected:Boolean, endpointId:String, endpoints
                 onRemote={act->scope.launch{runCatching{api.post(endpointPath(endpoint.endpointId,"/remote/control"),endpointMutation(endpoint.endpointId,"action" to act,"phase" to "tap"))}}},
                 onControl={ctl->scope.launch{runCatching{api.post(endpointPath(endpoint.endpointId,"/control/$ctl"),endpointMutation(endpoint.endpointId))};refresh()}},
                 onSeek={pos->scope.launch{runCatching{api.post(endpointPath(endpoint.endpointId,"/seek"),endpointMutation(endpoint.endpointId,"position" to pos))};refresh()}},
-                onMute={if(volumeReady)scope.launch{val v=if(volume==0)lastNonzero.coerceAtLeast(1) else 0;setEndpointVolume(v);runCatching{api.post(endpointPath(endpoint.endpointId,"/volume"),endpointMutation(endpoint.endpointId,"level" to v))};refresh()}}
+                onMute={if(volumeReady)scope.launch{val v=if(volume==0)lastNonzero.coerceAtLeast(1) else 0;setEndpointVolume(v);runCatching{api.post(endpointPath(endpoint.endpointId,"/volume"),endpointMutation(endpoint.endpointId,"level" to v))};refresh()}},
+                onEpisodeStepped={scope.launch{refresh()}}
             )
         }
         }
@@ -1681,12 +1796,12 @@ private fun Header(title:String, connected:Boolean, endpointId:String, endpoints
 @OptIn(ExperimentalFoundationApi::class)
 @Composable private fun PlayerTitleLine(title:String,top:Dp){Text(title,Modifier.fillMaxWidth().padding(top=top).basicMarquee(iterations=Int.MAX_VALUE),fontSize=14.sp,fontWeight=FontWeight.SemiBold,color=Text,maxLines=1,softWrap=false,textAlign=androidx.compose.ui.text.style.TextAlign.Center)}
 
-@Composable private fun PersistentHomeRemotes(api:HomeApi,active:Boolean,endpointId:String,mode:String,youtubePlayer:JSONObject,youtubeRemotePlayer:JSONObject,videoPlayer:JSONObject,tvPlayer:JSONObject,volume:Int,onVolume:(Int)->Unit,onRemote:(String)->Unit,onControl:(String)->Unit,onSeek:(Int)->Unit,onMute:()->Unit){
+@Composable private fun PersistentHomeRemotes(api:HomeApi,active:Boolean,endpointId:String,mode:String,youtubePlayer:JSONObject,youtubeRemotePlayer:JSONObject,videoPlayer:JSONObject,tvPlayer:JSONObject,volume:Int,onVolume:(Int)->Unit,onRemote:(String)->Unit,onControl:(String)->Unit,onSeek:(Int)->Unit,onMute:()->Unit,onEpisodeStepped:()->Unit){
     // Exactly three permanent remote surfaces. Games reuses the video surface; it never creates a fourth remote.
     val panel=when(mode){"kiosk"->0;"tv"->2;else->1}
     Box(Modifier.fillMaxSize()){
         PersistentTabSlot(panel==0){YoutubeRemoteCard(api,endpointId,youtubePlayer,youtubeRemotePlayer,volume,onVolume,onRemote,onSeek,onMute)}
-        PersistentTabSlot(panel==1){VideoRemoteCard(api,endpointId,videoPlayer,volume,onVolume,onControl,onSeek,onMute)}
+        PersistentTabSlot(panel==1){VideoRemoteCard(api,endpointId,videoPlayer,volume,onVolume,onControl,onSeek,onMute,onEpisodeStepped)}
         PersistentTabSlot(panel==2){TvRemoteCard(api,active,endpointId,tvPlayer,volume,onVolume,onControl,onMute)}
     }
 }
@@ -1782,7 +1897,7 @@ private fun Header(title:String, connected:Boolean, endpointId:String, endpoints
     }
 }
 
-@Composable private fun VideoRemoteCard(api:HomeApi,endpointId:String,p:JSONObject,volume:Int,onVolume:(Int)->Unit,onControl:(String)->Unit,onSeek:(Int)->Unit,onMute:()->Unit){
+@Composable private fun VideoRemoteCard(api:HomeApi,endpointId:String,p:JSONObject,volume:Int,onVolume:(Int)->Unit,onControl:(String)->Unit,onSeek:(Int)->Unit,onMute:()->Unit,onEpisodeStepped:()->Unit){
     val running=p.optBoolean("running")
     val title=if(running)p.optString("display-title",p.optString("media-title","Відео")) else "Нічого не відтворюється"
     val se=if(running&&p.has("season")&&!p.isNull("season")){val s=p.optString("season","").takeUnless{it.equals("null",true)}.orEmpty();val e=if(p.has("episode")&&!p.isNull("episode"))p.optString("episode","").filter{it.isDigit()} else "";if(s.isNotBlank())"S$s"+(if(e.isNotBlank())" · E$e" else "") else ""}else ""
@@ -1793,17 +1908,37 @@ private fun Header(title:String, connected:Boolean, endpointId:String, endpoints
     LaunchedEffect(serverPos){seek=serverPos}
     val duration=p.optDouble("duration",0.0).toFloat().coerceAtLeast(1f)
     val scope=rememberCoroutineScope()
+    val context=LocalContext.current
     var episodeStepping by remember{mutableStateOf(false)}
     val seriesNav=running&&se.isNotBlank()
     Column(Modifier.fillMaxSize().clip(RoundedCornerShape(16.dp)).background(Card)){
         BoxWithConstraints(Modifier.weight(1f).fillMaxWidth().padding(top=10.dp,start=12.dp,end=12.dp),contentAlignment=Alignment.Center){
-            val posterWidth=minOf(maxWidth,maxHeight*(2f/3f))
+            val posterWidth=minOf((maxWidth-104.dp).coerceAtLeast(0.dp),maxHeight*(2f/3f))
             val frameSide=((maxWidth-posterWidth)/2f).coerceAtLeast(0.dp)
             Box(Modifier.fillMaxHeight().width(posterWidth).clip(RoundedCornerShape(14.dp)).background(Bg).border(1.dp,Line,RoundedCornerShape(14.dp)),contentAlignment=Alignment.Center){if(bitmap!=null)Image(bitmap,null,Modifier.fillMaxSize(),contentScale=ContentScale.Crop) else Mdi("television-play",48.dp,Color(0xFFD7DCE1))}
             if(seriesNav){
-                fun step(direction:Int){if(episodeStepping)return;episodeStepping=true;scope.launch{runCatching{api.post(endpointPath(endpointId,"/video/episode/step"),endpointMutation(endpointId,"direction" to direction))};episodeStepping=false}}
-                Box(Modifier.align(Alignment.CenterStart).width(frameSide).fillMaxHeight().clickable(enabled=!episodeStepping){step(-1)},contentAlignment=Alignment.Center){Text("‹",fontSize=27.sp,lineHeight=28.sp,fontWeight=FontWeight.Medium,color=Color(0xFFF4F7FA))}
-                Box(Modifier.align(Alignment.CenterEnd).width(frameSide).fillMaxHeight().clickable(enabled=!episodeStepping){step(1)},contentAlignment=Alignment.Center){Text("›",fontSize=27.sp,lineHeight=28.sp,fontWeight=FontWeight.Medium,color=Color(0xFFF4F7FA))}
+                fun step(direction:Int){
+                    if(episodeStepping)return
+                    episodeStepping=true
+                    scope.launch{
+                        try{
+                            // The live endpoint is global. Never act on a different device.
+                            val target=api.get("/api/media/target").optString("target","")
+                            if(endpointId!="home_edge_tv"||target!="tv")
+                                throw IllegalStateException("Перехід серії доступний лише для активного Home Edge TV")
+                            val result=api.post("/api/video/episode/step",JSONObject().put("direction",direction))
+                            if(result.optString("status")!="started")
+                                throw IllegalStateException(result.optString("error","Не вдалося перемкнути серію"))
+                            onEpisodeStepped()
+                        }catch(error:Exception){
+                            android.widget.Toast.makeText(context,error.message?.take(140)?:"Сусідня серія недоступна",android.widget.Toast.LENGTH_SHORT).show()
+                        }finally{episodeStepping=false}
+                    }
+                }
+                // Center the chevron in the full screen-edge-to-poster gutter.
+                // Home column is inset by 13dp and the poster stage by 12dp.
+                Box(Modifier.align(Alignment.CenterStart).offset(x=(-12).dp).width(frameSide).fillMaxHeight().clickable(enabled=!episodeStepping){step(-1)},contentAlignment=Alignment.Center){Text("‹",fontSize=36.sp,lineHeight=39.sp,fontWeight=FontWeight.Medium,color=Color(0xFFF4F7FA))}
+                Box(Modifier.align(Alignment.CenterEnd).offset(x=12.dp).width(frameSide).fillMaxHeight().clickable(enabled=!episodeStepping){step(1)},contentAlignment=Alignment.Center){Text("›",fontSize=36.sp,lineHeight=39.sp,fontWeight=FontWeight.Medium,color=Color(0xFFF4F7FA))}
             }
         }
         Column(Modifier.fillMaxWidth().padding(horizontal=12.dp).padding(bottom=12.dp)){
@@ -2063,7 +2198,7 @@ private fun VideoScreen(api:HomeApi,active:Boolean,selectionRevision:Int,endpoin
         }
     }
     val historyByEndpoint=remember{mutableStateMapOf<String,List<JSONObject>>()}; val savedHistoryByEndpoint=remember{mutableStateMapOf<String,List<JSONObject>>()}; val historyHydratedByEndpoint=remember{mutableStateMapOf<String,Boolean>()}; val historyErrorByEndpoint=remember{mutableStateMapOf<String,String>()}
-    var history by remember(endpoint.endpointId){mutableStateOf(historyByEndpoint[endpoint.endpointId].orEmpty())}; var savedHistory by remember(endpoint.endpointId){mutableStateOf(savedHistoryByEndpoint[endpoint.endpointId].orEmpty())}; var historyHydrated by remember(endpoint.endpointId){mutableStateOf(historyHydratedByEndpoint[endpoint.endpointId] == true)}; var historyLoading by remember(endpoint.endpointId){mutableStateOf(false)}; var historyError by remember(endpoint.endpointId){mutableStateOf(historyErrorByEndpoint[endpoint.endpointId].orEmpty())}; var historyOpen by remember(endpoint.endpointId){mutableStateOf(false)}; var seasonOpen by remember{mutableStateOf(false)}; var detailOpen by remember{mutableStateOf(false)}; var loadingSeason by remember{mutableStateOf("")}
+    var history by remember(endpoint.endpointId){mutableStateOf(historyByEndpoint[endpoint.endpointId].orEmpty())}; var savedHistory by remember(endpoint.endpointId){mutableStateOf(savedHistoryByEndpoint[endpoint.endpointId].orEmpty())}; var historyHydrated by remember(endpoint.endpointId){mutableStateOf(historyHydratedByEndpoint[endpoint.endpointId] == true)}; var historyLoading by remember(endpoint.endpointId){mutableStateOf(false)}; var historyError by remember(endpoint.endpointId){mutableStateOf(historyErrorByEndpoint[endpoint.endpointId].orEmpty())}; var historyOpen by remember(endpoint.endpointId){mutableStateOf(false)}; var historyPickerSnapshot by remember(endpoint.endpointId){mutableStateOf(emptyList<JSONObject>())}; var seasonOpen by remember{mutableStateOf(false)}; var detailOpen by remember{mutableStateOf(false)}; var loadingSeason by remember{mutableStateOf("")}
     var selection by remember{mutableStateOf(JSONObject())}; var selectionIdentity by remember{mutableStateOf("")}; var pendingSelectionIdentity by remember{mutableStateOf("")}; var selectedHistoryItem by remember(endpoint.endpointId){mutableStateOf<JSONObject?>(null)}; var job by remember{mutableStateOf<JSONObject?>(null)}; var sources by remember{mutableStateOf(emptyList<JSONObject>())}; var jobId by remember{mutableStateOf("")}; var loading by remember{mutableStateOf(false)}
     var season by remember{mutableStateOf("")}; var episode by remember{mutableStateOf("")}; var quality by remember{mutableStateOf("")}; var voice by remember{mutableStateOf("")}; var autoplay by remember{mutableStateOf(false)}; var monitor by remember{mutableStateOf(false)}; var monitorReady by remember{mutableStateOf(false)}; var external by remember{mutableStateOf(JSONObject())}; var message by remember{mutableStateOf("")}; var currentPlayer by remember{mutableStateOf(JSONObject())}; var audioSel by remember{mutableStateOf("")}; var subSel by remember{mutableStateOf("")}
     fun setEndpointHistory(items:List<JSONObject>){history=items;historyByEndpoint[endpoint.endpointId]=items}
@@ -2097,7 +2232,7 @@ private fun VideoScreen(api:HomeApi,active:Boolean,selectionRevision:Int,endpoin
         if(reloadWork&&jobId.isNotBlank()){loadJob(jobId);loadMonitor()}
     }
     suspend fun loadHistoryForEndpoint():Boolean{
-        if(api.server==null)return false
+        if(api.server==null || historyLoading)return false
         historyLoading=true; setEndpointHistoryError("")
         // Both dialogs read the same work membership, regardless of output device.
         val saved=runCatching{savedVideoHistoryItemsWithRetry(api)}
@@ -2161,9 +2296,14 @@ private fun VideoScreen(api:HomeApi,active:Boolean,selectionRevision:Int,endpoin
             while(true){if(loadAll())break;delay(1500)}
         }
     }
+    // Load at most once per endpoint and server connection.
+    // On failure keep UI usable; retry only after explicit user action.
     LaunchedEffect(api.server,endpoint.endpointId){
-        setEndpointHistoryHydrated(historyByEndpoint.containsKey(endpoint.endpointId)); setEndpointHistoryError("")
-        if(api.server!=null)while(true){if(loadHistoryForEndpoint())break;delay(1500)}
+        setEndpointHistoryHydrated(historyByEndpoint.containsKey(endpoint.endpointId))
+        if(api.server!=null && historyByEndpoint[endpoint.endpointId]==null)loadHistoryForEndpoint()
+    }
+    LaunchedEffect(active) {
+        if(!active){historyOpen=false;seasonOpen=false;detailOpen=false}
     }
     LaunchedEffect(api.server,active,endpoint.endpointId){
         if(api.server!=null&&active)while(true){
@@ -2256,8 +2396,20 @@ private fun VideoScreen(api:HomeApi,active:Boolean,selectionRevision:Int,endpoin
                         job!=null->cat.optString("title","Обраний твір")
                         else->"Оберіть збережений твір"
                     }
-                    val historyActionable=api.server!=null&&!historyLoading
-                    HistoryPickerField(historyLabel,historyActionable,historyLoading,historyError.isNotBlank()){scope.launch{if(loadHistoryForEndpoint()&&history.isNotEmpty())historyOpen=true}}
+                    // Never refetch before showing cached history. A snapshot
+                    // prevents rows from changing underneath the user's finger.
+                    val historyActionable=historyPickerCanOpen(api.server!=null,historyLoading,history.isNotEmpty())
+                    HistoryPickerField(historyLabel,historyActionable,historyLoading&&!historyHydrated,historyError.isNotBlank()){
+                        if(history.isNotEmpty()){
+                            historyPickerSnapshot=history.toList()
+                            historyOpen=true
+                        } else if(!historyLoading)scope.launch{
+                            if(loadHistoryForEndpoint()){
+                                historyPickerSnapshot=history.toList()
+                                historyOpen=true
+                            }
+                        }
+                    }
                     if(isSeries){
                         SeasonPickerField(season,seasonItems,loadedSeasons){seasonOpen=true}
                         SelectorField(ui("Серія"),"play",if(selectedIsTrailer)"Трейлер" else episode,if(selectedIsTrailer)listOf("Трейлер") else episodes,showCount=!selectedIsTrailer,trailing=if(selectedIsTrailer)"" else selectedDuration){if(!selectedIsTrailer)episode=it}
@@ -2307,7 +2459,7 @@ private fun VideoScreen(api:HomeApi,active:Boolean,selectionRevision:Int,endpoin
             }
         }
     }
-    if(historyOpen)HistoryPickerDialog(api,history,{item->
+    if(active&&historyOpen)HistoryPickerDialog(api,historyPickerSnapshot,{item->
         historyOpen=false
         scope.launch{
             runCatching{
@@ -2326,7 +2478,7 @@ private fun VideoScreen(api:HomeApi,active:Boolean,selectionRevision:Int,endpoin
                 .onFailure{message=it.message?:"Не вдалося вибрати запис історії"}
         }
     },{historyOpen=false})
-    if(seasonOpen)SeasonPickerDialog(api,cat,seasonItems,loadedSeasons,season,loadingSeason,{snum,load->
+    if(active&&seasonOpen)SeasonPickerDialog(api,cat,seasonItems,loadedSeasons,season,loadingSeason,{snum,load->
         season=snum
         if(load){
             loadingSeason=snum
@@ -2366,7 +2518,7 @@ private fun VideoScreen(api:HomeApi,active:Boolean,selectionRevision:Int,endpoin
             }
         } else seasonOpen=false
     },{seasonOpen=false})
-    if(detailOpen)VideoDetailDialog(context,cat,bm,external,onDismiss={detailOpen=false})
+    if(active&&detailOpen)VideoDetailDialog(context,cat,bm,external,onDismiss={detailOpen=false})
     }
 }
 
@@ -2472,6 +2624,8 @@ private fun openCatalogUrl(context:Context,url:String){if(url.isBlank())return;r
 
 @Composable private fun SelectorField(label:String,icon:String,value:String,options:List<String>,showCount:Boolean=false,trailing:String="",iconAction:(()->Unit)?=null,onSelect:(String)->Unit){
     var expanded by remember{mutableStateOf(false)}
+    val tabActive=LocalHomeTabActive.current
+    LaunchedEffect(tabActive){if(!tabActive)expanded=false}
     val selectedIndex=options.indexOf(value)
     val labelText=if(showCount&&options.isNotEmpty()) "$label · ${options.size} серій" else label
     val valueText=if(showCount&&selectedIndex>=0&&options.size>1) "$value · ${selectedIndex+1}/${options.size}" else value
@@ -2487,7 +2641,7 @@ private fun openCatalogUrl(context:Context,url:String){if(url.isBlank())return;r
                     if(trailing.isNotBlank())Text(trailing,fontSize=11.sp,fontWeight=FontWeight.SemiBold,color=Muted,modifier=Modifier.padding(horizontal=8.dp))
                     Mdi("chevron-down",16.dp,Muted.copy(alpha=if(options.isNotEmpty())1f else .55f))
                 }
-                DropdownMenu(expanded=expanded,onDismissRequest={expanded=false},modifier=Modifier.heightIn(max=menuMax).background(Color(0xFF171B20)).border(1.dp,Color(0xFF31363C),RoundedCornerShape(12.dp))){
+                DropdownMenu(expanded=expanded&&tabActive,onDismissRequest={expanded=false},modifier=Modifier.heightIn(max=menuMax).background(Color(0xFF171B20)).border(1.dp,Color(0xFF31363C),RoundedCornerShape(12.dp))){
                     options.forEachIndexed{i,v->DropdownMenuItem(text={Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically){Text(v,color=Text,fontSize=14.sp,modifier=Modifier.weight(1f));if(showCount)Text("${i+1}/${options.size}",color=Muted,fontSize=11.sp)}},onClick={expanded=false;onSelect(v)})}
                 }
             }
@@ -2545,6 +2699,56 @@ private fun openProviderApp(context:Context,trakt:Boolean,pkg:String?,ext:JSONOb
 }
 
 private data class NativeDeviceUi(val id:String,val name:String,val role:String,val adapter:String,val online:Boolean,val location:String,val dependencies:List<String>,val controller:String,val domain:String,val connection:String,val parentId:String="",val medium:String="")
+
+private data class NativeDeviceWebLink(val label:String,val url:String)
+// URLs originate from confirmed Skeleton Device Registry services; IDs never from IPs.
+private fun nativeDeviceWebLinks(deviceId:String):List<NativeDeviceWebLink> = when(deviceId){
+    "__software_proxmox"->listOf(NativeDeviceWebLink("Proxmox","https://192.168.1.179:8006/"))
+    "brandenburg_haos"->listOf(NativeDeviceWebLink("Home Assistant","http://192.168.1.17:8123/"))
+    "__service_ct101","anycubic_kobra_2022"->listOf(NativeDeviceWebLink("OctoPrint","http://192.168.1.237:5000/"))
+    "kobra_logitech_webcam"->listOf(NativeDeviceWebLink("Камера · знімок","http://192.168.1.237:8080/snapshot"))
+    "asus_router_modem"->listOf(NativeDeviceWebLink("ASUS","http://192.168.1.1/"))
+    "mikrotik_home"->listOf(NativeDeviceWebLink("MikroTik","http://192.168.1.70/"))
+    "brother_printer"->listOf(NativeDeviceWebLink("Brother Web","http://192.168.1.165/"))
+    "lavalamp"->listOf(NativeDeviceWebLink("WLED","http://192.168.1.164/"))
+    "tv_wled"->listOf(NativeDeviceWebLink("WLED","http://192.168.1.16/"))
+    "matrix_wled"->listOf(NativeDeviceWebLink("WLED","http://192.168.1.41/"))
+    "__software_homeedge"->listOf(NativeDeviceWebLink("Home Edge Web","http://192.168.1.54:8100/view/phone"))
+    else->emptyList()
+}
+// Bounded reachability only, no device commands, credentials or TLS bypass.
+private suspend fun nativeWebReachable(url:String):Boolean=withContext(Dispatchers.IO){
+    runCatching{
+        val parsed=java.net.URI(url)
+        require(parsed.scheme in setOf("http","https")&&parsed.host?.startsWith("192.168.1.")==true)
+        val port=if(parsed.port>0)parsed.port else if(parsed.scheme=="https")443 else 80
+        java.net.Socket().use{socket->socket.connect(java.net.InetSocketAddress(parsed.host,port),1400)}
+        true
+    }.getOrDefault(false)
+}
+private fun nativeDeviceTopology(items:List<NativeDeviceUi>):List<NativeDeviceUi>{
+    val unique=items.filter{it.id.isNotBlank()}.distinctBy{it.id}
+    val q558=unique.any{it.id=="brandenburg_proxmox"}
+    val q556=unique.any{it.id=="home_edge_01"}
+    val physical=unique.map{d->when(d.id){
+        "brandenburg_proxmox"->d.copy(name="Fujitsu ESPRIMO Q558",parentId="",connection="Фізичний сервер")
+        "home_edge_01"->d.copy(name="Fujitsu ESPRIMO Q556/2",parentId="",connection="Фізичний медіакомп’ютер")
+        "brandenburg_haos"->d.copy(name="VM100 · Home Assistant OS",parentId=if(q558)"__software_proxmox" else "",medium="virtual_machine")
+        "anycubic_kobra_2022"->d.copy(parentId=if(q558)"brandenburg_proxmox" else "",medium="usb",connection="USB до Fujitsu Q558 · сервіс CT101")
+        "kobra_logitech_webcam"->d.copy(parentId=if(q558)"brandenburg_proxmox" else "",medium="usb",connection="USB до Fujitsu Q558 · камера CT101")
+        "sharp_tv_living_room"->d.copy(parentId=if(q556)"home_edge_01" else "",medium="hdmi",connection="HDMI 1 від Fujitsu Q556/2")
+        "home_edge_gyromouse_remote","cherry_usb_keyboard","sharkoon_wireless_mouse","gamesir_nova_lite"->d.copy(parentId=if(q556)"home_edge_01" else "")
+        else->d
+    }}
+    val services=mutableListOf<NativeDeviceUi>()
+    if(q558){
+        services.add(NativeDeviceUi("__software_proxmox","Proxmox VE","software_service","network",false,"",emptyList(),"","Мережа","Платформа віртуалізації","brandenburg_proxmox","software"))
+        services.add(NativeDeviceUi("__service_ct101","CT101 · OctoPrint","virtualization_service","network",false,"",emptyList(),"","Мережа","LXC-контейнер Proxmox","__software_proxmox","container"))
+    }
+    if(q556)services.add(NativeDeviceUi("__software_homeedge","Home Edge · медіасистема","software_service","network",false,"",emptyList(),"","Мережа","Медіапрограма","home_edge_01","software"))
+    return physical+services
+}
+
 private val deviceDomainOrder=listOf("Житло","Мережа","Керування","Документи","Київ / поза домом")
 private fun nativeDeviceDomain(id:String,role:String,location:String):String{
     if(id=="hetzner_runner"||location=="hetzner_cloud")return "Віддалені сервери"
@@ -2593,14 +2797,46 @@ private fun nativeDeviceConnection(id:String,role:String,adapter:String,location
 private fun nativeDeviceIcon(role:String)=when(role){
     "television_display"->"television"
     "physical_gamepad"->"gamepad-variant"
+    "virtualization_service"->"server"
     "air_mouse_remote","maintenance_keyboard","maintenance_mouse","android_phone","ios_phone","tablet_kiosk"->"devices"
     "tv_backlight","decorative_planter_light","lava_lamp"->"lightbulb-outline"
     "gateway_router_modem","secondary_router","media_pc","virtualization_host"->"cast-connected"
     else->"devices"
 }
-@Composable private fun DeviceDomainCard(title:String,items:List<NativeDeviceUi>,onSharp:()->Unit,onMfp:()->Unit,onHomeEdge:()->Unit){
+private data class DeviceSection(val id:String,val title:String,val items:List<NativeDeviceUi>)
+internal fun hardwareFirstRank(medium:String):Int=when(medium){
+    "software","container","virtual_machine"->10
+    "usb","hdmi","ethernet","wifi","bluetooth"->1
+    else->2
+}
+private fun nativeDeviceSections(items:List<NativeDeviceUi>):List<DeviceSection>{
+    val byId=items.associateBy{it.id}
+    val children=items.groupBy{it.parentId}
+    val done=mutableSetOf<String>()
+    val sections=mutableListOf<DeviceSection>()
+    fun subtree(id:String,rows:MutableList<NativeDeviceUi>){
+        val d=byId[id]?:return
+        if(!done.add(id))return
+        rows.add(d)
+        children[id].orEmpty().sortedWith(compareBy<NativeDeviceUi>{hardwareFirstRank(it.medium)}.thenBy{it.name}).forEach{subtree(it.id,rows)}
+    }
+    fun group(id:String,title:String){
+        if(id !in byId)return
+        val rows=mutableListOf<NativeDeviceUi>()
+        subtree(id,rows)
+        sections.add(DeviceSection(id,title,rows))
+    }
+    group("asus_router_modem","Мережа · фізичні роутери")
+    group("brandenburg_proxmox","Fujitsu Q558 · сервер")
+    group("home_edge_01","Fujitsu Q556/2 · медіасистема")
+    val rest=mutableListOf<NativeDeviceUi>()
+    items.filter{it.id !in done}.forEach{subtree(it.id,rest)}
+    if(rest.isNotEmpty())sections.add(DeviceSection("other","Інші пристрої",rest))
+    return sections
+}
+@Composable private fun DeviceDomainCard(title:String,items:List<NativeDeviceUi>,webState:Map<String,Boolean>,onOpenWeb:(String)->Unit,onSharp:()->Unit,onMfp:()->Unit,onHomeEdge:()->Unit){
     Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(Card)){
-        Row(Modifier.fillMaxWidth().padding(horizontal=15.dp,vertical=12.dp),verticalAlignment=Alignment.CenterVertically){Text(title,fontSize=15.sp,fontWeight=FontWeight.Bold,color=Text,modifier=Modifier.weight(1f));Text(ui("${items.count{it.online}}/${items.size} на зв’язку"),fontSize=10.sp,color=Muted)}
+        Row(Modifier.fillMaxWidth().padding(horizontal=15.dp,vertical=12.dp),verticalAlignment=Alignment.CenterVertically){Text(title,fontSize=15.sp,fontWeight=FontWeight.Bold,color=Text,modifier=Modifier.weight(1f));Text(ui("${items.count{it.online&&!it.id.startsWith("__")}}/${items.count{!it.id.startsWith("__")}} на зв’язку"),fontSize=10.sp,color=Muted)}
         val byId=items.associateBy{it.id}
         val children=items.groupBy{it.parentId}
         val visited=mutableSetOf<String>()
@@ -2608,30 +2844,52 @@ private fun nativeDeviceIcon(role:String)=when(role){
         fun visit(d:NativeDeviceUi,depth:Int){
             if(!visited.add(d.id))return
             ordered.add(d to depth)
-            children[d.id].orEmpty().sortedBy{it.name}.forEach{visit(it,(depth+1).coerceAtMost(5))}
+            children[d.id].orEmpty().sortedWith(compareBy<NativeDeviceUi>{hardwareFirstRank(it.medium)}.thenBy{it.name}).forEach{visit(it,(depth+1).coerceAtMost(5))}
         }
-        items.filter{it.parentId !in byId}.sortedWith(compareBy<NativeDeviceUi>{it.role!="gateway_router_modem"}.thenBy{it.name}).forEach{visit(it,0)}
+        items.filter{it.parentId !in byId}.sortedWith(compareBy<NativeDeviceUi>{it.role!="gateway_router_modem"}.thenBy{it.id!="brandenburg_proxmox"}.thenBy{it.name}).forEach{visit(it,0)}
         items.filter{it.id !in visited}.sortedBy{it.name}.forEach{visit(it,0)}
         ordered.forEachIndexed{index,pair->
             val d=pair.first
             val depth=pair.second
+            val webLinks=nativeDeviceWebLinks(d.id).filter{webState[it.url]==true}
+            val octoprintState=webState["http://192.168.1.237:5000/"]
+            val cameraState=webState["http://192.168.1.237:8080/snapshot"]
+            val effectiveOnline=when(d.id){
+                "__service_ct101"->octoprintState==true
+                "__software_proxmox","__software_homeedge"->byId[d.parentId]?.online==true
+                else->d.online
+            }
+            val serviceDescription=when(d.id){
+                "__service_ct101"->when(octoprintState){true->"OctoPrint: доступний";false->"OctoPrint: недоступний";else->"OctoPrint: перевіряється"}
+                "anycubic_kobra_2022"->"USB: ${if(d.online)"підключено" else "не підтверджено"} · OctoPrint: ${when(octoprintState){true->"доступний";false->"недоступний";else->"перевіряється"}}"
+                "kobra_logitech_webcam"->"USB: ${if(d.online)"підключено" else "не підтверджено"} · Відеопотік: ${when(cameraState){true->"порт доступний";false->"недоступний";else->"перевіряється"}}"
+                else->""
+            }
             if(index>0)Box(Modifier.fillMaxWidth().height(1.dp).background(Line))
             Row(Modifier.fillMaxWidth().heightIn(min=76.dp).clickable(enabled=d.id=="sharp_tv_living_room"||d.id=="brother_printer"||d.id=="home_edge_01"){when(d.id){"sharp_tv_living_room"->onSharp();"brother_printer"->onMfp();"home_edge_01"->onHomeEdge()}}.padding(horizontal=14.dp,vertical=10.dp),verticalAlignment=Alignment.CenterVertically){
-                val linkColor=when(d.medium){"ethernet"->Color(0xFF41A9EA);"wifi"->Color(0xFF4AC67F);"usb"->Color(0xFFF5A746);"bluetooth"->Color(0xFFAB85F5);"hdmi"->Color(0xFFE97092);"virtual_machine"->Color(0xFF859EB2);"tailscale"->Color(0xFF42C6CF);else->Color(0xFF4E5863)}
-                Canvas(Modifier.width((18+depth*18).dp).height(72.dp)){
-                    val step=18.dp.toPx()
-                    val x=9.dp.toPx()+depth*step
-                    val mid=size.height/2f
-                    val sw=2.5.dp.toPx()
-                    if(depth>0){
-                        val parentX=x-step
-                        drawLine(linkColor,Offset(parentX,0f),Offset(parentX,size.height),strokeWidth=sw)
-                        drawLine(linkColor,Offset(parentX,mid),Offset(x,mid),strokeWidth=sw)
-                    }else drawCircle(Color(0xFF4E5863),radius=3.dp.toPx(),center=Offset(x,mid))
-                }
+                val software=d.medium in setOf("software","container","virtual_machine")
+                if(depth>0)Text("↳",fontSize=18.sp,color=if(software)Muted else Accent,modifier=Modifier.width((16+depth*6).dp))
+                else Spacer(Modifier.width(12.dp))
                 Box(Modifier.size(42.dp).clip(RoundedCornerShape(12.dp)).background(Action),contentAlignment=Alignment.Center){Mdi(nativeDeviceIcon(d.role),23.dp,if(d.online)Text else Muted)}
-                Column(Modifier.weight(1f).padding(start=12.dp)){Text(d.name,fontSize=17.sp,lineHeight=22.sp,fontWeight=FontWeight.SemiBold,color=Text,maxLines=2,overflow=TextOverflow.Ellipsis);Text((if(d.medium.isNotBlank())when(d.medium){"usb"->"USB";"ethernet"->"LAN";"wifi"->"Wi-Fi";"virtual_machine"->"VM";"bluetooth"->"Bluetooth";"hdmi"->"HDMI";else->d.medium}+" · " else "")+d.connection,fontSize=10.sp,lineHeight=14.sp,color=Muted,maxLines=3,overflow=TextOverflow.Ellipsis,modifier=Modifier.padding(top=4.dp))}
-                Column(horizontalAlignment=Alignment.End){Box(Modifier.size(8.dp).clip(CircleShape).background(if(d.online)Green else Muted));Text(if(d.online)"На зв’язку" else "Не на зв’язку",fontSize=9.sp,color=if(d.online)Green else Muted,modifier=Modifier.padding(top=4.dp));if(d.id=="sharp_tv_living_room"||d.id=="brother_printer"||d.id=="home_edge_01")Mdi("chevron-right",18.dp,Muted,Modifier.padding(top=5.dp))}
+                Column(Modifier.weight(1f).padding(start=12.dp)){
+                    Text(if(software)"ПРОГРАМНЕ" else "АПАРАТНЕ",fontSize=9.sp,fontWeight=FontWeight.Bold,color=if(software)Muted else Accent)
+                    Text(d.name,fontSize=15.sp,lineHeight=19.sp,fontWeight=FontWeight.SemiBold,color=Text,maxLines=3,overflow=TextOverflow.Ellipsis)
+                    val relation=when(d.id){
+                        "__software_proxmox"->"ПЗ на Fujitsu ESPRIMO Q558"
+                        "__software_homeedge"->"ПЗ на Fujitsu ESPRIMO Q556/2"
+                        "brandenburg_haos"->"VM100 у Proxmox"
+                        "__service_ct101"->"LXC-контейнер у Proxmox"
+                        "mikrotik_home"->"Ethernet від ASUS"
+                        "sharp_tv_living_room"->"HDMI 1 від Fujitsu Q556/2"
+                        "anycubic_kobra_2022","kobra_logitech_webcam"->d.connection
+                        else->d.connection
+                    }
+                    Text(relation,fontSize=11.sp,lineHeight=16.sp,color=Muted,maxLines=4,overflow=TextOverflow.Ellipsis,modifier=Modifier.padding(top=4.dp))
+                    Text(when(d.id){"anycubic_kobra_2022","kobra_logitech_webcam"->if(d.online)"USB підтверджено" else "USB не перевірено";else->if(effectiveOnline)"На зв’язку" else "Не на зв’язку"},fontSize=10.sp,color=if(effectiveOnline)Green else Muted,modifier=Modifier.padding(top=5.dp))
+                    if(serviceDescription.isNotBlank())Text(serviceDescription,fontSize=10.sp,color=if((d.id=="__service_ct101"&&octoprintState==true)||(d.id=="kobra_logitech_webcam"&&cameraState==true))Green else Muted,modifier=Modifier.padding(top=3.dp))
+                    webLinks.forEach{link->Text("Відкрити ${link.label} ↗",fontSize=12.sp,fontWeight=FontWeight.Medium,color=Accent,modifier=Modifier.clickable{onOpenWeb(link.url)}.padding(top=7.dp,bottom=3.dp))}
+                }
+                Box(Modifier.size(8.dp).clip(CircleShape).background(if(effectiveOnline)Green else Muted))
             }
         }
     }
@@ -2964,15 +3222,20 @@ private fun shareMfpPdf(context:Context,api:HomeApi,doc:JSONObject){
 }
 
 
+// Inactive tabs may still be measured but a Dialog has its own window;
+// both active-tab and explicit user-open state are required to show it.
+internal fun familyScannerDialogVisible(active:Boolean,open:Boolean,serverConnected:Boolean):Boolean=
+    active && open && serverConnected
+
 @Composable private fun FamilyScannerScreen(api:HomeApi,active:Boolean,endpointId:String,endpoints:List<MediaEndpointUi>,onEndpoint:(String)->Unit,onMenu:()->Unit){
-    var open by rememberSaveable{mutableStateOf(true)}
-    LaunchedEffect(active){if(active)open=true}
+    var open by remember { mutableStateOf(false) }
+    LaunchedEffect(active){open=active}
     Column(Modifier.fillMaxSize().background(Bg)){
         Header(ui("Сканувати"),api.server!=null,endpointId,endpoints,onEndpoint,onMenu)
         Box(Modifier.weight(1f),contentAlignment=Alignment.Center){
             Button(onClick={open=true},shape=RoundedCornerShape(14.dp),colors=ButtonDefaults.buttonColors(containerColor=Accent),modifier=Modifier.fillMaxWidth(.72f).height(56.dp)){Mdi("scanner",22.dp,Color.White);Spacer(Modifier.width(9.dp));Text(ui("Відкрити сканер"),fontWeight=FontWeight.Bold)}
         }
-        if(open&&api.server!=null)MfpDialog(api){open=false}
+        if(familyScannerDialogVisible(active,open,api.server!=null))MfpDialog(api){open=false}
     }
 }
 
@@ -3247,7 +3510,7 @@ private fun shareMfpPdf(context:Context,api:HomeApi,doc:JSONObject){
                 val secretTypeLabels=mapOf("api_key" to "API key","token" to "Token","password" to "Пароль","login_password" to "Логін + пароль","json" to "JSON","text" to "Текст","other" to "Інше")
                 Box(Modifier.fillMaxWidth().padding(top=8.dp)){
                     OutlinedButton(onClick={secretTypeMenu=true},enabled=!busy,modifier=Modifier.fillMaxWidth(),shape=RoundedCornerShape(12.dp),border=BorderStroke(1.dp,Line)){Text("Тип: ${secretTypeLabels[secretType]?:secretType}",color=Text,modifier=Modifier.weight(1f));Mdi("chevron-down",18.dp,Muted)}
-                    DropdownMenu(expanded=secretTypeMenu,onDismissRequest={secretTypeMenu=false}){secretTypeLabels.forEach{(key,label)->DropdownMenuItem(text={Text(label)},onClick={secretType=key;secretTypeMenu=false;secretValue="";secretLogin="";secretPassword=""})}}
+                    DropdownMenu(expanded=secretTypeMenu&&LocalHomeTabActive.current,onDismissRequest={secretTypeMenu=false}){secretTypeLabels.forEach{(key,label)->DropdownMenuItem(text={Text(label)},onClick={secretType=key;secretTypeMenu=false;secretValue="";secretLogin="";secretPassword=""})}}
                 }
                 if(secretType=="login_password"){
                     OutlinedTextField(value=secretLogin,onValueChange={if(it.length<=4096)secretLogin=it},enabled=!busy,label={Text("Логін")},singleLine=true,modifier=Modifier.fillMaxWidth().padding(top=8.dp),colors=OutlinedTextFieldDefaults.colors(focusedTextColor=Text,unfocusedTextColor=Text,focusedBorderColor=Accent,unfocusedBorderColor=Line,focusedLabelColor=Accent,unfocusedLabelColor=Muted,cursorColor=Accent))
@@ -3287,19 +3550,44 @@ private fun orderNativeDevices(items:List<NativeDeviceUi>,prefs:android.content.
 }
 
 @Composable private fun DevicesScreen(api:HomeApi,active:Boolean,endpointId:String,endpoints:List<MediaEndpointUi>,onEndpoint:(String)->Unit,onMenu:()->Unit){
-    var sharpRemoteOpen by rememberSaveable{mutableStateOf(false)}; var mfpOpen by rememberSaveable{mutableStateOf(false)}; var homeEdgeOpen by rememberSaveable{mutableStateOf(false)}; var devices by remember{mutableStateOf(emptyList<NativeDeviceUi>())}; var loaded by remember{mutableStateOf(false)}
+    var sharpRemoteOpen by rememberSaveable{mutableStateOf(false)}; var mfpOpen by rememberSaveable{mutableStateOf(false)}; var homeEdgeOpen by rememberSaveable{mutableStateOf(false)}; var devices by remember{mutableStateOf(emptyList<NativeDeviceUi>())}; var webState by remember{mutableStateOf(emptyMap<String,Boolean>())}; var loaded by remember{mutableStateOf(false)}
     val context=LocalContext.current; val devicePrefs=remember(context){context.getSharedPreferences("home_ui",Context.MODE_PRIVATE)}
     LaunchedEffect(Unit){if(deviceOrderIds(devicePrefs).isEmpty())devicePrefs.edit().putString(DEVICE_ORDER_PREF,"brother_printer").apply()}
-    LaunchedEffect(api.server,active){if(api.server!=null){suspend fun pull():Boolean{var ok=false;runCatching{api.get("/api/native/devices")}.onSuccess{j->devices=j.optJSONArray("items")?.objects().orEmpty().map{d->val id=d.cleanText("device_id");val role=d.cleanText("role");val adapter=d.cleanText("adapter");val location=d.cleanText("location");val deps=d.optJSONArray("dependency_names")?.strings().orEmpty();val controller=d.cleanText("controller_name",d.cleanText("controller"));NativeDeviceUi(id,d.cleanText("name",id),role,adapter,d.optBoolean("online"),location,deps,controller,nativeDeviceDomain(id,role,location),nativeDeviceConnection(id,role,adapter,location,deps,controller),d.cleanText("physical_parent_id"),d.cleanText("physical_medium"))};loaded=true;ok=true};return ok};while(!loaded){if(pull())break;delay(1500)};if(active)while(true){delay(15000);pull()}}}
-    if(homeEdgeOpen){HomeEdgeScreen(api,endpointId,endpoints,onEndpoint,onMenu){homeEdgeOpen=false};return}
+    LaunchedEffect(api.server,active){if(api.server!=null){suspend fun pull():Boolean{var ok=false;runCatching{api.get("/api/native/devices")}.onSuccess{j->val fresh=j.optJSONArray("items")?.objects().orEmpty().map{d->val id=d.cleanText("device_id");val role=d.cleanText("role");val adapter=d.cleanText("adapter");val location=d.cleanText("location");val deps=d.optJSONArray("dependency_names")?.strings().orEmpty();val controller=d.cleanText("controller_name",d.cleanText("controller"));NativeDeviceUi(id,d.cleanText("name",id),role,adapter,d.optBoolean("online"),location,deps,controller,nativeDeviceDomain(id,role,location),nativeDeviceConnection(id,role,adapter,location,deps,controller),d.cleanText("physical_parent_id"),d.cleanText("physical_medium"))};if(fresh!=devices)devices=fresh;loaded=true;ok=true};return ok};while(!loaded){if(pull())break;delay(1500)};if(active)while(true){delay(15000);pull()}}}
+    LaunchedEffect(api.server,active,devices.map{it.id}){
+        if(api.server!=null&&active&&devices.isNotEmpty()){
+            val urls=nativeDeviceTopology(devices).flatMap{nativeDeviceWebLinks(it.id)}.map{it.url}.distinct()
+            while(true){
+                val fresh=mutableMapOf<String,Boolean>()
+                for(url in urls)fresh[url]=nativeWebReachable(url)
+                webState=fresh
+                delay(45000)
+            }
+        }
+    }
+    fun openDeviceWebPage(url:String){
+        if(webState[url]!=true)return
+        runCatching{
+            val u=Uri.parse(url)
+            require(u.scheme in listOf("http","https")&&u.host?.startsWith("192.168.1.")==true)
+            context.startActivity(Intent(Intent.ACTION_VIEW,u).addCategory(Intent.CATEGORY_BROWSABLE))
+        }.onFailure{Toast.makeText(context,"Не вдалося відкрити вебпанель",Toast.LENGTH_SHORT).show()}
+    }
+    LaunchedEffect(active){if(!active){homeEdgeOpen=false;mfpOpen=false;sharpRemoteOpen=false}}
+    if(active&&homeEdgeOpen){HomeEdgeScreen(api,endpointId,endpoints,onEndpoint,onMenu){homeEdgeOpen=false};return}
     Column(Modifier.fillMaxSize().background(Bg)){
         LazyColumn(Modifier.weight(1f).padding(horizontal=13.dp),contentPadding=PaddingValues(top=6.dp,bottom=18.dp),verticalArrangement=Arrangement.spacedBy(10.dp)){
             if(!loaded)item{SimpleSection("Домашня схема","Читаю актуальний список пристроїв…")}
-            val ordered=orderNativeDevices(devices,devicePrefs)
-            if(ordered.isNotEmpty())item(key="physical_topology"){DeviceDomainCard("Пристрої та підтверджені з’єднання",ordered,{sharpRemoteOpen=true},{mfpOpen=true},{homeEdgeOpen=true})}
+            val ordered=nativeDeviceTopology(orderNativeDevices(devices,devicePrefs))
+            if(ordered.isNotEmpty()){
+                item{Text("Спочатку апаратне обладнання, потім встановлене на ньому ПЗ, VM і контейнери.",fontSize=11.sp,color=Muted,modifier=Modifier.padding(horizontal=3.dp,vertical=4.dp))}
+                nativeDeviceSections(ordered).forEach{section->
+                    item(key="devices_"+section.id){DeviceDomainCard(section.title,section.items,webState,::openDeviceWebPage,{sharpRemoteOpen=true},{mfpOpen=true},{homeEdgeOpen=true})}
+                }
+            }
         }
-        if(mfpOpen&&api.server!=null)MfpDialog(api){mfpOpen=false}
-        if(sharpRemoteOpen&&api.server!=null)SharpRemoteDialog("${api.server}/ir/sharp"){sharpRemoteOpen=false}
+        if(active&&mfpOpen&&api.server!=null)MfpDialog(api){mfpOpen=false}
+        if(active&&sharpRemoteOpen&&api.server!=null)SharpRemoteDialog("${api.server}/ir/sharp"){sharpRemoteOpen=false}
     }
 }
 
