@@ -562,6 +562,100 @@ def test_private_memory_gateway_put_is_idempotent_and_exact_readback_is_authorit
     assert ".sqlite" not in serialized
 
 
+def test_private_memory_gateway_rejects_plain_secret_values_before_storage(tmp_path: Path) -> None:
+    stack = PrivateMemoryStack(tmp_path)
+    stack.init(import_manifest=False)
+    gw = MemoryGateway(
+        capability_token(namespaces=("skeleton",), public_mode=False),
+        private_memory_storage=PrivateMemoryGatewayStorage(stack),
+    )
+    mutation = {
+        "schema": PRIVATE_MEMORY_GATEWAY_MUTATION_SCHEMA,
+        "project_id": "skeleton",
+        "operation": "put",
+        "fact_namespace": "skeleton.notes",
+        "fact_id": "secret_value_note",
+        "value": {
+            "api_token": "sk-test-public-safe-synthetic-secret-value",
+            "client_secret": "synthetic-client-secret",
+        },
+        "idempotency_key": "idem_secret_value_note",
+    }
+
+    with pytest.raises(MemoryGatewayPolicyError):
+        gw.execute(request("skeleton", "memory.private_mutate", mutation))
+
+    with pytest.raises(Exception):
+        stack.get(namespace="skeleton.notes", fact_id="secret_value_note")
+
+
+def test_public_mode_private_memory_reads_do_not_cross_private_book_media_customer_boundary(
+    tmp_path: Path,
+) -> None:
+    stack = PrivateMemoryStack(tmp_path)
+    stack.init(import_manifest=False)
+    private_gateway = MemoryGateway(
+        capability_token(namespaces=("skeleton",), public_mode=False),
+        private_memory_storage=PrivateMemoryGatewayStorage(stack),
+    )
+    public_gateway = MemoryGateway(
+        capability_token(namespaces=("skeleton",), public_mode=True),
+        private_memory_storage=PrivateMemoryGatewayStorage(stack),
+    )
+    mutation = {
+        "schema": PRIVATE_MEMORY_GATEWAY_MUTATION_SCHEMA,
+        "project_id": "skeleton",
+        "dataset_id": "privacy-boundary",
+        "operation": "put",
+        "fact_namespace": "skeleton.notes",
+        "fact_id": "private_boundary_note",
+        "value": {
+            "book": "Synthetic Private Book Title",
+            "media": "Synthetic Private Media Queue",
+            "customer": "Synthetic Private Customer Name",
+        },
+        "idempotency_key": "idem_private_boundary_note",
+    }
+
+    receipt = private_gateway.execute(request("skeleton", "memory.private_mutate", mutation))["payload"]
+
+    for suffix, payload in [
+        (
+            "memory.private_read_exact",
+            {
+                "project_id": "skeleton",
+                "dataset_id": "privacy-boundary",
+                "canonical_ref": "skeleton.notes:private_boundary_note",
+            },
+        ),
+        ("memory.private_list_exact", {"project_id": "skeleton", "dataset_id": "privacy-boundary"}),
+        (
+            "memory.private_search_semantic",
+            {"project_id": "skeleton", "dataset_id": "privacy-boundary", "query": "Synthetic Private"},
+        ),
+        (
+            "graph.private_query",
+            {"project_id": "skeleton", "dataset_id": "privacy-boundary", "query": "Synthetic Private"},
+        ),
+        (
+            "memory.private_projection_status",
+            {
+                "project_id": "skeleton",
+                "dataset_id": "privacy-boundary",
+                "canonical_ref": str(receipt["canonical_ref"]),
+                "canonical_revision": receipt["canonical_revision"],
+            },
+        ),
+    ]:
+        with pytest.raises(MemoryGatewayPolicyError) as excinfo:
+            public_gateway.execute(request("skeleton", suffix, payload))
+        assert excinfo.value.reason_code == "PRIVATE_MEMORY_PUBLIC_MODE_FORBIDDEN"
+        serialized_error = str(excinfo.value).lower()
+        assert "synthetic private book" not in serialized_error
+        assert "synthetic private media" not in serialized_error
+        assert "synthetic private customer" not in serialized_error
+
+
 def test_private_memory_gateway_rejects_mismatched_idempotency_reuse(tmp_path: Path) -> None:
     stack = PrivateMemoryStack(tmp_path)
     stack.init(import_manifest=False)
