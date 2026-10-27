@@ -4,7 +4,7 @@ import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
 
-data class CatalogItem(val id:String,val title:String,val detail:String)
+data class CatalogItem(val id:String,val title:String,val detail:String,val art:String="")
 object LauncherData {
     const val HISTORY="/api/video/history"
     const val CHANNELS="/api/tv/channels"
@@ -14,7 +14,7 @@ object LauncherData {
             val v=a.optJSONObject(n)?:return@mapNotNull null
             val id=v.optString("history_id");val name=v.optString("title")
             if(v.optBoolean("hidden")||id.isBlank()||name.isBlank())null
-            else CatalogItem(id,name,v.optString("runtime_label"))
+            else CatalogItem(id,name,v.optString("runtime_label"),v.optString("poster"))
         }.take(150)
     }
     fun channels(json:String):List<CatalogItem>{
@@ -24,7 +24,7 @@ object LauncherData {
             val id=v.optString("channel_id")
             val name=v.optString("display_name").ifBlank{v.optString("name")}
             if(id.isBlank()||name.isBlank())null
-            else CatalogItem(id,name,v.optString("programme_title"))
+            else CatalogItem(id,name,v.optString("programme_title"),v.optString("picon"))
         }.take(300)
     }
     fun read(path:String):String{
