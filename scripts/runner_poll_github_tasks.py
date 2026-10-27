@@ -1172,6 +1172,7 @@ _MAINTENANCE_PUBLIC_STATUS_KEYS = frozenset(
         "push_completed",
         "verified_base_branch",
         "verified_base_sha",
+        "existing_pr_base_sha",
         "validation_base_ref",
         "validation_base_sha",
         "validation_allowed_file",
@@ -17766,9 +17767,63 @@ def _registered_worktree_overlay_pr_state(
             ),
         ],
         cwd=worktree_path,
+        timeout=30,
     )
+    if code != 0 and 'Unknown JSON field: "baseRefOid"' in output:
+        # gh 2.45 lacks this pr-view field; GraphQL supports it. Read identity
+        # twice so the separately obtained base cannot hide a concurrent change.
+        fields = ("number,state,isDraft,baseRefName,headRefName,headRefOid,"
+                  "headRepository,headRepositoryOwner,url,files")
+        command = ["gh", "pr", "view", str(request.pr_number), "--repo",
+                   request.repository, "--json", fields]
+        code, output = run_command(command, cwd=worktree_path, timeout=30)
+        if code or len(output) > 1_048_576:
+            raise RuntimeError("gh compatible PR read failed")
+        identity = json.loads(output)
+        owner, name = request.repository.split("/", 1)
+        query = ("query($owner:String!,$name:String!,$number:Int!){"
+                 "repository(owner:$owner,name:$name){pullRequest(number:$number){"
+                 "number url state isDraft baseRefName baseRefOid headRefName headRefOid"
+                 " headRepository{nameWithOwner} headRepositoryOwner{login}}}}")
+        code, output = run_command(
+            ["gh", "api", "graphql", "-f", "query=" + query,
+             "-f", "owner=" + owner, "-f", "name=" + name,
+             "-F", "number=" + str(request.pr_number)],
+            cwd=worktree_path, timeout=30)
+        if code or len(output) > 65_536:
+            raise RuntimeError("gh GraphQL PR read failed")
+        envelope = json.loads(output)
+        if not isinstance(envelope, dict) or envelope.get("errors"):
+            raise RuntimeError("gh GraphQL PR errors")
+        graphql = envelope.get("data")
+        for key in ("repository", "pullRequest"):
+            graphql = graphql.get(key) if isinstance(graphql, dict) else None
+        if not isinstance(identity, dict) or not isinstance(graphql, dict):
+            raise RuntimeError("gh PR identity missing")
+        for field in ("number", "url", "state", "isDraft", "baseRefName",
+                      "headRefName", "headRefOid"):
+            if field not in graphql or graphql[field] != identity.get(field):
+                raise RuntimeError("gh PR identity changed")
+        graphql_owner = graphql.get("headRepositoryOwner")
+        identity_owner = identity.get("headRepositoryOwner")
+        if (not isinstance(graphql_owner, dict) or not isinstance(identity_owner, dict)
+                or graphql_owner.get("login") != owner
+                or identity_owner.get("login") != owner):
+            raise RuntimeError("gh PR owner mismatch")
+        if (_head_repository_name_with_owner(graphql) != request.repository
+                or _head_repository_name_with_owner(identity) != request.repository):
+            raise RuntimeError("gh PR repository mismatch")
+        base = graphql.get("baseRefOid")
+        if not isinstance(base, str) or _HEAD_SHA_RE.fullmatch(base) is None:
+            raise RuntimeError("gh PR base missing")
+        code, output = run_command(command, cwd=worktree_path, timeout=30)
+        if code or len(output) > 1_048_576 or json.loads(output) != identity:
+            raise RuntimeError("gh PR identity changed")
+        return {**identity, "baseRefOid": base}
     if code != 0:
         raise RuntimeError("gh pr view failed")
+    if len(output) > 1_048_576:
+        raise RuntimeError("gh PR response too large")
     parsed = json.loads(output or "{}")
     if not isinstance(parsed, dict):
         raise RuntimeError("gh pr view returned non-object JSON")
@@ -19726,14 +19781,24 @@ def publish_registered_target_fast_forward(body: str) -> str:
         before = _registered_worktree_overlay_pr_state(binding, source)
         if not _registered_worktree_overlay_pr_state_shape_valid(before, strict_values=True):
             return blocked("pr_metadata_missing")
+        # The old PR base and the newer recovery/main SHA are separate bindings.
+        # Require an unambiguous common ancestor, rather than trusting metadata
+        # or treating the recovery snapshot as the old PR's base.
+        code, output = run_command(
+            ["git", "merge-base", "--all", old, request.base_sha], cwd=source)
+        merge_bases = output.split()
+        pr_base = str(before["baseRefOid"]).lower()
+        if code or merge_bases != [pr_base]:
+            return blocked("existing_pr_merge_base_mismatch")
         reason, _, _, _ = _issue_worktree_publish_target_existing_pr_binding_reason(
-            body, request, before, verified_base_sha=request.base_sha)
+            body, request, before, verified_base_sha=pr_base)
         if reason:
             return blocked(reason)
         if before.get("url") != "https://github.com/alanua/Lavalamp/pull/14":
             return blocked("pr_url_mismatch")
         lines.extend((f"target_repository={request.repository}", "pull_request=14",
-                      f"verified_base_sha={request.base_sha}", f"target_head_sha={old}",
+                      f"verified_base_sha={request.base_sha}", f"existing_pr_base_sha={pr_base}",
+                      f"target_head_sha={old}",
                       f"target_branch={branch}", "validated_publish_files_count=17"))
         specs = tuple(RegisteredWorktreeOverlaySourceSpec(name, merged_blobs.get(name))
                       for name in packet.allowed_files)
@@ -19747,7 +19812,7 @@ def publish_registered_target_fast_forward(body: str) -> str:
         if code:
             return blocked("candidate_ancestry_mismatch")
         code, delta = _git_changed_files_between(old, candidate, source)
-        code2, coverage = _git_changed_files_between(request.base_sha, candidate, source)
+        code2, coverage = _git_changed_files_between(pr_base, candidate, source)
         prior = _existing_pr_publish_file_paths(before)
         if code or code2 or not delta <= request.allowed_files or not prior <= coverage:
             return blocked("candidate_coverage_mismatch")
@@ -19838,7 +19903,7 @@ def publish_registered_target_fast_forward(body: str) -> str:
         lines.append("push_completed=true")
         lines.extend((f"pushed_head_sha={candidate}", f"parent_sha={old}", "publication=verified"))
         return _maintenance_report("DONE", task_id, lines, "met")
-    except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired, json.JSONDecodeError):
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError, subprocess.TimeoutExpired, json.JSONDecodeError):
         return blocked("source_or_pr_lookup_unavailable")
 
 
