@@ -1,4 +1,5 @@
 package com.skeleton.tvlauncher
+import android.graphics.BitmapFactory
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
@@ -7,9 +8,10 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -18,22 +20,29 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.net.HttpURLConnection
+import java.net.URL
 private val Bg=Color(0xFF101722)
 private val Panel=Color(0xFF1E2A39)
 private val TextColor=Color(0xFFF1F3F7)
 private val MutedColor=Color(0xFFBCC7D6)
 private val Highlight=Color(0xFFEDA842)
 private enum class Page{HOME,VIDEO,TV}
-class MainActivity:ComponentActivity(){
+open class MainActivity:ComponentActivity(){
+  protected open val initialMode:String="home"
   override fun onCreate(savedInstanceState:Bundle?){
     super.onCreate(savedInstanceState)
-    setContent{MaterialTheme{LauncherScreen { openYoutube() }}}
+    setContent{MaterialTheme{LauncherScreen(initialMode,{openYoutube()},{finish()})}}
   }
   private fun openYoutube(){
     for(pkg in listOf("com.google.android.youtube.tv","com.google.android.youtube")){
@@ -43,14 +52,21 @@ class MainActivity:ComponentActivity(){
     runCatching{startActivity(Intent(Intent.ACTION_VIEW,Uri.parse("https://www.youtube.com/tv")))}
   }
 }
-@Composable private fun LauncherScreen(openYoutube:()->Unit){
-  var page by remember{mutableStateOf(Page.HOME)}
+class VideoEntry : MainActivity(){ protected override val initialMode:String="video" }
+class TvEntry : MainActivity(){ protected override val initialMode:String="tv" }
+
+@Composable private fun LauncherScreen(initialMode:String,openYoutube:()->Unit,onExit:()->Unit){
+  var page by remember(initialMode){mutableStateOf(when(initialMode){
+    "video"->Page.VIDEO
+    "tv"->Page.TV
+    else->Page.HOME
+  })}
   var entries by remember{mutableStateOf<List<CatalogItem>>(emptyList())}
   var selected by remember{mutableStateOf<CatalogItem?>(null)}
   var loading by remember{mutableStateOf(false)}
   var error by remember{mutableStateOf("")}
   val focus=remember(page){FocusRequester()}
-  BackHandler(page!=Page.HOME){page=Page.HOME}
+  BackHandler(page!=Page.HOME){if(initialMode=="home")page=Page.HOME else onExit()}
   LaunchedEffect(page){
     selected=null;entries=emptyList();error=""
     val route=when(page){Page.VIDEO->LauncherData.HISTORY;Page.TV->LauncherData.CHANNELS;else->null}
@@ -80,7 +96,7 @@ class MainActivity:ComponentActivity(){
       }
     }else{
       Row(verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(18.dp)){
-        Tile("← Назад","Головна",Modifier.width(170.dp).focusRequester(focus)){page=Page.HOME}
+        Tile("← Назад","Головна",Modifier.width(170.dp).focusRequester(focus)){if(initialMode=="home")page=Page.HOME else onExit()}
         Text(if(page==Page.VIDEO)"Відео" else "ТВ",fontSize=27.sp,color=TextColor)
         Spacer(Modifier.weight(1f))
         Text(entries.size.toString()+" записів",fontSize=14.sp,color=MutedColor)
@@ -91,17 +107,22 @@ class MainActivity:ComponentActivity(){
         LazyColumn(Modifier.weight(1f),verticalArrangement=Arrangement.spacedBy(8.dp)){
           items(entries,key={it.id}){item->
             var focused by remember{mutableStateOf(false)}
-            Column(Modifier.fillMaxWidth().onFocusChanged{focused=it.isFocused}
+            Row(Modifier.fillMaxWidth().onFocusChanged{focused=it.isFocused}
               .border(if(focused)3.dp else 1.dp,if(focused)Highlight else Panel,RoundedCornerShape(12.dp))
               .background(if(selected?.id==item.id)Color(0xFF354558) else Panel,RoundedCornerShape(12.dp))
-              .clickable{selected=item}.focusable().padding(horizontal=14.dp,vertical=12.dp)){
-              Text(item.title,color=TextColor,fontSize=18.sp,maxLines=2,overflow=TextOverflow.Ellipsis)
-              if(item.detail.isNotEmpty())Text(item.detail,color=MutedColor,fontSize=13.sp)
+              .clickable{selected=item}.focusable().padding(horizontal=12.dp,vertical=9.dp),
+              verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(14.dp)){
+              Artwork(item,Modifier.size(width=88.dp,height=105.dp))
+              Column(Modifier.weight(1f),verticalArrangement=Arrangement.spacedBy(5.dp)){
+                Text(item.title,color=TextColor,fontSize=19.sp,maxLines=2,overflow=TextOverflow.Ellipsis)
+                if(item.detail.isNotEmpty())Text(item.detail,color=MutedColor,fontSize=13.sp,maxLines=2)
+              }
             }
           }
         }
         Column(Modifier.width(342.dp).background(Panel,RoundedCornerShape(14.dp)).padding(20.dp),
           verticalArrangement=Arrangement.spacedBy(12.dp)){
+          if(selected!=null)Artwork(selected!!,Modifier.fillMaxWidth().height(206.dp))
           Text(selected?.title?:"Оберіть позицію",color=TextColor,fontSize=22.sp,fontWeight=FontWeight.Bold)
           if(selected?.detail?.isNotEmpty()==true)Text(selected!!.detail,color=MutedColor)
           Text(if(page==Page.VIDEO)"Історія зі спільної бази Skeleton. Пряме відтворення на TV ще не активоване."
@@ -114,6 +135,37 @@ class MainActivity:ComponentActivity(){
     Spacer(Modifier.weight(1f))
     Text("D-pad: стрілки, OK, Back. Home APK: після прив'язки Android TV до Skeleton.",
       color=MutedColor,fontSize=13.sp)
+  }
+}
+private object ArtCache {
+  private val bitmaps=object:LinkedHashMap<String,ImageBitmap>(32,0.75f,true){
+    override fun removeEldestEntry(eldest:MutableMap.MutableEntry<String,ImageBitmap>?):Boolean=size>24
+  }
+  @Synchronized fun get(path:String):ImageBitmap?=bitmaps[path]
+  @Synchronized fun put(path:String,b:ImageBitmap){bitmaps[path]=b}
+}
+@Composable private fun Artwork(item:CatalogItem,modifier:Modifier=Modifier){
+  val source=item.art
+  val image by produceState<ImageBitmap?>(initialValue=null,key1=item.id,key2=source){
+    value=ArtCache.get(source)
+    if(value==null&&(source.startsWith("/posters/")||source.startsWith("/static/iptv-picons/"))){
+      value=withContext(Dispatchers.IO){
+        runCatching{
+          val conn=URL(BuildConfig.HOME_EDGE+source).openConnection() as HttpURLConnection
+          try{
+            conn.connectTimeout=2400;conn.readTimeout=2700
+            val options=BitmapFactory.Options().apply{inSampleSize=2}
+            val bmp=conn.inputStream.use{BitmapFactory.decodeStream(it,null,options)}
+            bmp?.asImageBitmap()?.also{ArtCache.put(source,it)}
+          }finally{conn.disconnect()}
+        }.getOrNull()
+      }
+    }
+  }
+  if(image!=null)Image(bitmap=image!!,contentDescription=item.title,
+    modifier=modifier.clip(RoundedCornerShape(10.dp)),contentScale=ContentScale.Crop)
+  else Box(modifier.clip(RoundedCornerShape(10.dp)).background(Color(0xFF3B4C62)),contentAlignment=Alignment.Center){
+    Text(if(item.title.isNotBlank())item.title.take(1) else "●",fontSize=29.sp,color=MutedColor)
   }
 }
 @Composable private fun Tile(title:String,subtitle:String,modifier:Modifier=Modifier,onClick:()->Unit){
