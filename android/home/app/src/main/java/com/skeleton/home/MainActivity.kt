@@ -2120,6 +2120,24 @@ private fun sourceValues(a:List<JSONObject>,key:String,season:String?=null,episo
         .mapNotNull { val v=if(key=="voice")sourceVoice(it) else it.optString(key,"");v.takeIf(String::isNotBlank) }.distinct().sortedWith(compareBy<String>{Regex("\\d+").find(it)?.value?.toIntOrNull()?:999999}.thenBy{it})
 }
 
+/** Display the same episode_options supplied by /api/jobs that the web UI uses.
+ * A listed release is NOT automatically playable on Home Edge. */
+internal fun homeVisibleEpisodeOptions(catalog:JSONObject,season:String,localEpisodes:List<String>):List<String>{
+    val canonical=catalog.optJSONArray("episode_options")?.objects().orEmpty()
+    if(canonical.isEmpty())return localEpisodes
+    return canonical.filter{it.optString("season")==season && it.optString("episode").isNotBlank()}
+        .map{it.optString("episode")}.distinct().sortedWith(compareBy<String>{
+            Regex("""[0-9]+""").find(it)?.value?.toIntOrNull()?:999999
+        }.thenBy{it})
+}
+internal fun homeExternalEpisodeUrl(catalog:JSONObject,season:String,episode:String,localPlayable:Boolean):String?{
+    if(localPlayable)return null
+    return catalog.optJSONArray("episode_options")?.objects().orEmpty().firstOrNull{
+        it.optString("season")==season && it.optString("episode")==episode &&
+        it.optString("playback")=="official_external_only" &&
+        it.optString("external_url").matches(Regex("""https://www[.]ivi[.]tv/watch/reportazh-2035/[0-9]+"""))
+    }?.optString("external_url")?.takeIf{it.isNotBlank()}
+}
 private fun trackDisplayLabel(t:JSONObject,index:Int):String{val bits=listOf(t.optString("title"),t.optString("lang"),t.optString("audio-channels",t.optString("demux-channels")),t.optString("codec")).filter{it.isNotBlank()};return if(bits.isNotEmpty())bits.joinToString(" · ") else "Доріжка ${index+1}"}
 @Composable private fun SlowOverflowOverview(value:String,modifier:Modifier=Modifier){
     val scroll=rememberScrollState()
@@ -2333,7 +2351,7 @@ private fun VideoScreen(api:HomeApi,active:Boolean,selectionRevision:Int,endpoin
     val seasons=(loadedSeasons+tmdbSeasons).distinct().sortedBy{it.toIntOrNull()?:9999}
     if(isSeries&&season.isBlank()&&loadedSeasons.isNotEmpty())season=loadedSeasons.first()
     val seasonLoaded=season.isNotBlank()&&season in loadedSeasons
-    val episodes=if(isSeries)sourceValues(sources,"episode",season,excludeTrailers=true) else emptyList()
+    val episodes=if(isSeries)homeVisibleEpisodeOptions(cat,season,sourceValues(sources,"episode",season,excludeTrailers=true)) else emptyList()
     if(isSeries&&episode !in episodes)episode=episodes.firstOrNull().orEmpty()
     val qualities=if(isSeries)sourceValues(sources,"quality",season,episode,excludeTrailers=true) else sourceValues(sources,"quality")
     if(quality !in qualities)quality=qualities.firstOrNull().orEmpty()
@@ -2345,7 +2363,8 @@ private fun VideoScreen(api:HomeApi,active:Boolean,selectionRevision:Int,endpoin
         sources.firstOrNull{it.optString("season")==season&&it.optString("episode")==episode&&it.optString("quality")==quality&&sourceVoice(it)==voice}
     else
         sources.firstOrNull{it.optString("quality")==quality&&sourceVoice(it)==voice}
-    val selectedOrTrailer=selectedCandidate ?: sources.firstOrNull{isTrailerSource(it)&&it.optString("quality")==quality&&sourceVoice(it)==voice}
+    val officialEpisodeUrl=if(isSeries)homeExternalEpisodeUrl(cat,season,episode,selectedCandidate!=null) else null
+    val selectedOrTrailer=if(officialEpisodeUrl!=null)null else selectedCandidate ?: sources.firstOrNull{isTrailerSource(it)&&it.optString("quality")==quality&&sourceVoice(it)==voice}
     val selectedIsTrailer=isTrailerSource(selectedOrTrailer)
     val selectedDuration=mediaDurationLabel(selectedOrTrailer?.optDouble("duration",0.0)?:0.0).ifBlank{metadataRuntimeLabel(cat.optJSONObject("details")?:JSONObject())}
     val activeSame=selectedOrTrailer!=null&&currentPlayer.optBoolean("running")&&currentPlayer.optString("job_id")==jobId&&currentPlayer.optString("source_id")==selectedOrTrailer.optString("source_id")
@@ -2413,6 +2432,19 @@ private fun VideoScreen(api:HomeApi,active:Boolean,selectionRevision:Int,endpoin
                     if(isSeries){
                         SeasonPickerField(season,seasonItems,loadedSeasons){seasonOpen=true}
                         SelectorField(ui("Серія"),"play",if(selectedIsTrailer)"Трейлер" else episode,if(selectedIsTrailer)listOf("Трейлер") else episodes,showCount=!selectedIsTrailer,trailing=if(selectedIsTrailer)"" else selectedDuration){if(!selectedIsTrailer)episode=it}
+                        if(officialEpisodeUrl!=null){
+                            Column(Modifier.fillMaxWidth().padding(top=7.dp,bottom=9.dp).clip(RoundedCornerShape(10.dp)).background(Input).padding(12.dp)){
+                                Text("Серія вже вийшла. Прямий потік у Home Edge поки не перевірено.",fontSize=12.sp,lineHeight=16.sp,color=Muted)
+                                Button(onClick={
+                                    runCatching{
+                                        context.startActivity(Intent(Intent.ACTION_VIEW,Uri.parse(officialEpisodeUrl)))
+                                    }.onFailure{message="Не вдалося відкрити офіційну сторінку серії"}
+                                },modifier=Modifier.fillMaxWidth().padding(top=8.dp)){
+                                    Text("Відкрити "+episode+" на Іві")
+                                }
+                            }
+                        }
+
                     }
                     SelectorField(ui("Якість"),"quality-high",quality,qualities){quality=it}
                     SelectorField(if(selectedIsTrailer)"Джерело" else "Озвучка","account-voice",voice,voices){voice=it}
@@ -2421,7 +2453,7 @@ private fun VideoScreen(api:HomeApi,active:Boolean,selectionRevision:Int,endpoin
                     Spacer(Modifier.height(14.dp))
                     Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.Bottom,horizontalArrangement=Arrangement.SpaceEvenly){
                         Column(Modifier.width(56.dp),horizontalAlignment=Alignment.CenterHorizontally){
-                            RoundAction("play",true){scope.launch{
+                            RoundAction("play",selectedOrTrailer!=null){scope.launch{
                             val src=selectedOrTrailer;if(src==null){message="Оберіть варіант";return@launch}
                             if(activeSame){
                                 if(audioTracks.size>1&&audioSel.isNotBlank()){val i=audioLabels.indexOf(audioSel);audioTracks.getOrNull(i)?.let{api.post(endpointPath(endpoint.endpointId,"/player/track/audio"),endpointMutation(endpoint.endpointId,"id" to it.opt("id")))}}
