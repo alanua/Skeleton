@@ -1,0 +1,157 @@
+diff --git a/launcher/app/build.gradle b/launcher/app/build.gradle
+index 3ceec7b..b69dc3f 100644
+--- a/launcher/app/build.gradle
++++ b/launcher/app/build.gradle
+@@ -8,7 +8,7 @@ android {
+ 
+     defaultConfig {
+         // Opt-in identity for firmware with a package-name HOME allowlist; see docs/devices/xiaomi-mitv-aetp0-dofus.md.
+-        applicationId providers.gradleProperty('launcherApplicationId').getOrElse('com.gathin.tvhome')
++        applicationId providers.gradleProperty('launcherApplicationId').getOrElse('com.skeleton.tv.cleanhome')
+         minSdk 26
+         targetSdk 34
+         versionCode 9
+diff --git a/launcher/app/src/main/AndroidManifest.xml b/launcher/app/src/main/AndroidManifest.xml
+index 701b5fe..571c1a8 100644
+--- a/launcher/app/src/main/AndroidManifest.xml
++++ b/launcher/app/src/main/AndroidManifest.xml
+@@ -64,6 +64,7 @@
+              Fire TV: the real settings menu lives in the stock launcher (see settings_fallback_components). -->
+         <package android:name="com.xiaomi.mitv.settings" />
+         <package android:name="com.tcl.settings" />
++        <package android:name="com.skeleton.tvlauncher" />
+         <package android:name="com.amazon.tv.launcher" />
+         <!-- Coocaa OS sources for the Inputs menu (coocaa_sources); see CoocaaSources. -->
+         <provider android:authorities="com.skyworth.tv.provider" />
+diff --git a/launcher/app/src/main/java/com/gathin/tvhome/AppAdapter.java b/launcher/app/src/main/java/com/gathin/tvhome/AppAdapter.java
+index 41825a1..da2053a 100644
+--- a/launcher/app/src/main/java/com/gathin/tvhome/AppAdapter.java
++++ b/launcher/app/src/main/java/com/gathin/tvhome/AppAdapter.java
+@@ -69,7 +69,7 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
+         final int kind;
+         final String label;
+         final ComponentName component;
+-        final String pkg;
++        String pkg;
+         final Drawable banner;
+         final Drawable icon;
+         /** Text under the tile when it is focused in the grid: the label, plus the caption for a card. */
+@@ -83,6 +83,12 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
+             this(APP, label, component, banner, icon, null, 0);
+         }
+ 
++        // Synthetic dock entry: shares one installed Skeleton TV application but opens a distinct mode.
++        Entry(String label, ComponentName component, Drawable banner, Drawable icon, String virtualPackage) {
++            this(label, component, banner, icon);
++            this.pkg = virtualPackage;
++        }
++
+         Entry(int kind, String label, ComponentName component, Drawable banner, Drawable icon, String caption, int accent) {
+             this.kind = kind;
+             this.label = label;
+@@ -309,6 +315,16 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
+                 fresh.add(new Entry(label, component, banner, icon));
+             }
+         }
++        // Add only when the separate Skeleton video app is installed. Never substitute Home Edge TV.
++        if (tvPackages.contains("com.skeleton.tvlauncher")) {
++            ComponentName skeleton = new ComponentName("com.skeleton.tvlauncher",
++                    "com.skeleton.tvlauncher.MainActivity");
++            fresh.removeIf(e -> "com.skeleton.tvlauncher".equals(e.pkg));
++            fresh.add(new Entry("Відео", skeleton,
++                    ctx.getDrawable(R.drawable.banner_skeleton_video), null, "com.skeleton.tvlauncher.video"));
++            fresh.add(new Entry("ТВ", skeleton,
++                    ctx.getDrawable(R.drawable.banner_skeleton_tv), null, "com.skeleton.tvlauncher.tv"));
++        }
+         Collections.sort(fresh, (a, b) -> {
+             // The owner's own order first; tiles it does not know (new installs) follow by the rule below.
+             int saved = Order.compare(savedRanks, a.component.flattenToShortString(), b.component.flattenToShortString());
+@@ -534,6 +550,13 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
+         // TV apps launch with the same leanback intent as from the stock launcher or the remote, so an app
+         // already running resumes instead of restarting; only phone apps added from the library use plain MAIN.
+         if (leanbackPackages.contains(e.pkg)) i.addCategory(Intent.CATEGORY_LEANBACK_LAUNCHER);
++        if ("com.skeleton.tvlauncher.video".equals(e.pkg)) {
++            i.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
++            i.putExtra("skeleton_tv_mode", "video");
++        } else if ("com.skeleton.tvlauncher.tv".equals(e.pkg)) {
++            i.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
++            i.putExtra("skeleton_tv_mode", "tv");
++        }
+         String action = launchActions.get(e.pkg);
+         if (action != null) {
+             // NEW_TASK only: with RESET_TASK_IF_NEEDED, Android just brings a running task of the app to the front
+diff --git a/launcher/app/src/main/res/values/config.xml b/launcher/app/src/main/res/values/config.xml
+index c963338..38dbaeb 100644
+--- a/launcher/app/src/main/res/values/config.xml
++++ b/launcher/app/src/main/res/values/config.xml
+@@ -17,15 +17,14 @@
+ 
+     <!-- Apps pinned to the dock row at the bottom, in this order. Missing apps are skipped. -->
+     <string-array name="dock_apps">
+-        <item>com.netflix.ninja</item>
+-        <item>com.amazon.amazonvideo.livingroom</item>
+         <item>com.google.android.youtube.tv</item>
+-        <item>in.startv.hotstar</item>
++        <item>com.skeleton.tvlauncher.video</item>
++        <item>com.skeleton.tvlauncher.tv</item>
+     </string-array>
+     <!-- With fewer dock_apps than columns (or a dock app that is not installed), the free dock slots take
+          the first grid apps, so the dock never shows a gap. false leaves them empty (#162); a theme can
+          set "fill_dock": false. -->
+-    <bool name="fill_dock">true</bool>
++    <bool name="fill_dock">false</bool>
+ 
+     <!-- Apps never shown as tiles (e.g. the Live TV app, which the Inputs menu already covers). -->
+     <string-array name="hidden_apps">
+@@ -243,7 +242,7 @@
+     <!-- A name after the greeting: "Mr. Trịnh" shows GOOD MORNING, MR. TRỊNH. Empty: the greeting alone. -->
+     <string name="greeting_name" translatable="false"></string>
+     <!-- The greeting above the clock ("Good evening"). false hides it. Can also be set with "show_greeting" in a theme. -->
+-    <bool name="show_greeting">true</bool>
++    <bool name="show_greeting">false</bool>
+     <!-- The date and the line between the clock and the date in the clock's full white instead of dimmed. Can also be
+          set with "header_white" in a theme. -->
+     <bool name="header_white">false</bool>
+@@ -272,7 +271,7 @@
+     <!-- The dock band as light frosted glass, like the Inputs, Wi-Fi and Settings pills, so a sky or wallpaper shows
+          through it. false (the default) keeps the solid near-black band, or the cinematic shelf's dark glass. Can
+          also be set with "dock_glass": true in a theme's config.json. -->
+-    <bool name="dock_glass">false</bool>
++    <bool name="dock_glass">true</bool>
+     <!-- Draw the dock band and its edge. false leaves the tiles floating on the wallpaper (config.xml dock_band). -->
+     <bool name="dock_band">true</bool>
+     <!-- Every app in one row: the dock apps first, the rest after them, and the row scrolls sideways when focus
+@@ -307,21 +306,21 @@
+     <!-- The App library pill after the last Home row. false hides it while library_button is on, so the top-bar
+          button stays the way in, and Down from the last row stays put as with app_library off. Can also be set
+          with "show_library_pill": false in a theme's config.json. -->
+-    <bool name="show_library_pill">true</bool>
++    <bool name="show_library_pill">false</bool>
+     <!-- With icon_only_buttons: keep the network name on the Wi-Fi pill up to this width in dp, cut with an ellipsis.
+          0 leaves the Wi-Fi pill as an icon. -->
+     <integer name="wifi_label_width">0</integer>
+ 
+     <!-- The Wi-Fi/Ethernet pill in the top bar. false hides it (on Android 14 with Location off it can
+          only say "Wi-Fi", not the network name). Can also be set with "show_network_pill" in a theme. -->
+-    <bool name="show_network_pill">true</bool>
++    <bool name="show_network_pill">false</bool>
+     <!-- Apps shown as round buttons with their own logo in the top bar, left of the network pill, in this order.
+          They leave the grid. Missing apps are skipped. Can also be set with "top_bar_apps" in a theme. -->
+     <string-array name="top_bar_apps" translatable="false">
+     </string-array>
+     <!-- The Inputs pill in the top bar, shown when the TV has inputs to list. false hides it for good; what the
+          remote's Input button does is unchanged. Can also be set with "show_inputs_pill" in a theme. -->
+-    <bool name="show_inputs_pill">true</bool>
++    <bool name="show_inputs_pill">false</bool>
+     <!-- The Inputs list shows only HDMI ports and CEC devices that report connected. Empty ports, devices asleep in
+          standby (some TVs, TCL among them, report an empty HDMI port as connected-standby, the same state a
+          sleeping device has) and the AV jacks fold behind a "More inputs" row that expands the rest. An HDMI row
+@@ -360,7 +359,7 @@
+ 
+     <!-- Tiles per row in the grid; the dock always has this many slots. Tiles are 180dp wide at 4 columns and
+          shrink to fit from 5 up (about 144dp at 5, 117dp at 6 on a 1080p TV). -->
+-    <integer name="columns">4</integer>
++    <integer name="columns">3</integer>
+ 
+     <!-- Basic motion is on; advanced effects are opt-in in the launcher's own Settings screen. -->
+     <bool name="animations">true</bool>
