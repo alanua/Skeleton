@@ -20,6 +20,22 @@ cd "$WORKDIR/launcher"
 cp "$HERE/overrides/gradle.properties" ./gradle.properties
 cp "$HERE/overrides/app/src/main/res/values/config.xml" ./app/src/main/res/values/config.xml
 
+# Brand the application, not the original accessibility-service label.
+python3 - <<'PY'
+from pathlib import Path
+p=Path('app/src/main/AndroidManifest.xml')
+s=p.read_text()
+old='<application\n        android:label="@string/app_name"'
+assert s.count(old)==1, "Upstream manifest changed; review before build"
+p.write_text(s.replace(old,'<application\n        android:label="Skeleton TV"',1))
+PY
+
+# Comply with Clean Your TV's MIT license and Outfit's SIL OFL.
+mkdir -p app/src/main/assets
+cat ../LICENSE > app/src/main/assets/THIRD_PARTY_NOTICES.txt
+printf '\n--- Outfit font license ---\n' >> app/src/main/assets/THIRD_PARTY_NOTICES.txt
+cat FONT-LICENSE-OFL.txt >> app/src/main/assets/THIRD_PARTY_NOTICES.txt
+
 : "${ANDROID_HOME:?Install Android SDK and set ANDROID_HOME}"
 : "${JAVA_HOME:?Install JDK 17 and set JAVA_HOME}"
 printf 'sdk.dir=%s\n' "$ANDROID_HOME" > local.properties
