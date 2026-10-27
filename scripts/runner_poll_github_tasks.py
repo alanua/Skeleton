@@ -17767,7 +17767,6 @@ def _registered_worktree_overlay_pr_state(
             ),
         ],
         cwd=worktree_path,
-        timeout=30,
     )
     if code != 0 and 'Unknown JSON field: "baseRefOid"' in output:
         # gh 2.45 lacks this pr-view field; GraphQL supports it. Read identity
@@ -17804,15 +17803,27 @@ def _registered_worktree_overlay_pr_state(
                       "headRefName", "headRefOid"):
             if field not in graphql or graphql[field] != identity.get(field):
                 raise RuntimeError("gh PR identity changed")
-        graphql_owner = graphql.get("headRepositoryOwner")
-        identity_owner = identity.get("headRepositoryOwner")
-        if (not isinstance(graphql_owner, dict) or not isinstance(identity_owner, dict)
-                or graphql_owner.get("login") != owner
-                or identity_owner.get("login") != owner):
-            raise RuntimeError("gh PR owner mismatch")
-        if (_head_repository_name_with_owner(graphql) != request.repository
-                or _head_repository_name_with_owner(identity) != request.repository):
-            raise RuntimeError("gh PR repository mismatch")
+        # gh pr view exposes {name, id} plus a separate owner object;
+        # GraphQL exposes nameWithOwner. Compare typed names, never node IDs
+        # or a repository name inferred from the runner's global REPO.
+        for state in (identity, graphql):
+            repository = state.get("headRepository")
+            repository_owner = state.get("headRepositoryOwner")
+            if (not isinstance(repository_owner, dict)
+                    or not isinstance(repository_owner.get("login"), str)
+                    or repository_owner["login"] != owner):
+                raise RuntimeError("gh PR owner mismatch")
+            if not isinstance(repository, dict):
+                raise RuntimeError("gh PR repository mismatch")
+            if "nameWithOwner" in repository:
+                repository_name = repository["nameWithOwner"]
+            else:
+                repo_name = repository.get("name")
+                repository_name = (f"{repository_owner['login']}/{repo_name}"
+                                   if isinstance(repo_name, str) else None)
+            if (not isinstance(repository_name, str)
+                    or repository_name != request.repository):
+                raise RuntimeError("gh PR repository mismatch")
         base = graphql.get("baseRefOid")
         if not isinstance(base, str) or _HEAD_SHA_RE.fullmatch(base) is None:
             raise RuntimeError("gh PR base missing")

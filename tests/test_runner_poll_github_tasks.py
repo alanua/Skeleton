@@ -30624,19 +30624,32 @@ def test_publish_recovery_ff_post_push_drift_no_retry(tmp_path, monkeypatch, fau
 
 
 @pytest.mark.parametrize("fault", [None, "head", "base", "errors", "null", "large",
-                                  "refresh", "auth", "graphql_failure", "owner"])
+                                  "refresh", "auth", "graphql_failure", "owner",
+                                  "repository", "repository_null", "repository_name_type",
+                                  "owner_type", "graphql_repository"])
 def test_registered_target_gh245_graphql_base_ref_oid(tmp_path, monkeypatch, fault):
     request = runner.IssueWorktreeExistingPrPublishRequest(
         "synthetic/Example", 13, "runner/test", 14, "a" * 40,
         "runner/test", frozenset({"tests/example.test.mjs"}))
     identity = dict(number=14, state="OPEN", isDraft=True, baseRefName="main",
                     headRefName="runner/test", headRefOid="a" * 40,
-                    headRepository={"nameWithOwner": "synthetic/Example"},
+                    headRepository={"name": "Example", "id": "synthetic-repo-id"},
                     headRepositoryOwner={"id": "synthetic-id", "login": "synthetic"},
                     url="https://github.com/synthetic/Example/pull/14",
                     files=[{"path": "tests/example.test.mjs"}])
     graphql = {k: v for k, v in identity.items() if k != "files"}
     graphql["headRepositoryOwner"] = {"login": "other" if fault == "owner" else "synthetic"}
+    graphql["headRepository"] = {"nameWithOwner": "synthetic/Example"}
+    if fault == "repository":
+        identity["headRepository"]["name"] = "Other"
+    if fault == "repository_null":
+        identity["headRepository"] = None
+    if fault == "repository_name_type":
+        identity["headRepository"]["name"] = 42
+    if fault == "owner_type":
+        identity["headRepositoryOwner"]["login"] = 42
+    if fault == "graphql_repository":
+        graphql["headRepository"] = {"nameWithOwner": "synthetic/Other"}
     graphql["baseRefOid"] = "9df2" + "b" * 36
     if fault == "head":
         graphql["headRefOid"] = "f" * 40
@@ -30651,7 +30664,7 @@ def test_registered_target_gh245_graphql_base_ref_oid(tmp_path, monkeypatch, fau
     def command(cmd, cwd=None, **kwargs):
         calls.append(cmd)
         assert cwd == tmp_path
-        assert kwargs["timeout"] == 30
+        assert kwargs == ({} if len(calls) == 1 else {"timeout": 30})
         if len(calls) == 1:
             assert "baseRefOid" in cmd[-1]
             return 1, ('authentication failed' if fault == "auth" else
