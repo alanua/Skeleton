@@ -30629,10 +30629,10 @@ def test_publish_recovery_ff_post_push_drift_no_retry(tmp_path, monkeypatch, fau
                                   "owner_type", "graphql_repository"])
 def test_registered_target_gh245_graphql_base_ref_oid(tmp_path, monkeypatch, fault):
     request = runner.IssueWorktreeExistingPrPublishRequest(
-        "synthetic/Example", 13, "runner/test", 14, "a" * 40,
-        "runner/test", frozenset({"tests/example.test.mjs"}))
+        "synthetic/Example", 13, "runner/issue-13", 14, "a" * 40,
+        "runner/issue-13", frozenset({"tests/example.test.mjs"}))
     identity = dict(number=14, state="OPEN", isDraft=True, baseRefName="main",
-                    headRefName="runner/test", headRefOid="a" * 40,
+                    headRefName="runner/issue-13", headRefOid="a" * 40,
                     headRepository={"name": "Example", "id": "synthetic-repo-id"},
                     headRepositoryOwner={"id": "synthetic-id", "login": "synthetic"},
                     url="https://github.com/synthetic/Example/pull/14",
@@ -30685,8 +30685,19 @@ def test_registered_target_gh245_graphql_base_ref_oid(tmp_path, monkeypatch, fau
         with pytest.raises(RuntimeError):
             runner._registered_worktree_overlay_pr_state(request, tmp_path)
     else:
-        assert runner._registered_worktree_overlay_pr_state(request, tmp_path) == {
+        state = runner._registered_worktree_overlay_pr_state(request, tmp_path)
+        assert state == {
             **identity, "baseRefOid": graphql["baseRefOid"]}
+        # #4890: the gh 2.45 read succeeds, then the shared binding guard
+        # must retain the target identity rather than infer runner.REPO.
+        inspection = runner.IssueWorktreePublishInspectionRequest(
+            request.repository, 13, "runner/issue-13", request.allowed_files, "Synthetic")
+        body = ("Update Existing PR: 14\n"
+                f"Expected PR Head SHA: {'a' * 40}\n"
+                "Expected PR Head Branch: runner/issue-13\n")
+        assert runner._issue_worktree_publish_target_existing_pr_binding_reason(
+            body, inspection, state, verified_base_sha=graphql["baseRefOid"]
+        ) == (None, 14, "a" * 40, "runner/issue-13")
         assert len(calls) == 4
     assert len(calls) <= 4
 
@@ -30718,3 +30729,41 @@ def test_publish_recovery_ff_merge_base_fail_closed(tmp_path, monkeypatch, failu
     assert "existing_pr_merge_base_mismatch" in runner.publish_registered_target_fast_forward(body)
     assert not pushed
     assert not any(cmd[:2] == ["git", "push"] for cmd in calls)
+
+
+@pytest.mark.parametrize("repository,owner,expected", [
+    ({"name": "Lavalamp", "id": "synthetic-repo"},
+     {"login": "alanua", "id": "synthetic-owner"}, "alanua/Lavalamp"),
+    ({"name": "Other", "id": "synthetic-repo"}, {"login": "alanua"}, "alanua/Other"),
+    ({"name": "Lavalamp"}, {"login": "other"}, "other/Lavalamp"),
+    (None, {"login": "alanua"}, None),
+    ({"id": "synthetic-repo"}, {"login": "alanua"}, None),
+    ({"name": 42}, {"login": "alanua"}, None),
+    ({"name": ""}, {"login": "alanua"}, None),
+    ({"name": "Lavalamp"}, {"login": 42}, None),
+    ({"name": "Lavalamp"}, None, None),
+    ({"name": "Lavalamp"}, {"login": ""}, None),
+    ({"nameWithOwner": None, "name": "Lavalamp"}, {"login": "alanua"}, None),
+    ({"nameWithOwner": "alanua/Lavalamp", "name": "Skeleton"}, {"login": "alanua"}, None),
+    ({"nameWithOwner": "alanua/Lavalamp"}, {"login": "other"}, None),
+    ({"name": "Lavalamp", "owner": {"login": "other"}}, {"login": "alanua"}, None),
+])
+def test_head_repository_gh245_identity_fail_closed(repository, owner, expected):
+    # Public synthetic payloads only; no GitHub or repository access.
+    state = dict(number=14, state="OPEN", isDraft=True, baseRefName="main",
+                 baseRefOid="b" * 40, headRefName="runner/issue-13",
+                 headRefOid="a" * 40, headRepository=repository,
+                 headRepositoryOwner=owner,
+                 url="https://github.com/alanua/Lavalamp/pull/14")
+    assert runner._head_repository_name_with_owner(state) == expected
+    request = runner.IssueWorktreePublishInspectionRequest(
+        "alanua/Lavalamp", 13, "runner/issue-13", frozenset(), "Synthetic")
+    body = ("Update Existing PR: 14\n"
+            f"Expected PR Head SHA: {'a' * 40}\n"
+            "Expected PR Head Branch: runner/issue-13\n")
+    result = runner._issue_worktree_publish_target_existing_pr_binding_reason(
+        body, request, state, verified_base_sha="b" * 40)
+    if expected == request.repository:
+        assert result == (None, 14, "a" * 40, "runner/issue-13")
+    else:
+        assert result == ("existing_pr_head_repository_mismatch", None, None, None)
