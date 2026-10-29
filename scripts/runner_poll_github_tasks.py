@@ -19860,9 +19860,17 @@ def publish_registered_target_fast_forward(body: str) -> str:
         total_bytes = 0
         for row in rows:
             fields = row[0].split()
+            # The root ignore file may be carried over from the bound old PR,
+            # but is never admitted as a new or changed candidate file.
+            inherited_gitignore = (
+                len(row) == 2 and row[1] == ".gitignore"
+                and len(fields) == 4 and fields[:2] == ["100644", "blob"]
+                and old_entries.get(row[1]) == fields
+            )
             if (len(row) != 2 or len(fields) != 4
                     or fields[0] not in {"100644", "100755"} or fields[1] != "blob"
-                    or not fields[3].isdigit() or not _safe_changed_file(row[1])):
+                    or not fields[3].isdigit()
+                    or not (_safe_changed_file(row[1]) or inherited_gitignore)):
                 return blocked("candidate_tree_unsafe")
             if fields[0] == "100755" and old_entries.get(row[1]) != fields:
                 return blocked("candidate_tree_unsafe")

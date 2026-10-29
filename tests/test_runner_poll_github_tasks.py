@@ -30225,7 +30225,7 @@ def _synthetic_ff_publish(tmp_path, monkeypatch, suffix="mjs", test_dir="tests")
     _run_git(source, 'config', 'user.name', 'Synthetic')
     names = ['src/file%d.py' % i for i in range(16)] + [test_dir + '/source.test.' + suffix]
     prior_names = ['prior/file%d.txt' % i for i in range(5)]
-    for name in names + ['untouched.txt', 'tools/inherited.sh'] + prior_names:
+    for name in names + ['untouched.txt', 'tools/inherited.sh', '.gitignore'] + prior_names:
         path = source / name
         path.parent.mkdir(exist_ok=True)
         path.write_text('old = 1\n')
@@ -30294,6 +30294,7 @@ def _synthetic_ff_publish(tmp_path, monkeypatch, suffix="mjs", test_dir="tests")
         if cmd[:2] == ['node', '--test']:
             assert not (cwd / 'later.txt').exists()
             assert (cwd / 'untouched.txt').read_text() == 'old = 1\n'
+            assert (cwd / '.gitignore').read_text() == 'old = 1\n'
             return 0, '# tests 17\n# pass 17\n# fail 0\n# cancelled 0\n# skipped 0\n# todo 0\n'
         if cmd[:2] == ['git', 'ls-remote']:
             ref = cmd[-1]
@@ -30328,6 +30329,8 @@ def test_publish_recovery_ff_divergent_main_and_original_ancestry(tmp_path, monk
         ['git', 'push', 'origin', pushed[0] + ':refs/heads/' + runner.issue_branch(13, 'alanua/Lavalamp')]]
     assert runner.run_command(['git', 'rev-list', '--parents', '-n', '1', pushed[0]], cwd=source)[1].split() == [pushed[0], old]
     assert runner.run_command(['git', 'show', f'{pushed[0]}:untouched.txt'], cwd=source)[1] == 'old = 1\n'
+    assert runner.run_command(['git', 'ls-tree', '-rl', pushed[0], '--', '.gitignore'], cwd=source)[1] == runner.run_command(
+        ['git', 'ls-tree', '-rl', old, '--', '.gitignore'], cwd=source)[1]
     assert len([line for line in report.splitlines() if line.startswith('overlay_file=')]) == 17
     assert all(not any(arg.startswith('--force') for arg in cmd) for cmd in calls)
 
@@ -30503,6 +30506,59 @@ def test_publish_recovery_ff_rejects_scripts_node_tests(tmp_path, monkeypatch):
     assert "focused_tests_missing" in runner.publish_registered_target_fast_forward(body)
     assert not pushed
     assert not any(cmd[:2] == ["node", "--test"] for cmd in calls)
+
+
+@pytest.mark.parametrize("fault", [
+    "changed_blob", "changed_size", "new", "executable", "symlink", "gitlink",
+    "noncanonical_path", "other_dotfile", "inherited_executable", "old_tree_unavailable",
+])
+def test_publish_recovery_ff_candidate_tree_gitignore_fail_closed(tmp_path, monkeypatch, fault):
+    _, _, _, old, _, _, calls, pushed, body = _synthetic_ff_publish(tmp_path, monkeypatch)
+    actual = runner.run_command
+
+    def command(cmd, cwd=None, **kw):
+        code, output = actual(cmd, cwd=cwd, **kw)
+        if cmd[:3] == ["git", "ls-tree", "-rl"]:
+            if fault == "inherited_executable":
+                output = "\n".join(
+                    row.replace("100644", "100755", 1) if row.endswith("\t.gitignore") else row
+                    for row in output.splitlines()
+                ) + "\n"
+            if cmd[-1] == old:
+                if fault == "old_tree_unavailable":
+                    return 1, ""
+                if fault == "new":
+                    output = "\n".join(row for row in output.splitlines()
+                                       if not row.endswith("\t.gitignore")) + "\n"
+            else:
+                rows = output.splitlines()
+                for i, row in enumerate(rows):
+                    metadata, name = row.split("\t", 1)
+                    if name != ".gitignore":
+                        continue
+                    fields = metadata.split()
+                    if fault == "changed_blob":
+                        fields[2] = "f" * 40
+                    elif fault == "changed_size":
+                        fields[3] = str(int(fields[3]) + 1)
+                    elif fault in {"executable", "symlink", "gitlink"}:
+                        fields[0] = {"executable": "100755", "symlink": "120000",
+                                     "gitlink": "160000"}[fault]
+                    elif fault == "noncanonical_path":
+                        name = "./.gitignore"
+                    elif fault == "other_dotfile":
+                        name = ".gitattributes"
+                    rows[i] = " ".join(fields) + "\t" + name
+                output = "\n".join(rows) + "\n"
+        return code, output
+
+    monkeypatch.setattr(runner, "run_command", command)
+    report = runner.publish_registered_target_fast_forward(body)
+    assert ("old_pr_tree_unknown" if fault == "old_tree_unavailable"
+            else "candidate_tree_unsafe") in report
+    assert not pushed
+    assert not any(cmd[:2] == ["node", "--test"] for cmd in calls)
+    assert runner._safe_changed_file(".gitignore") is None
 
 
 @pytest.mark.parametrize("fault", ["changed_blob", "new_executable", "changed_mode", "symlink"])
