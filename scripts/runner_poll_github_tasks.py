@@ -13084,17 +13084,36 @@ def _repository_name_with_owner(repository: object) -> str | None:
 
 
 def _head_repository_name_with_owner(pr_state: dict[str, Any]) -> str | None:
-    repo = _repository_name_with_owner(pr_state.get("headRepository"))
-    if repo is not None:
-        return repo
+    repository = pr_state.get("headRepository")
+    if not isinstance(repository, dict):
+        return None
+    repo = _repository_name_with_owner(repository)
     owner = pr_state.get("headRepositoryOwner")
     if isinstance(owner, dict):
         owner = owner.get("login")
-    if isinstance(owner, str):
-        head_ref = pr_state.get("headRefName")
-        if isinstance(head_ref, str) and head_ref:
-            return f"{owner}/{REPO.rsplit('/', 1)[1]}"
-    return None
+    # gh 2.45 returns {name, id} and a separate owner {login, id}.
+    # Node IDs and the runner's repository cannot supply a missing name.
+    if repo is None:
+        name = repository.get("name")
+        if "nameWithOwner" in repository or not isinstance(name, str) or not name:
+            return None
+        if not isinstance(owner, str) or not owner or "/" in owner or "/" in name:
+            return None
+        repo = f"{owner}/{name}"
+    parts = repo.split("/")
+    if len(parts) != 2 or not all(parts):
+        return None
+    if "headRepositoryOwner" in pr_state and owner != parts[0]:
+        return None
+    if "name" in repository and repository["name"] != parts[1]:
+        return None
+    if "owner" in repository:
+        nested_owner = repository["owner"]
+        if isinstance(nested_owner, dict):
+            nested_owner = nested_owner.get("login")
+        if nested_owner != parts[0]:
+            return None
+    return repo
 
 
 def _preflight_refresh_next_action(
