@@ -209,6 +209,35 @@ class NativeVideoHistoryTest {
         assertNull(canonicalSourceForSelection(noIntent, sources))
     }
 
+    @Test
+    fun editorReturnReplacesStale98WithFresh100AndAllFourVisibleAdditions() {
+        val stale = (1..98).map { history("work-$it", "Work $it") }
+        // Two old works were removed while four new visible works were saved.
+        val additions = (99..102).map { history("work-$it", "New $it") }
+        val fresh = stale.dropLast(2) + additions
+        val tvWatch = listOf(history("work-1", "Work 1", season = "2", episode = "3")
+            .put("hidden", true).put("position_seconds", 120))
+        assertEquals(98, visibleHistoryItems(stale).size)
+        assertEquals(100, canonicalHistoryItems(fresh).size) // Editor's fresh response.
+        for (isTv in listOf(true, false)) {
+            val normal = historyItemsAfterRead(stale, fresh, tvWatch, isTv)
+            assertEquals(fresh.map(::historyKey), visibleHistoryItems(normal).map(::historyKey))
+            assertTrue(visibleHistoryItems(normal).map(::historyKey).containsAll(additions.map(::historyKey)))
+            assertEquals("3", normal.first().getString("episode"))
+            assertEquals(120, normal.first().getInt("position_seconds"))
+        }
+    }
+
+    @Test
+    fun onlyCanonicalHiddenFlagControlsNormalVisibility() {
+        val catalog = listOf(history("visible", "Visible"), history("hidden", "Hidden").put("hidden", true))
+        val watched = listOf(history("visible", "Visible").put("hidden", true), history("hidden", "Hidden").put("hidden", false))
+        val normal = historyItemsAfterRead(emptyList(), catalog, watched, true)
+        assertEquals(2, canonicalHistoryItems(catalog).size)
+        assertEquals(listOf("visible"), visibleHistoryItems(normal).map(::historyKey))
+        assertTrue(watched.first().getBoolean("hidden")) // Overlay does not mutate watch data.
+    }
+
     private fun history(id:String, title:String, poster:String = "", overview:String = "", season:String = "", episode:String = ""):JSONObject =
         JSONObject().put("history_id", id).put("title", title).put("poster", poster).put("overview", overview).put("season", season).put("episode", episode)
 
