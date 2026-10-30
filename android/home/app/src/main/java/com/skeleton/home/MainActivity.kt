@@ -600,8 +600,20 @@ private fun mdi(name: String): Int = when(name) {
 private val remoteBitmapCache = object: android.util.LruCache<String, ImageBitmap>(48 * 1024) {
     override fun sizeOf(key:String,value:ImageBitmap):Int=((value.width.toLong()*value.height.toLong()*4L)/1024L).coerceAtLeast(1L).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
 }
-private val remoteBitmapLocks = java.util.concurrent.ConcurrentHashMap<String,Any>()
-private fun remoteBitmapKey(url:String,maxWidth:Int,maxHeight:Int)="$url@$maxWidth×$maxHeight"
+// Fixed stripes bound memory and keep concurrent waiters on the same lock.
+private val remoteBitmapLocks = Array(32){Any()}
+internal fun remoteBitmapKey(url:String,maxWidth:Int,maxHeight:Int)="$url@$maxWidth×$maxHeight"
+@Synchronized internal fun trimRemoteBitmapDisk(dir:java.io.File,maxBytes:Long=128L*1024*1024,maxFiles:Int=256){
+    val files=dir.listFiles()?.filter{it.isFile&&it.name.endsWith(".img")}?.sortedBy{it.lastModified()} ?: return
+    var bytes=files.sumOf{it.length()};var count=files.size
+    for(file in files){
+        if(bytes<=maxBytes&&count<=maxFiles)break
+        val size=file.length()
+        if(file.delete()){bytes-=size;count--}
+    }
+}
+internal fun matchingPoster(videoId:String,candidateId:String,poster:String):String =
+    if(videoId.isNotBlank()&&candidateId==videoId)poster else ""
 private fun remoteBitmapDiskFile(context:Context,url:String):java.io.File {
     val digest=MessageDigest.getInstance("SHA-256").digest(url.toByteArray()).joinToString(""){"%02x".format(it)}
     val dir=java.io.File(context.cacheDir,"home-poster-cache-v1").apply{mkdirs()}
@@ -619,39 +631,57 @@ private fun decodeRemoteBitmap(bytes:ByteArray,maxWidth:Int,maxHeight:Int):Image
     return BitmapFactory.decodeByteArray(bytes,0,bytes.size,opts)?.asImageBitmap()
 }
 private fun loadRemoteBitmap(context:Context,url:String,maxWidth:Int,maxHeight:Int):ImageBitmap? {
-    val lock=remoteBitmapLocks.computeIfAbsent(url){Any()}
+    val key=remoteBitmapKey(url,maxWidth,maxHeight)
+    val lock=remoteBitmapLocks[(url.hashCode() and Int.MAX_VALUE)%remoteBitmapLocks.size]
     return synchronized(lock){
+        remoteBitmapCache.get(key)?.let{return@synchronized it}
         try{
             val file=remoteBitmapDiskFile(context,url)
-            var bytes=if(file.isFile&&file.length()>0)file.readBytes() else ByteArray(0)
+            var bytes=if(file.isFile&&file.length() in 1..(16L*1024*1024))file.readBytes() else ByteArray(0)
+            var decoded=if(bytes.isNotEmpty())decodeRemoteBitmap(bytes,maxWidth,maxHeight) else null
+            if(bytes.isNotEmpty()&&decoded==null){file.delete();bytes=ByteArray(0)}
             if(bytes.isEmpty()){
                 bytes=(URL(url).openConnection() as HttpURLConnection).run{
                     connectTimeout=3000;readTimeout=5000;useCaches=true
                     setRequestProperty("Accept","image/avif,image/webp,image/*,*/*;q=0.8")
-                    inputStream.use{it.readBytes()}
+                    try{inputStream.use{stream->
+                        val output=java.io.ByteArrayOutputStream()
+                        val buffer=ByteArray(8192)
+                        while(true){
+                            val count=stream.read(buffer)
+                            if(count<0)break
+                            if(output.size()+count>16*1024*1024)return@synchronized null
+                            output.write(buffer,0,count)
+                        }
+                        output.toByteArray()}}finally{disconnect()}
                 }
-                if(bytes.isNotEmpty()){
+                decoded=decodeRemoteBitmap(bytes,maxWidth,maxHeight)
+                if(decoded!=null){
                     val tmp=java.io.File(file.parentFile,file.name+".tmp-"+System.nanoTime())
                     tmp.writeBytes(bytes)
                     if(!tmp.renameTo(file)){file.writeBytes(bytes);tmp.delete()}
                 }
             }
-            decodeRemoteBitmap(bytes,maxWidth,maxHeight)
+            if(file.isFile)file.setLastModified(System.currentTimeMillis())
+            trimRemoteBitmapDisk(file.parentFile!!)
+            decoded?.also{remoteBitmapCache.put(key,it)}
         }catch(_:Exception){null}
-        finally{remoteBitmapLocks.remove(url,lock)}
     }
 }
 @Composable private fun remoteBitmap(url:String?,maxWidth:Int=0,maxHeight:Int=0): ImageBitmap? {
     val context=LocalContext.current.applicationContext
     val key=if(url.isNullOrBlank())"" else remoteBitmapKey(url,maxWidth,maxHeight)
-    val initial=remember(key){if(key.isBlank())null else remoteBitmapCache.get(key)}
-    return produceState<ImageBitmap?>(initial,key){
-        if(url.isNullOrBlank()||key.isBlank()){value=null;return@produceState}
-        remoteBitmapCache.get(key)?.let{value=it;return@produceState}
-        val loaded=withContext(Dispatchers.IO){loadRemoteBitmap(context,url,maxWidth,maxHeight)}
-        if(loaded!=null)remoteBitmapCache.put(key,loaded)
-        value=loaded
-    }.value
+    // Producer keys restart the coroutine but do not reset produceState's value.
+    // Scope the state itself to the request to prevent a stale cross-title frame.
+    return androidx.compose.runtime.key(key){
+        val initial=remember{if(key.isBlank())null else remoteBitmapCache.get(key)}
+        produceState<ImageBitmap?>(initial,key){
+            if(url.isNullOrBlank()||key.isBlank())return@produceState
+            remoteBitmapCache.get(key)?.let{value=it;return@produceState}
+            val loaded=withContext(Dispatchers.IO){loadRemoteBitmap(context,url,maxWidth,maxHeight)}
+            if(loaded!=null)value=loaded
+        }.value
+    }
 }
 
 private fun drawableBitmap(d:Drawable): ImageBitmap {
@@ -1722,12 +1752,15 @@ private fun Header(title:String, connected:Boolean, endpointId:String, endpoints
     // background and appears as a smear while the new landscape thumbnail is still loading.
     // Show the YouTube logo until the correct landscape poster exists instead.
     val remotePoster=remotePlayer.optString("poster_landscape",remotePlayer.optString("poster",""))
-    val canonicalPoster=lastGoodPlayer.optString("poster_landscape",lastGoodPlayer.optString("poster",""))
-    val poster=remotePoster.ifBlank{if(sameVideo)canonicalPoster else ""}
+    // Use this response's identity; remembered player metadata can lag a transition.
+    val posterVideoId=(remote.optJSONObject("youtube_player") ?: remote).optString("video_id","").ifBlank{p.optString("video_id","")}
+    val poster=matchingPoster(posterVideoId,remotePlayer.optString("video_id",""),remotePoster).ifBlank{
+        matchingPoster(posterVideoId,p.optString("video_id",""),p.optString("poster_landscape",p.optString("poster","")))
+    }
     val posterUrl=when{
         poster.startsWith("http://")||poster.startsWith("https://")->poster
         poster.isNotBlank()&&api.server!=null->api.server+poster
-        videoId.isNotBlank()->"https://i.ytimg.com/vi/$videoId/hqdefault.jpg"
+        posterVideoId.isNotBlank()->"https://i.ytimg.com/vi/$posterVideoId/hqdefault.jpg"
         else->null
     }
     val bitmap=remoteBitmap(posterUrl,960,540)
