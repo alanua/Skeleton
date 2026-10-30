@@ -221,6 +221,11 @@ private class HomeApi {
         val c = URL(base + path).openConnection() as HttpURLConnection
         c.connectTimeout = 3500; c.readTimeout = 10000; c.requestMethod = method
         c.setRequestProperty("Accept", "application/json")
+        // Revalidate mutable catalog membership without touching poster caching.
+        if (method == "GET" && path == savedVideoHistoryPath()) {
+            c.useCaches = false
+            c.setRequestProperty("Cache-Control", "no-cache, no-store")
+        }
         if (body != null) {
             c.doOutput = true; c.setRequestProperty("Content-Type", "application/json")
             c.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
@@ -347,6 +352,9 @@ private suspend fun savedVideoHistoryItemsWithRetry(api:HomeApi,attempts:Int=2):
     }
     throw lastError ?: IllegalStateException("Історія недоступна")
 }
+internal fun visibleHistoryItems(items:List<JSONObject>):List<JSONObject> =
+    canonicalHistoryItems(items).filterNot{it.optBoolean("hidden",false)}
+
 internal fun canonicalHistoryItems(items:List<JSONObject>):List<JSONObject>{
     val seen=mutableSetOf<String>()
     return items.filter{val k=historyKey(it);k.isBlank()||seen.add(k)}
@@ -380,7 +388,10 @@ internal fun mergedHistoryItems(savedLibrary:List<JSONObject>,watchedHistory:Lis
 private fun watchedHistoryForSavedLibrary(savedLibrary:List<JSONObject>,watchedHistory:List<JSONObject>):List<JSONObject>{
     val savedKeys=savedLibrary.mapNotNull{historyKey(it).takeIf(String::isNotBlank)}.toSet()
     if(savedKeys.isEmpty())return emptyList()
-    return watchedHistory.filter{historyKey(it) in savedKeys}
+    return watchedHistory.filter{historyKey(it) in savedKeys}.map{
+        // Visibility belongs to the shared catalog, never an endpoint watch row.
+        JSONObject(it.toString()).apply{remove("hidden")}
+    }
 }
 // The saved work catalog is the only membership authority on every endpoint.
 // Endpoint watch rows only enrich matching works with device-scoped progress.
@@ -975,6 +986,7 @@ private fun HomeComposeApp(sharedUrl:String?, consumeShare:()->Unit) {
     var menu by remember { mutableStateOf(false) }
     var info by remember { mutableStateOf(false) }
     var historyEditor by remember { mutableStateOf(false) }
+    var historyRevision by remember { mutableStateOf(0) }
     var channelEditor by remember { mutableStateOf(false) }
     var deviceOrderEditor by remember { mutableStateOf(false) }
     var screensaver by remember { mutableStateOf(false) }
@@ -1058,7 +1070,7 @@ private fun HomeComposeApp(sharedUrl:String?, consumeShare:()->Unit) {
                 val p=profile
                 if(discovered && p!=null){
                     PersistentTabSlot(tab==0) { HomeScreen(api, tab==0, hyperion, setHyperionFromHeader, endpointId, mediaEndpoints, ::selectMediaEndpoint, {menu=true}, mediaCharged, {mediaCharged=it}, ::refreshMediaTarget) }
-                    PersistentTabSlot(tab==1) { VideoScreen(api, tab==1, videoSelectionRevision, endpointId, mediaEndpoints, ::selectMediaEndpoint, {menu=true}, {tab=0}, hyperion, setHyperionFromHeader, mediaCharged, {mediaCharged=it}, ::refreshMediaTarget) }
+                    PersistentTabSlot(tab==1) { VideoScreen(api, tab==1&&!historyEditor, historyRevision, videoSelectionRevision, endpointId, mediaEndpoints, ::selectMediaEndpoint, {menu=true}, {tab=0}, hyperion, setHyperionFromHeader, mediaCharged, {mediaCharged=it}, ::refreshMediaTarget) }
                     PersistentTabSlot(tab==2) {
                         if(p.hasSk) DevicesScreen(api, tab==2, endpointId, mediaEndpoints, ::selectMediaEndpoint, {menu=true})
                         else FamilyScannerScreen(api, tab==2, endpointId, mediaEndpoints, ::selectMediaEndpoint, {menu=true})
@@ -1137,7 +1149,7 @@ private fun HomeComposeApp(sharedUrl:String?, consumeShare:()->Unit) {
     )
 
     if(deviceOrderEditor) DeviceOrderDialog(api,uiPrefs){deviceOrderEditor=false}
-    if(historyEditor) HistoryEditorDialog(api,endpointId){historyEditor=false}
+    if(historyEditor) HistoryEditorDialog(api,endpointId){historyEditor=false;historyRevision++}
     if(channelEditor) ChannelEditorDialog(api,endpointId){channelEditor=false}
     if(screensaver) ScreensaverDialog(api){screensaver=false}
     if(info) HomeInfoDialog{info=false}
@@ -2021,7 +2033,7 @@ private fun trackDisplayLabel(t:JSONObject,index:Int):String{val bits=listOf(t.o
 
 @Composable private fun HistoryPickerField(value:String,enabled:Boolean,loading:Boolean,error:Boolean,onClick:()->Unit){Row(Modifier.fillMaxWidth().heightIn(min=56.dp),verticalAlignment=Alignment.Bottom){Box(Modifier.width(28.dp).height(39.dp).padding(bottom=9.dp),contentAlignment=Alignment.BottomCenter){Mdi("history",20.dp,Color(0xFFD8DDE2))};Spacer(Modifier.width(8.dp));Column(Modifier.weight(1f)){Text(ui("Історія"),fontSize=10.sp,color=Color(0xFFC4CAD0),modifier=Modifier.padding(bottom=3.dp));Row(Modifier.fillMaxWidth().height(39.dp).clip(RoundedCornerShape(9.dp)).background(Input).border(1.dp,Line,RoundedCornerShape(9.dp)).clickable(enabled=enabled,onClick=onClick).padding(start=10.dp,end=9.dp),verticalAlignment=Alignment.CenterVertically){Text(value,fontSize=14.sp,color=if(enabled)Text else Text.copy(alpha=.55f),modifier=Modifier.weight(1f),maxLines=1,overflow=TextOverflow.Ellipsis);when{loading->CircularProgressIndicator(Modifier.size(15.dp),strokeWidth=2.dp,color=Accent);error->Mdi("refresh",16.dp,Accent);else->Mdi("chevron-down",16.dp,Muted.copy(alpha=if(enabled)1f else .55f))}}}}}
 @Composable private fun HistoryPickerDialog(api:HomeApi,items:List<JSONObject>,onSelect:(JSONObject)->Unit,onDismiss:()->Unit){
-    var query by remember{mutableStateOf("")};val canonical=remember(items){canonicalHistoryItems(items).filter{!it.optBoolean("hidden",false)}};val q=query.trim().lowercase(Locale.ROOT);val visible=if(q.isBlank())canonical else canonical.filter{x->listOf(x.optString("title"),x.optString("year"),x.optString("content_type"),x.optString("overview")).joinToString(" ").lowercase(Locale.ROOT).contains(q)}
+    var query by remember{mutableStateOf("")};val canonical=remember(items){visibleHistoryItems(items)};val q=query.trim().lowercase(Locale.ROOT);val visible=if(q.isBlank())canonical else canonical.filter{x->listOf(x.optString("title"),x.optString("year"),x.optString("content_type"),x.optString("overview")).joinToString(" ").lowercase(Locale.ROOT).contains(q)}
     val focusRequester=remember{FocusRequester()};val keyboard=LocalSoftwareKeyboardController.current
     Dialog(onDismissRequest=onDismiss,properties=DialogProperties(usePlatformDefaultWidth=false)){
         Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha=.72f)),contentAlignment=Alignment.BottomCenter){Box(Modifier.matchParentSize().clickable(onClick=onDismiss));Column(Modifier.fillMaxWidth().widthIn(max=500.dp).fillMaxHeight(.92f).clip(RoundedCornerShape(topStart=18.dp,topEnd=18.dp)).background(Input).border(1.dp,Line,RoundedCornerShape(topStart=18.dp,topEnd=18.dp)).clickable(enabled=false){}){
@@ -2040,7 +2052,7 @@ private const val MOVIEBASE_PACKAGE = "com.moviebase"
 
 
 @Composable
-private fun VideoScreen(api:HomeApi,active:Boolean,selectionRevision:Int,endpointId:String,endpoints:List<MediaEndpointUi>,onEndpoint:(String)->Unit,onMenu:()->Unit,onApplied:()->Unit,hyperion:Boolean,onHyperion:(Boolean)->Unit,captureCharged:Boolean,onCaptureCharged:(Boolean)->Unit,refreshMediaTarget:suspend ()->Boolean){
+private fun VideoScreen(api:HomeApi,active:Boolean,historyRevision:Int,selectionRevision:Int,endpointId:String,endpoints:List<MediaEndpointUi>,onEndpoint:(String)->Unit,onMenu:()->Unit,onApplied:()->Unit,hyperion:Boolean,onHyperion:(Boolean)->Unit,captureCharged:Boolean,onCaptureCharged:(Boolean)->Unit,refreshMediaTarget:suspend ()->Boolean){
     val scope=rememberCoroutineScope(); val context=LocalContext.current
     val endpoint=endpointById(endpoints,endpointId)
     val captureEnabled=api.server!=null&&("handoff" in endpoint.capabilities||"capture" in endpoint.capabilities)
@@ -2161,9 +2173,10 @@ private fun VideoScreen(api:HomeApi,active:Boolean,selectionRevision:Int,endpoin
             while(true){if(loadAll())break;delay(1500)}
         }
     }
-    LaunchedEffect(api.server,endpoint.endpointId){
+    // Refresh on entry and editor return, not on list/loading state changes.
+    LaunchedEffect(api.server,endpoint.endpointId,active,historyRevision){
         setEndpointHistoryHydrated(historyByEndpoint.containsKey(endpoint.endpointId)); setEndpointHistoryError("")
-        if(api.server!=null)while(true){if(loadHistoryForEndpoint())break;delay(1500)}
+        if(api.server!=null&&active)loadHistoryForEndpoint()
     }
     LaunchedEffect(api.server,active,endpoint.endpointId){
         if(api.server!=null&&active)while(true){
