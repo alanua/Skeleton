@@ -7770,6 +7770,16 @@ def _target_project_publication_existing_pr_metadata(issue_body: str) -> list[st
 
 
 def _codegen_requires_target_publication(issue_body: str) -> bool:
+    # An explicit publication contract remains binding even when Expected Output
+    # lists only validation evidence. Keep publication on the registered route,
+    # including its exact-head checks for a declared existing PR.
+    if _declared_existing_pr_number(issue_body) is not None:
+        return True
+    publication_text = "\n".join(
+        (_metadata_before_task(issue_body), extract_task_block(issue_body) or "")
+    )
+    if re.search(r"\b(?:draft[ _-]+pr|existing[ _-]+pr|pull request)\b", publication_text, re.IGNORECASE):
+        return True
     expected_output = _expected_output_value(issue_body)
     if isinstance(expected_output, list):
         expected_text = " ".join(str(item) for item in expected_output)
