@@ -78,6 +78,8 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.text.font.FontFamily
@@ -1286,10 +1288,13 @@ private fun HomeComposeApp(sharedUrl:String?, consumeShare:()->Unit) {
 
 @Composable private fun HistoryEditorRow(api:HomeApi,item:JSONObject,onDelete:()->Unit,onVisibility:()->Unit){
     val poster=item.optString("poster");val bm=remoteBitmap(if(poster.isBlank())null else if(poster.startsWith("http"))poster else api.server+poster,192,288)
+    Column{
     Row(Modifier.fillMaxWidth().heightIn(min=112.dp).border(width=0.dp,color=Color.Transparent).padding(horizontal=3.dp,vertical=9.dp),verticalAlignment=Alignment.CenterVertically){
         Box(Modifier.width(64.dp).height(96.dp).clip(RoundedCornerShape(8.dp)).background(Bg),contentAlignment=Alignment.Center){if(bm!=null)Image(bm,null,Modifier.fillMaxSize(),contentScale=ContentScale.Crop)else Mdi("movie-open",30.dp,Muted)}
         Column(Modifier.weight(1f).padding(start=11.dp,end=6.dp)){Text(item.optString("title","Твір"),fontSize=15.sp,lineHeight=19.sp,fontWeight=FontWeight.SemiBold,color=Text,maxLines=2,overflow=TextOverflow.Ellipsis);val meta=listOf(historyKindLabel(item),historyEpisodeLabel(item),item.optString("year"),historyRuntimeLabel(item)).filter{it.isNotBlank()}.joinToString(" · ");if(meta.isNotBlank())Text(meta,fontSize=10.sp,fontWeight=FontWeight.Bold,color=Accent,modifier=Modifier.padding(top=4.dp));val ov=item.optString("overview");if(ov.isNotBlank())Text(ov,fontSize=11.sp,lineHeight=15.sp,color=Muted,maxLines=3,overflow=TextOverflow.Ellipsis,modifier=Modifier.padding(top=7.dp))}
         Column(verticalArrangement=Arrangement.spacedBy(8.dp),horizontalAlignment=Alignment.CenterHorizontally){Box(Modifier.size(32.dp).clip(CircleShape).background(Color(0xFF241A1A)).border(1.dp,Color(0xFF4A3434),CircleShape).clickable(onClick=onDelete),contentAlignment=Alignment.Center){Text("×",fontSize=24.sp,color=Color(0xFFFFB8B8),modifier=Modifier.offset(y=(-1).dp))};Mdi(if(item.optBoolean("hidden",false))"eye-off-outline" else "eye-outline",26.dp,if(item.optBoolean("hidden",false))Muted else Accent,Modifier.clickable(onClick=onVisibility))}
+    }
+        SourceSiteLinkRow(sourceSiteLinks(item))
     }
 }
 
@@ -2046,7 +2051,7 @@ private fun trackDisplayLabel(t:JSONObject,index:Int):String{val bits=listOf(t.o
         }}
     }
 }
-@Composable private fun HistoryPickerRow(api:HomeApi,item:JSONObject,onClick:()->Unit){val poster=item.optString("poster");val bm=remoteBitmap(if(poster.isBlank())null else if(poster.startsWith("http"))poster else api.server+poster,192,288);Row(Modifier.fillMaxWidth().heightIn(min=112.dp).clickable(onClick=onClick).padding(horizontal=3.dp,vertical=9.dp),verticalAlignment=Alignment.CenterVertically){Box(Modifier.width(64.dp).height(96.dp).clip(RoundedCornerShape(8.dp)).background(Bg),contentAlignment=Alignment.Center){if(bm!=null)Image(bm,null,Modifier.fillMaxSize(),contentScale=ContentScale.Crop)else Mdi("movie-open",30.dp,Muted)};Column(Modifier.weight(1f).padding(start=11.dp)){Text(item.optString("title","Твір"),fontSize=15.sp,lineHeight=19.sp,fontWeight=FontWeight.SemiBold,color=Text,maxLines=2,overflow=TextOverflow.Ellipsis);val meta=listOf(historyKindLabel(item),historyEpisodeLabel(item),item.optString("year"),historyRuntimeLabel(item)).filter{it.isNotBlank()}.joinToString(" · ");if(meta.isNotBlank())Text(meta,fontSize=10.sp,fontWeight=FontWeight.Bold,color=Accent,modifier=Modifier.padding(top=4.dp));val ov=item.optString("overview");if(ov.isNotBlank())Text(ov,fontSize=11.sp,lineHeight=15.sp,color=Muted,maxLines=3,overflow=TextOverflow.Ellipsis,modifier=Modifier.padding(top=7.dp))}}}
+@Composable private fun HistoryPickerRow(api:HomeApi,item:JSONObject,onClick:()->Unit){val poster=item.optString("poster");val bm=remoteBitmap(if(poster.isBlank())null else if(poster.startsWith("http"))poster else api.server+poster,192,288);Column{Row(Modifier.fillMaxWidth().heightIn(min=112.dp).clickable(onClick=onClick).padding(horizontal=3.dp,vertical=9.dp),verticalAlignment=Alignment.CenterVertically){Box(Modifier.width(64.dp).height(96.dp).clip(RoundedCornerShape(8.dp)).background(Bg),contentAlignment=Alignment.Center){if(bm!=null)Image(bm,null,Modifier.fillMaxSize(),contentScale=ContentScale.Crop)else Mdi("movie-open",30.dp,Muted)};Column(Modifier.weight(1f).padding(start=11.dp)){Text(item.optString("title","Твір"),fontSize=15.sp,lineHeight=19.sp,fontWeight=FontWeight.SemiBold,color=Text,maxLines=2,overflow=TextOverflow.Ellipsis);val meta=listOf(historyKindLabel(item),historyEpisodeLabel(item),item.optString("year"),historyRuntimeLabel(item)).filter{it.isNotBlank()}.joinToString(" · ");if(meta.isNotBlank())Text(meta,fontSize=10.sp,fontWeight=FontWeight.Bold,color=Accent,modifier=Modifier.padding(top=4.dp));val ov=item.optString("overview");if(ov.isNotBlank())Text(ov,fontSize=11.sp,lineHeight=15.sp,color=Muted,maxLines=3,overflow=TextOverflow.Ellipsis,modifier=Modifier.padding(top=7.dp))}};SourceSiteLinkRow(sourceSiteLinks(item))}}
 private const val TRAKT_PACKAGE = "tv.trakt.trakt"
 private const val MOVIEBASE_PACKAGE = "com.moviebase"
 
@@ -2316,6 +2321,7 @@ private fun VideoScreen(api:HomeApi,active:Boolean,historyRevision:Int,selection
                         VideoToggleControl("autoplay-repeat",autoplay,isSeries){v->if(isSeries){autoplay=v;scope.launch{runCatching{api.put("/api/video/autoplay",JSONObject().put("enabled",v))}}}}
                     }
                     if(loading||message.isNotBlank())Text(if(loading)"Шукаю перевірені джерела…" else message,fontSize=11.sp,color=if(message.startsWith("Не"))Color(0xFFFF8A80) else Muted,modifier=Modifier.fillMaxWidth().padding(top=8.dp,start=3.dp))
+                    SourceSiteLinkRow(sourceSiteLinks(selectedOrTrailer,job))
                 }
             }
         }
@@ -2444,6 +2450,81 @@ private fun mediaDurationLabel(seconds:Double):String{val total=seconds.toInt().
 private fun metadataRuntimeLabel(x:JSONObject):String=x.optString("runtime_label","").trim().ifBlank{val m=x.optInt("runtime_minutes",0);if(m<=0)"" else if(m<60)"$m хв" else {val h=m/60;val r=m%60;if(r>0)"$h год $r хв" else "$h год"}}
 private fun historyRuntimeLabel(x:JSONObject):String=x.optString("runtime_label","").trim().ifBlank{x.optInt("runtime_minutes",0).takeIf{it>0}?.let{m->if(m<60)"$m хв" else {val h=m/60;val r=m%60;if(r>0)"$h год $r хв" else "$h год"}}?:""}
 private fun detailGenreUa(value:String)=when(value.lowercase(Locale.ROOT)){"crime"->"Кримінал";"drama"->"Драма";"mystery"->"Детектив";"thriller"->"Трилер";"comedy"->"Комедія";"action"->"Бойовик";"adventure"->"Пригоди";"animation"->"Анімація";"documentary"->"Документальний";"family"->"Сімейний";"fantasy"->"Фентезі";"history"->"Історичний";"horror"->"Жахи";"music"->"Музика";"romance"->"Мелодрама";"science fiction"->"Наукова фантастика";"war"->"Військовий";"western"->"Вестерн";else->value}
+// Provenance is explicit API data, never inferred from playback or artwork URLs.
+internal data class SourceSiteLink(val pageUrl:String,val host:String){
+    val faviconUrl:String get()="https://$host/favicon.ico"
+}
+internal fun sourceSiteLink(raw:String):SourceSiteLink? {
+    return runCatching {
+        val uri=java.net.URI(raw.trim())
+        val scheme=uri.scheme?.lowercase(Locale.ROOT) ?: return null
+        if(scheme !in setOf("http","https")||uri.rawUserInfo!=null||uri.rawFragment!=null)return null
+        val host=uri.host?.lowercase(Locale.ROOT)?.trimEnd('.') ?: return null
+        // DNS names only: reject all IP literals (including alternate numeric encodings).
+        if(!host.contains('.')||!host.last().isLetter()||host.split('.').any{it.isBlank()||it.length>63||!it.matches(Regex("[a-z0-9](?:[a-z0-9-]*[a-z0-9])?"))})return null
+        if(host.split('.').last() in setOf("localhost","local","internal","lan","home","test","invalid","onion","arpa"))return null
+        if(host=="localtest.me"||host.endsWith(".localtest.me"))return null
+        if(uri.port !in setOf(-1,80,443))return null
+        val path=uri.path.orEmpty().lowercase(Locale.ROOT)
+        val media=Regex("\\.(m3u8|m3u|mpd|mp4|mkv|webm|avi|mov|m4v|mpeg|mpg|ts|m2ts|mp3|m4a|aac|flac|ogg|wav)(?:$|[/;?&#])")
+        if(media.containsMatchIn(path))return null
+        val query=uri.rawQuery.orEmpty()
+        for(part in query.split('&',';')){
+            val decoded=java.net.URLDecoder.decode(part,"UTF-8").lowercase(Locale.ROOT)
+            val key=decoded.substringBefore('=')
+            if(Regex("token|secret|password|passwd|authorization|signature|credential|api.?key|session|jwt|^auth$|^sig$|^key$|^policy$|^expires$").containsMatchIn(key))return null
+            if(media.containsMatchIn(decoded)||decoded.contains("https://")||decoded.contains("http://"))return null
+        }
+        val port=if(uri.port==-1||uri.port==(if(scheme=="https")443 else 80))"" else ":${uri.port}"
+        SourceSiteLink("$scheme://$host$port${uri.rawPath.orEmpty().ifBlank{"/"}}${if(query.isEmpty())"" else "?$query"}",host)
+    }.getOrNull()
+}
+internal fun sourceSiteLinks(vararg records:JSONObject?):List<SourceSiteLink> {
+    val pages=mutableListOf<String>()
+    records.filterNotNull().forEach{record->
+        pages.add(record.optString("source_page_url",""))
+        listOf("source_sites","source_pages").forEach{field->
+            record.optJSONArray(field)?.objects().orEmpty().forEach{site->
+                pages.add(site.optString("source_page_url",""))
+                pages.add(site.optString("page_url",""))
+            }
+        }
+    }
+    // site_host/host and favicon_url are untrusted hints; derive icons from validated pages.
+    // Generic legacy page_url has no proof of user provenance and is deliberately ignored.
+    return pages.mapNotNull(::sourceSiteLink).distinctBy{it.pageUrl}.take(5)
+}
+@Composable private fun SourceSiteLinkRow(links:List<SourceSiteLink>){
+    if(links.isEmpty())return
+    val context=LocalContext.current
+    Row(Modifier.fillMaxWidth().padding(top=8.dp),horizontalArrangement=Arrangement.spacedBy(4.dp)){
+        links.forEach{link->
+            // No redirects or third-party favicon services. Failure keeps the web glyph visible.
+            val bitmap by produceState<ImageBitmap?>(null,link.faviconUrl){
+                value=withContext(Dispatchers.IO){runCatching{
+                    val connection=URL(link.faviconUrl).openConnection() as HttpURLConnection
+                    try{
+                        connection.instanceFollowRedirects=false
+                        connection.connectTimeout=3000;connection.readTimeout=3000
+                        if(connection.responseCode!=200)null else connection.inputStream.use{input->
+                            val bytes=input.readBytesLimited(128*1024)
+                            decodeRemoteBitmap(bytes,32,32)
+                        }
+                    }finally{connection.disconnect()}
+                }.getOrNull()}
+            }
+            Box(Modifier.size(40.dp).clip(RoundedCornerShape(8.dp)).clickable(onClickLabel="Відкрити ${link.host}"){openCatalogUrl(context,link.pageUrl)}.semantics{contentDescription="Сайт джерела: ${link.host}, ${link.pageUrl}"},contentAlignment=Alignment.Center){
+                if(bitmap!=null)Image(bitmap!!,null,Modifier.size(18.dp)) else Mdi("web",18.dp,Muted)
+            }
+        }
+    }
+}
+private fun java.io.InputStream.readBytesLimited(limit:Int):ByteArray {
+    val out=java.io.ByteArrayOutputStream();val buffer=ByteArray(4096)
+    while(out.size()<=limit){val count=read(buffer,0,minOf(buffer.size,limit+1-out.size()));if(count<0)break;out.write(buffer,0,count)}
+    return if(out.size()>limit)ByteArray(0) else out.toByteArray()
+}
+
 private fun openCatalogUrl(context:Context,url:String){if(url.isBlank())return;runCatching{context.startActivity(Intent(Intent.ACTION_VIEW,Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))}}
 @Composable private fun CatalogMetric(iconRes:Int,label:String,value:String,enabled:Boolean,modifier:Modifier=Modifier,onClick:()->Unit){
     Column(modifier.alpha(if(enabled)1f else .35f).clickable(enabled=enabled,onClick=onClick),horizontalAlignment=Alignment.CenterHorizontally){
