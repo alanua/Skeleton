@@ -30823,3 +30823,12 @@ def test_head_repository_gh245_identity_fail_closed(repository, owner, expected)
         assert result == (None, 14, "a" * 40, "runner/issue-13")
     else:
         assert result == ("existing_pr_head_repository_mismatch", None, None, None)
+
+
+def test_media_signer_reconcile_is_not_poll_dispatchable():
+    from core.runner_media_snapshot_signer_install import ACTION_ID
+
+    assert ACTION_ID not in runner.RUNTIME_MAINTENANCE_TASK_IDS
+    report = runner.dispatch_runtime_maintenance_task(ACTION_ID, "/unused", "")
+    assert "BLOCKED" in report
+    assert "maintenance_task_id_not_allowlisted" in report
