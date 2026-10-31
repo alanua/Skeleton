@@ -18,6 +18,11 @@ from typing import Any, Final
 import urllib.error
 import urllib.request
 
+# Read-only API only: deliberately excluded from registered maintenance dispatch.
+from core.runner_media_snapshot_signer_install import (
+    preflight_media_snapshot_signer_reconcile,
+)
+
 from core.home_edge.esp_lab_stage1_signer_install import (
     HOME_EDGE_ESP_LAB_STAGE1_INSTALLER_BLOB,
     HOME_EDGE_ESP_LAB_STAGE1_SIGNER_APPROVED_MAIN_SHA,
