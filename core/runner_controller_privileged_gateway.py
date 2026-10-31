@@ -159,6 +159,10 @@ _TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$")
 _ISO_Z_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 
 
+# #4924: media snapshot reconciliation remains intentionally unregistered.
+# See runner_media_snapshot_signer_gateway.py for synthetic validation and the
+# separately reviewed bootstrap/import-closure/post-audit activation dependency.
+# Keep this four-action trust boundary aligned with the installed hardening layer.
 def _embedded_action_registry() -> Mapping[str, object]:
     return {
         "schema": "skeleton.runner_privileged_actions.v1",
