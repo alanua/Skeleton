@@ -248,6 +248,16 @@ def test_source_sites_accept_only_explicit_provenance_and_keep_future_api_fields
     assert 'job=j;sources=j.optJSONArray("sources")?.objects().orEmpty()' in _source()
 
 
+def test_source_sites_read_explicit_discovery_and_history_pages_before_arrays() -> None:
+    collector = _source_site_helpers().split("internal fun sourceSiteLinks", 1)[1]
+    source_page = collector.index('pages.add(record.optString("source_page_url",""))')
+    discovery_page = collector.index('pages.add(record.optString("discovery_page_url",""))')
+    history_page = collector.index('pages.add(record.optString("history_page_url",""))')
+    arrays = collector.index('listOf("source_sites","source_pages")')
+    assert source_page < discovery_page < history_page < arrays
+    assert "pages.mapNotNull(::sourceSiteLink).distinctBy{it.pageUrl}.take(5)" in collector
+
+
 def test_source_site_url_validation_is_pure_and_conservative() -> None:
     helper = _source_site_helpers()
     validator = helper.split("internal fun sourceSiteLink(raw:String)", 1)[1].split(
@@ -287,3 +297,63 @@ def test_source_site_favicon_privacy_fallback_and_browser_accessibility() -> Non
     assert "Intent(Intent.ACTION_VIEW,Uri.parse(url))" in text
     assert "link.faviconUrl" in row
     assert "stream" not in row
+
+
+def _source_site_detail_dialog() -> str:
+    return _source().split("@Composable private fun VideoDetailDialog", 1)[1].split(
+        "@Composable private fun SelectorField", 1
+    )[0]
+
+
+def test_source_site_detail_dialog_receives_selected_source_links() -> None:
+    text = _source()
+    assert "VideoDetailDialog(context,cat,bm,external,sourceLinks=detailSourceLinks,onDismiss={detailOpen=false})" in text
+    assert "sourceLinks:List<SourceSiteLink>" in _source_site_detail_dialog()
+    # Selection already resolves episode/quality/voice and trailer before collecting links.
+    selection = text.split("val selectedCandidate=", 1)[1].split("val selectedIsTrailer=", 1)[0]
+    assert 'it.optString("season")==season&&it.optString("episode")==episode' in selection
+    assert 'it.optString("quality")==quality&&sourceVoice(it)==voice' in selection
+    assert "val selectedOrTrailer=selectedCandidate ?: sources.firstOrNull" in selection
+    assert "val detailSourceLinks=if(selectedOrTrailer!=null)sourceSiteLinks(selectedOrTrailer) else sourceSiteLinks(job)" in selection
+    # Known sources with missing provenance stay empty; unrelated job sites are not merged.
+    assert "sourceSiteLinks(selectedOrTrailer,job)" not in selection
+    assert "ifEmpty" not in selection
+    assert "!!" not in selection
+    assert "sourceSiteLinks(" not in _source_site_detail_dialog()
+    assert text.count("internal fun sourceSiteLinks(") == 1
+    assert text.count("@Composable private fun SourceSiteLinkRow(") == 1
+
+
+def test_source_site_detail_dialog_bottom_row_preserves_metadata_and_scrolling() -> None:
+    dialog = _source_site_detail_dialog()
+    assert "Column(Modifier.weight(1f).verticalScroll(rememberScrollState())" in dialog
+    assert "contentScale=ContentScale.Crop" in dialog
+    assert "Dialog(onDismissRequest=onDismiss" in dialog
+    assert "clickable(onClick=onDismiss)" in dialog
+    for rating in ("tmdb", "imdb", "mdblist", "trakt", "moviebase"):
+        assert f"CatalogMetric(R.drawable.{rating}_brand" in dialog
+    assert 'val overview=cat.optString("overview")' in dialog
+    assert "Text(overview,fontSize=16.sp,lineHeight=24.sp" in dialog
+    for field in ("genres", "original_language", "certification", "release_date", "original_title", "countries", "networks", "companies"):
+        assert f'"{field}"' in dialog
+    assert dialog.index("SourceSiteLinkRow(sourceLinks)") > dialog.index('DetailLine("Компанії"')
+    assert dialog.split("SourceSiteLinkRow(sourceLinks)", 1)[1].strip().startswith("Spacer(Modifier.height(28.dp))")
+    for forbidden in ("api.get", "api.post", "LaunchedEffect", "sourceLinks!!", "sourceLinks?"):
+        assert forbidden not in dialog
+
+
+def test_source_site_detail_browser_taps_do_not_dismiss_dialog() -> None:
+    text = _source()
+    row = text.split("@Composable private fun SourceSiteLinkRow", 1)[1].split(
+        "private fun java.io.InputStream.readBytesLimited", 1
+    )[0]
+    assert 'clickable(onClickLabel="Відкрити ${link.host}"){openCatalogUrl(context,link.pageUrl)}' in row
+    assert "if(links.isEmpty())return" in row
+    assert "onDismiss" not in row
+    assert "detailOpen" not in row
+    browser = text.split("private fun openCatalogUrl", 1)[1].split(
+        "@Composable private fun CatalogMetric", 1
+    )[0]
+    assert "runCatching{context.startActivity(Intent(Intent.ACTION_VIEW,Uri.parse(url))" in browser
+    assert "onDismiss" not in browser
+    assert "SourceSiteLinkRow(sourceLinks)" in _source_site_detail_dialog()

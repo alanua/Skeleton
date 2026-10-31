@@ -2224,6 +2224,8 @@ private fun VideoScreen(api:HomeApi,active:Boolean,historyRevision:Int,selection
     else
         sources.firstOrNull{it.optString("quality")==quality&&sourceVoice(it)==voice}
     val selectedOrTrailer=selectedCandidate ?: sources.firstOrNull{isTrailerSource(it)&&it.optString("quality")==quality&&sourceVoice(it)==voice}
+    // A known source owns the provenance, even when it has no verified website.
+    val detailSourceLinks=if(selectedOrTrailer!=null)sourceSiteLinks(selectedOrTrailer) else sourceSiteLinks(job)
     val selectedIsTrailer=isTrailerSource(selectedOrTrailer)
     val selectedDuration=mediaDurationLabel(selectedOrTrailer?.optDouble("duration",0.0)?:0.0).ifBlank{metadataRuntimeLabel(cat.optJSONObject("details")?:JSONObject())}
     val activeSame=selectedOrTrailer!=null&&currentPlayer.optBoolean("running")&&currentPlayer.optString("job_id")==jobId&&currentPlayer.optString("source_id")==selectedOrTrailer.optString("source_id")
@@ -2385,7 +2387,7 @@ private fun VideoScreen(api:HomeApi,active:Boolean,historyRevision:Int,selection
             }
         } else seasonOpen=false
     },{seasonOpen=false})
-    if(detailOpen)VideoDetailDialog(context,cat,bm,external,onDismiss={detailOpen=false})
+    if(detailOpen)VideoDetailDialog(context,cat,bm,external,sourceLinks=detailSourceLinks,onDismiss={detailOpen=false})
     }
 }
 
@@ -2483,6 +2485,8 @@ internal fun sourceSiteLinks(vararg records:JSONObject?):List<SourceSiteLink> {
     val pages=mutableListOf<String>()
     records.filterNotNull().forEach{record->
         pages.add(record.optString("source_page_url",""))
+        pages.add(record.optString("discovery_page_url",""))
+        pages.add(record.optString("history_page_url",""))
         listOf("source_sites","source_pages").forEach{field->
             record.optJSONArray(field)?.objects().orEmpty().forEach{site->
                 pages.add(site.optString("source_page_url",""))
@@ -2533,7 +2537,7 @@ private fun openCatalogUrl(context:Context,url:String){if(url.isBlank())return;r
     }
 }
 
-@Composable private fun VideoDetailDialog(context:Context,cat:JSONObject,bm:androidx.compose.ui.graphics.ImageBitmap?,external:JSONObject,onDismiss:()->Unit){
+@Composable private fun VideoDetailDialog(context:Context,cat:JSONObject,bm:androidx.compose.ui.graphics.ImageBitmap?,external:JSONObject,sourceLinks:List<SourceSiteLink>,onDismiss:()->Unit){
     val details=cat.optJSONObject("details")?:JSONObject(); val seasons=cat.optJSONArray("seasons")?.objects().orEmpty().filter{it.optBoolean("released",true)}; val totalEpisodes=seasons.sumOf{it.optInt("episode_count",0)}
     fun arr(name:String)=details.optJSONArray(name)?.strings().orEmpty()
     val tmdbId=cat.optInt("tmdb_id",external.optInt("tmdb_id",0));val imdbId=cat.optString("imdb_id",external.optString("imdb_id")).trim();val mediaType=cat.optString("media_type","movie")
@@ -2559,7 +2563,9 @@ private fun openCatalogUrl(context:Context,url:String){if(url.isBlank())return;r
             if(mediaType=="tv")Row(Modifier.fillMaxWidth()){Fact(ui("Сезони"),seasons.size.takeIf{it>0}?.toString().orEmpty(),Modifier.weight(1f));Fact(ui("Кількість серій"),totalEpisodes.takeIf{it>0}?.toString().orEmpty(),Modifier.weight(1f))}
             Row(Modifier.fillMaxWidth()){Fact(ui("Мова оригіналу"),detailValueUa("Мова оригіналу",details.optString("original_language")),Modifier.weight(1f));Fact(ui("Сертифікація"),details.optString("certification"),Modifier.weight(1f))}
             Row(Modifier.fillMaxWidth()){Fact(ui("Дата релізу"),details.optString("release_date"),Modifier.weight(1f));Fact(ui("Оригінальна назва"),cat.optString("original_title"),Modifier.weight(1f))}
-            val countries=arr("countries");if(countries.isNotEmpty())DetailLine("Країни",countries.joinToString(" · "));val networks=arr("networks").map{it.removePrefix("See more TV shows from ").removeSuffix("...")};if(networks.isNotEmpty())DetailLine("Мережі",networks.joinToString(" · "));val companies=arr("companies");if(companies.isNotEmpty())DetailLine("Компанії",companies.joinToString(" · "));Spacer(Modifier.height(28.dp))
+            val countries=arr("countries");if(countries.isNotEmpty())DetailLine("Країни",countries.joinToString(" · "));val networks=arr("networks").map{it.removePrefix("See more TV shows from ").removeSuffix("...")};if(networks.isNotEmpty())DetailLine("Мережі",networks.joinToString(" · "));val companies=arr("companies");if(companies.isNotEmpty())DetailLine("Компанії",companies.joinToString(" · "))
+            SourceSiteLinkRow(sourceLinks)
+            Spacer(Modifier.height(28.dp))
         }
     }}}
 }
