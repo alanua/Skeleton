@@ -201,3 +201,159 @@ def test_home_and_video_header_keep_connection_status() -> None:
     assert "showStatus=false" not in video_line
     assert 'Text(if(connected) "Підключено" else "Недоступно"' in text
     assert 'background(if(connected)Green else Muted)' in text
+
+
+def _source_site_helpers() -> str:
+    return _source().split("internal data class SourceSiteLink", 1)[1].split(
+        "@Composable private fun SourceSiteLinkRow", 1
+    )[0]
+
+
+def test_source_sites_render_below_all_three_work_cards() -> None:
+    text = _source()
+    editor = text.split("@Composable private fun HistoryEditorRow", 1)[1].split(
+        "private data class EditableChannel", 1
+    )[0]
+    picker = text.split("@Composable private fun HistoryPickerRow", 1)[1].split(
+        "private const val TRAKT_PACKAGE", 1
+    )[0]
+    for card in (editor, picker):
+        assert "SourceSiteLinkRow(sourceSiteLinks(item))" in card
+        assert card.index("SourceSiteLinkRow") > card.index('item.optString("overview")')
+    # The selection Row ends before the favicon row: browser clicks cannot select a work.
+    assert "}};SourceSiteLinkRow(sourceSiteLinks(item))}}" in picker
+    assert ";Column{Row(" in picker
+    assert "SourceSiteLinkRow(sourceSiteLinks(selectedOrTrailer,job))" in text
+    active = text.split("val selectedOrTrailer=", 1)[1]
+    assert active.index("SourceSiteLinkRow") > active.index('VideoToggleControl("autoplay-repeat"')
+
+
+def test_source_sites_accept_only_explicit_provenance_and_keep_future_api_fields() -> None:
+    helper = _source_site_helpers()
+    collector = helper.split("internal fun sourceSiteLinks", 1)[1]
+    assert 'record.optString("source_page_url","")' in collector
+    assert 'listOf("source_sites","source_pages")' in collector
+    assert 'site.optString("source_page_url","")' in collector
+    assert 'site.optString("page_url","")' in collector
+    assert 'record.optString("page_url"' not in collector
+    assert "records.filterNotNull()" in collector
+    assert 'optJSONArray(field)?.objects().orEmpty()' in collector
+    assert "pages.mapNotNull(::sourceSiteLink).distinctBy{it.pageUrl}.take(5)" in collector
+    for forbidden in ('optString("url"', 'optJSONObject("stream")', 'optString("poster"', 'optString("favicon_url"'):
+        assert forbidden not in helper
+    # History dedupe retains the original API objects, including new provenance fields.
+    history = _source().split("internal fun canonicalHistoryItems", 1)[1].split("\n}", 1)[0]
+    assert "return items.filter" in history
+    assert "JSONObject(" not in history
+    assert 'job=j;sources=j.optJSONArray("sources")?.objects().orEmpty()' in _source()
+
+
+def test_source_sites_read_explicit_discovery_and_history_pages_before_arrays() -> None:
+    collector = _source_site_helpers().split("internal fun sourceSiteLinks", 1)[1]
+    source_page = collector.index('pages.add(record.optString("source_page_url",""))')
+    discovery_page = collector.index('pages.add(record.optString("discovery_page_url",""))')
+    history_page = collector.index('pages.add(record.optString("history_page_url",""))')
+    arrays = collector.index('listOf("source_sites","source_pages")')
+    assert source_page < discovery_page < history_page < arrays
+    assert "pages.mapNotNull(::sourceSiteLink).distinctBy{it.pageUrl}.take(5)" in collector
+
+
+def test_source_site_url_validation_is_pure_and_conservative() -> None:
+    helper = _source_site_helpers()
+    validator = helper.split("internal fun sourceSiteLink(raw:String)", 1)[1].split(
+        "internal fun sourceSiteLinks", 1
+    )[0]
+    assert "java.net.URI(raw.trim())" in validator
+    assert 'scheme !in setOf("http","https")' in validator
+    assert "uri.rawUserInfo!=null" in validator
+    assert "!host.contains('.')" in validator
+    assert "!host.last().isLetter()" in validator  # rejects numeric IPv4 and IPv6 literals
+    assert '"localhost","local","internal","lan"' in validator
+    assert "media.containsMatchIn(path)" in validator
+    assert "java.net.URLDecoder.decode(part" in validator
+    assert "media.containsMatchIn(decoded)" in validator
+    assert "token|secret|password" in validator
+    assert "signature|credential" in validator
+    assert "uri.rawPath.orEmpty()" in validator
+    assert 'else "?$query"' in validator
+    for extension in ("m3u8", "mpd", "mp4", "mkv", "webm", "mp3"):
+        assert extension in validator
+    for forbidden in ("android.net", "Uri.", "openConnection", "InetAddress", "URL(raw"):
+        assert forbidden not in validator
+
+
+def test_source_site_favicon_privacy_fallback_and_browser_accessibility() -> None:
+    text = _source()
+    assert 'val faviconUrl:String get()="https://$host/favicon.ico"' in text
+    row = text.split("@Composable private fun SourceSiteLinkRow", 1)[1].split(
+        "private fun openCatalogUrl", 1
+    )[0]
+    assert "connection.instanceFollowRedirects=false" in row
+    assert "readBytesLimited(128*1024)" in row
+    assert 'Mdi("web",18.dp,Muted)' in row
+    assert "contentDescription=" in row
+    assert "onClickLabel=" in row
+    assert "openCatalogUrl(context,link.pageUrl)" in row
+    assert "Intent(Intent.ACTION_VIEW,Uri.parse(url))" in text
+    assert "link.faviconUrl" in row
+    assert "stream" not in row
+
+
+def _source_site_detail_dialog() -> str:
+    return _source().split("@Composable private fun VideoDetailDialog", 1)[1].split(
+        "@Composable private fun SelectorField", 1
+    )[0]
+
+
+def test_source_site_detail_dialog_receives_selected_source_links() -> None:
+    text = _source()
+    assert "VideoDetailDialog(context,cat,bm,external,sourceLinks=detailSourceLinks,onDismiss={detailOpen=false})" in text
+    assert "sourceLinks:List<SourceSiteLink>" in _source_site_detail_dialog()
+    # Selection already resolves episode/quality/voice and trailer before collecting links.
+    selection = text.split("val selectedCandidate=", 1)[1].split("val selectedIsTrailer=", 1)[0]
+    assert 'it.optString("season")==season&&it.optString("episode")==episode' in selection
+    assert 'it.optString("quality")==quality&&sourceVoice(it)==voice' in selection
+    assert "val selectedOrTrailer=selectedCandidate ?: sources.firstOrNull" in selection
+    assert "val detailSourceLinks=if(selectedOrTrailer!=null)sourceSiteLinks(selectedOrTrailer) else sourceSiteLinks(job)" in selection
+    # Known sources with missing provenance stay empty; unrelated job sites are not merged.
+    assert "sourceSiteLinks(selectedOrTrailer,job)" not in selection
+    assert "ifEmpty" not in selection
+    assert "!!" not in selection
+    assert "sourceSiteLinks(" not in _source_site_detail_dialog()
+    assert text.count("internal fun sourceSiteLinks(") == 1
+    assert text.count("@Composable private fun SourceSiteLinkRow(") == 1
+
+
+def test_source_site_detail_dialog_bottom_row_preserves_metadata_and_scrolling() -> None:
+    dialog = _source_site_detail_dialog()
+    assert "Column(Modifier.weight(1f).verticalScroll(rememberScrollState())" in dialog
+    assert "contentScale=ContentScale.Crop" in dialog
+    assert "Dialog(onDismissRequest=onDismiss" in dialog
+    assert "clickable(onClick=onDismiss)" in dialog
+    for rating in ("tmdb", "imdb", "mdblist", "trakt", "moviebase"):
+        assert f"CatalogMetric(R.drawable.{rating}_brand" in dialog
+    assert 'val overview=cat.optString("overview")' in dialog
+    assert "Text(overview,fontSize=16.sp,lineHeight=24.sp" in dialog
+    for field in ("genres", "original_language", "certification", "release_date", "original_title", "countries", "networks", "companies"):
+        assert f'"{field}"' in dialog
+    assert dialog.index("SourceSiteLinkRow(sourceLinks)") > dialog.index('DetailLine("Компанії"')
+    assert dialog.split("SourceSiteLinkRow(sourceLinks)", 1)[1].strip().startswith("Spacer(Modifier.height(28.dp))")
+    for forbidden in ("api.get", "api.post", "LaunchedEffect", "sourceLinks!!", "sourceLinks?"):
+        assert forbidden not in dialog
+
+
+def test_source_site_detail_browser_taps_do_not_dismiss_dialog() -> None:
+    text = _source()
+    row = text.split("@Composable private fun SourceSiteLinkRow", 1)[1].split(
+        "private fun java.io.InputStream.readBytesLimited", 1
+    )[0]
+    assert 'clickable(onClickLabel="Відкрити ${link.host}"){openCatalogUrl(context,link.pageUrl)}' in row
+    assert "if(links.isEmpty())return" in row
+    assert "onDismiss" not in row
+    assert "detailOpen" not in row
+    browser = text.split("private fun openCatalogUrl", 1)[1].split(
+        "@Composable private fun CatalogMetric", 1
+    )[0]
+    assert "runCatching{context.startActivity(Intent(Intent.ACTION_VIEW,Uri.parse(url))" in browser
+    assert "onDismiss" not in browser
+    assert "SourceSiteLinkRow(sourceLinks)" in _source_site_detail_dialog()
