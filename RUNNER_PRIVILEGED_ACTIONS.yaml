@@ -52,3 +52,8 @@ actions:
     repository: alanua/Skeleton
     target: runner-controller
     operator_approval: EXACT_HEAD_RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_V1_APPROVED
+  - action_id: home_edge_media_snapshot_signer_reconcile_v1
+    handler: home_edge_media_snapshot_signer_reconcile
+    repository: alanua/Skeleton
+    target: runner-controller
+    operator_approval: alanua/Skeleton#4922:home_edge_media_snapshot_signer_reconcile_v1
