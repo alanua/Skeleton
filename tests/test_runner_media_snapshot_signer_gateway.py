@@ -1,5 +1,7 @@
 """In-memory checks only: never invoke a gateway or installer."""
 import hashlib
+from pathlib import Path
+import subprocess
 from dataclasses import replace
 
 import pytest
@@ -55,6 +57,8 @@ def test_matching_evidence_is_still_blocked(evidence, monkeypatch):
     ("skeleton_main_sha", signer.SOURCE_MAIN_SHA, "skeleton_main_sha_mismatch"),
     ("source_repository", "alanua/Skeleton", "source_repository_mismatch"),
     ("source_main_sha", signer.SKELETON_MAIN_SHA, "source_main_sha_mismatch"),
+    ("source_main_sha", "475df11fa38f910cc4f81a4dfbf535d04b7ad092",
+     "source_main_sha_mismatch"),
     ("source_main_sha", "0" * 40, "source_main_sha_mismatch"),
     ("source_clean", False, "source_not_clean"),
     ("source_clean", 1, "source_not_clean"),
@@ -101,7 +105,7 @@ def test_fixed_pins_and_blocked_gateway_registration():
         "100755", "100644", "100644", "100644",
     ]
     assert [blob for _, _, blob in signer.ARTIFACTS] == [
-        "b26493da46686a96d0edc5c79efb6ecba6a0045c",
+        "6d596a70dc010393c3d83a3626170017cb88ee02",
         "71bd0a237f4180fc52694a86c596fadf0b2ed687",
         "24620d9e9fe4f62c055113e6aeefb2d0984be2d5",
         "3e0a27bdb229db594813c2ea7bd8af035625e565",
@@ -115,3 +119,58 @@ def test_fixed_pins_and_blocked_gateway_registration():
         gateway.MEDIA_SNAPSHOT_SIGNER_ACTION_ID,
     ]
     assert gateway.load_action_registry()[signer.ACTION_ID].operator_approval == signer.OPERATOR_APPROVAL
+
+
+@pytest.fixture
+def pinned_checkout_evidence():
+    # Optional read-only Git object access is confined to tests. Never run source.
+    checkout = Path("/home/agent/agent-dev/repos/skeleton-media")
+    source_sha = "3824df3b6de17ac259504b75c26c0d028642f9e4"
+    if not checkout.is_dir():
+        pytest.skip("fixed media checkout is unavailable")
+
+    def git(*args):
+        return subprocess.run(
+            ["git", "-C", str(checkout), *args], check=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        ).stdout
+
+    try:
+        git("cat-file", "-e", source_sha + "^{commit}")
+    except subprocess.CalledProcessError:
+        pytest.skip("fixed media commit is unavailable")
+    return git, source_sha
+
+
+def test_independent_pinned_tree_and_blob_bytes(pinned_checkout_evidence):
+    git, source_sha = pinned_checkout_evidence
+    assert signer.SOURCE_MAIN_SHA == source_sha
+    entries = {}
+    for line in git("ls-tree", "-r", source_sha).decode().splitlines():
+        metadata, path = line.split("\t", 1)
+        mode, kind, blob = metadata.split()
+        entries[path] = (mode, kind, blob)
+    artifacts = {}
+    for path, mode, blob in signer.ARTIFACTS:
+        assert entries[path] == (mode, "blob", blob)
+        content = git("cat-file", "blob", blob)
+        assert hashlib.sha1(f"blob {len(content)}\0".encode() + content).hexdigest() == blob
+        artifacts[path] = signer.SyntheticArtifact(mode, content)
+    evidence = dict(
+        action_id=signer.ACTION_ID,
+        operator_approval=signer.OPERATOR_APPROVAL,
+        skeleton_main_sha=signer.SKELETON_MAIN_SHA,
+        source_repository=signer.SOURCE_REPOSITORY,
+        source_main_sha=source_sha,
+        source_clean=True,
+        artifacts=artifacts,
+    )
+    check(evidence, "gateway_bootstrap_required")
+    stale_blob = "b26493da46686a96d0edc5c79efb6ecba6a0045c"
+    stale_content = git("cat-file", "blob", stale_blob)
+    assert hashlib.sha1(
+        f"blob {len(stale_content)}\0".encode() + stale_content
+    ).hexdigest() == stale_blob
+    path, mode, _ = signer.ARTIFACTS[0]
+    artifacts[path] = signer.SyntheticArtifact(mode, stale_content)
+    check(evidence, "source_blob_mismatch")

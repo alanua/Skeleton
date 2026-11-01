@@ -3,13 +3,16 @@
 Activation dependency: separately review/authorize the protected gateway bootstrap,
 its installed import closure, hardening action/registry pins, capability metadata,
 and request schema together. The current bootstrap does not ship this module and
-both gateway layers enforce four actions. Do not register this action piecemeal.
+the original four actions and fail-closed fifth action remain unchanged. Gateway
+bootstrap, installed import closure and authorized root action remain blocked.
+Do not activate this action piecemeal.
 
 A future action must stage verified Git objects from the independently pinned media
 repository (never request.checkout_path), execute only PROTECTED_INSTALLER as
 root:root 0555, and audit installed blobs, ownership, modes and exact sudoers before
 commit, retaining verified backups and rollback evidence. The pinned installer has
-backup/rollback and staging verification but lacks that final installed-file audit.
+backup/rollback, staging verification and an independent installed-artifact audit
+after skeleton-media PR #79 merged.
 This helper neither attests live provenance nor authorizes execution, even when all
 synthetic evidence matches. No paths, commands, secrets, or IO callbacks are inputs.
 """
@@ -22,7 +25,7 @@ ACTION_ID: Final = "home_edge_media_snapshot_signer_reconcile_v1"
 OPERATOR_APPROVAL: Final = "alanua/Skeleton#4922:" + ACTION_ID
 SKELETON_MAIN_SHA: Final = "3d347a7e54639b86c34c52eecb23fb83fd021871"
 SOURCE_REPOSITORY: Final = "alanua/skeleton-media"
-SOURCE_MAIN_SHA: Final = "475df11fa38f910cc4f81a4dfbf535d04b7ad092"
+SOURCE_MAIN_SHA: Final = "3824df3b6de17ac259504b75c26c0d028642f9e4"
 PROTECTED_INSTALLER: Final = (
     "/usr/local/libexec/skeleton/home-edge/media-source-snapshot-installer/"
     "install_home_edge_media_source_snapshot_signer.sh"
@@ -30,7 +33,7 @@ PROTECTED_INSTALLER: Final = (
 # Git tree modes, independently read at SOURCE_MAIN_SHA; not filesystem modes.
 ARTIFACTS: Final = (
     ("scripts/install_home_edge_media_source_snapshot_signer.sh", "100755",
-     "b26493da46686a96d0edc5c79efb6ecba6a0045c"),
+     "6d596a70dc010393c3d83a3626170017cb88ee02"),
     ("scripts/home_edge_media_source_snapshot_signer_payload.py", "100644",
      "71bd0a237f4180fc52694a86c596fadf0b2ed687"),
     ("scripts/home_edge_media_source_snapshot_signer", "100644",
