@@ -1809,9 +1809,11 @@ private fun Header(title:String, connected:Boolean, endpointId:String, endpoints
     val seriesNav=running&&se.isNotBlank()
     Column(Modifier.fillMaxSize().clip(RoundedCornerShape(16.dp)).background(Card)){
         BoxWithConstraints(Modifier.weight(1f).fillMaxWidth().padding(top=10.dp,start=12.dp,end=12.dp),contentAlignment=Alignment.Center){
-            val posterWidth=minOf(maxWidth,maxHeight*(2f/3f))
+            val posterAspect=bitmap?.let{it.width.toFloat()/it.height.coerceAtLeast(1).toFloat()}?: (2f/3f)
+            val posterWidth=minOf(maxWidth,maxHeight*posterAspect)
+            val posterHeight=posterWidth/posterAspect
             val frameSide=((maxWidth-posterWidth)/2f).coerceAtLeast(0.dp)
-            Box(Modifier.fillMaxHeight().width(posterWidth).clip(RoundedCornerShape(14.dp)).background(Bg).border(1.dp,Line,RoundedCornerShape(14.dp)),contentAlignment=Alignment.Center){if(bitmap!=null)Image(bitmap,null,Modifier.fillMaxSize(),contentScale=ContentScale.Crop) else Mdi("television-play",48.dp,Color(0xFFD7DCE1))}
+            Box(Modifier.height(posterHeight).width(posterWidth).clip(RoundedCornerShape(14.dp)).background(Bg).border(1.dp,Line,RoundedCornerShape(14.dp)),contentAlignment=Alignment.Center){if(bitmap!=null)Image(bitmap,null,Modifier.fillMaxSize(),contentScale=ContentScale.Fit) else Mdi("television-play",48.dp,Color(0xFFD7DCE1))}
             if(seriesNav){
                 fun step(direction:Int){if(episodeStepping)return;episodeStepping=true;scope.launch{runCatching{api.post(endpointPath(endpointId,"/video/episode/step"),endpointMutation(endpointId,"direction" to direction))};episodeStepping=false}}
                 Box(Modifier.align(Alignment.CenterStart).width(frameSide).fillMaxHeight().clickable(enabled=!episodeStepping){step(-1)},contentAlignment=Alignment.Center){Text("‹",fontSize=27.sp,lineHeight=28.sp,fontWeight=FontWeight.Medium,color=Color(0xFFF4F7FA))}
