@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import tempfile
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
 
@@ -10,7 +12,7 @@ from core.family_document_calendar import (
 )
 from core.family_document_intake import build_family_document_record, build_intake_request
 from core.family_document_report import render_package_report
-from core.family_document_sources import LocalDirectoryDocumentSource
+from core.family_document_sources import LocalDirectoryDocumentSource, read_snapshot
 from core.family_document_state import FamilyDocumentReceiptOutbox, FamilyDocumentState
 from core.private_memory_history import content_hash
 from core.telegram_notifications import send_telegram_notification
@@ -54,7 +56,8 @@ class FamilyDocumentRuntime:
         skipped = 0
         for document in self.source.scan():
             artifact_ref = f"document:{document.source_id}"
-            if not self.state.should_process(document.source_id, document.sha256):
+            token = self.state.claim_work(document.source_id, document.sha256)
+            if token is None:
                 skipped += 1
                 continue
             self.state.record_lifecycle(
@@ -77,6 +80,7 @@ class FamilyDocumentRuntime:
                     document.path,
                     source_id=document.source_id,
                     source_sha256=document.sha256,
+                    snapshot=document.snapshot,
                 )
                 self.state.record_lifecycle(
                     source_ref=document.source_id,
@@ -108,7 +112,14 @@ class FamilyDocumentRuntime:
                     provenance_refs=(artifact_ref,),
                     record_ref=f"family_document:{record['record_id']}",
                 )
-                archive_receipt = self.archive_sink.archive(record, source_path=document.path)
+                archive_bytes = read_snapshot(document.path, document.snapshot)
+                if hashlib.sha256(archive_bytes).hexdigest() != document.sha256:
+                    raise ValueError("source snapshot changed")
+                self.state.begin_archive(document.source_id, document.sha256, token)
+                with tempfile.TemporaryDirectory(prefix="skeleton-archive-input-") as directory:
+                    staged = Path(directory) / ("document" + document.path.suffix.lower())
+                    staged.write_bytes(archive_bytes)
+                    archive_receipt = self.archive_sink.archive(record, source_path=staged)
                 _require_authoritative_archive_receipt(archive_receipt)
                 canonical_ref = str(archive_receipt.get("canonical_ref") or f"family_document:{record['record_id']}")
                 self.state.record_lifecycle(
@@ -131,12 +142,13 @@ class FamilyDocumentRuntime:
                     calendar_receipt,
                 )
                 records.append(report_record)
-                self.state.mark_work_done(document.source_id, document.sha256)
+                self.state.mark_work_done(document.source_id, document.sha256, token=token)
             except Exception as exc:
                 state = self.state.mark_work_failure(
                     document.source_id,
                     document.sha256,
                     type(exc).__name__,
+                    token=token,
                 )
                 if state == "REVIEW":
                     review_required += 1
