@@ -96,7 +96,7 @@ def test_no_source_access_before_authority(evidence):
     check(evidence, "operator_approval_mismatch")
 
 
-def test_fixed_pins_and_legacy_registry_unchanged():
+def test_fixed_pins_and_blocked_gateway_registration():
     assert [mode for _, mode, _ in signer.ARTIFACTS] == [
         "100755", "100644", "100644", "100644",
     ]
@@ -112,5 +112,6 @@ def test_fixed_pins_and_legacy_registry_unchanged():
         gateway.RUNNER_CONTROLLER_REPAIR_CODEX_STATE_MOUNT_TASK_ID,
         gateway.SKELETON_CONTROL_MCP_HETZNER_ACTIVATE_TASK_ID,
         gateway.RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_TASK_ID,
+        gateway.MEDIA_SNAPSHOT_SIGNER_ACTION_ID,
     ]
-    assert signer.ACTION_ID not in gateway.load_action_registry()
+    assert gateway.load_action_registry()[signer.ACTION_ID].operator_approval == signer.OPERATOR_APPROVAL

@@ -188,6 +188,11 @@ def _action_registry() -> str:
             repository: alanua/Skeleton
             target: runner-controller
             operator_approval: {gateway.RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_OPERATOR_APPROVAL}
+          - action_id: {gateway.MEDIA_SNAPSHOT_SIGNER_ACTION_ID}
+            handler: home_edge_media_snapshot_signer_reconcile
+            repository: alanua/Skeleton
+            target: runner-controller
+            operator_approval: {gateway.MEDIA_SNAPSHOT_SIGNER_OPERATOR_APPROVAL}
         """
     )
 
@@ -387,6 +392,7 @@ def test_action_registry_preserves_existing_actions_and_adds_exact_hetzner_mcp_a
         gateway.RUNNER_CONTROLLER_REPAIR_CODEX_STATE_MOUNT_TASK_ID,
         gateway.SKELETON_CONTROL_MCP_HETZNER_ACTIVATE_TASK_ID,
         gateway.RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_TASK_ID,
+        gateway.MEDIA_SNAPSHOT_SIGNER_ACTION_ID,
     ]
     assert action.source_blob == maintenance.HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALLER_BLOB
     assert action.installer_argv == (
@@ -971,3 +977,44 @@ def test_fixed_git_nonroot_keeps_direct_fixed_git_with_clean_env(monkeypatch) ->
     assert kwargs["stderr"] == subprocess.DEVNULL
     assert kwargs["stdout"] == subprocess.PIPE
     assert kwargs["check"] is False
+
+
+def test_media_signer_is_deterministically_blocked_without_execution(tmp_path, monkeypatch):
+    def forbidden(*args, **kwargs):
+        raise AssertionError("blocked media action attempted execution")
+
+    monkeypatch.setattr(gateway.subprocess, "run", forbidden)
+    request = _request(
+        action_id=gateway.MEDIA_SNAPSHOT_SIGNER_ACTION_ID,
+        operator_approval=gateway.MEDIA_SNAPSHOT_SIGNER_OPERATOR_APPROVAL,
+    )
+    receipt = gateway.execute_gateway_request(request, now=NOW)
+    assert receipt["status"] == "NEEDS_OPERATOR"
+    assert receipt["reason"] == "MEDIA_INSTALLER_REVISION_PENDING_APPROVAL"
+    for key in ("mutation_started", "mutation_performed", "external_side_effects_executed",
+                "protected_copy_verified", "installed_artifacts_verified", "activation_executed"):
+        assert receipt[key] is False
+    assert gateway.execute_gateway_request(request, now=NOW) == receipt
+
+
+def test_media_signer_rejects_approval_and_extra_fields(tmp_path):
+    request = _request(action_id=gateway.MEDIA_SNAPSHOT_SIGNER_ACTION_ID,
+                       operator_approval="unapproved")
+    assert gateway.execute_gateway_request(request, now=NOW)["reason"] == "OPERATOR_APPROVAL_MISMATCH"
+    request["operator_approval"] = gateway.MEDIA_SNAPSHOT_SIGNER_OPERATOR_APPROVAL
+    request["argv"] = ["arbitrary"]
+    assert gateway.execute_gateway_request(request, now=NOW)["reason"] == "REQUEST_FIELD_SET_MISMATCH"
+
+
+@pytest.mark.parametrize("field", ["handler", "repository", "target", "operator_approval"])
+def test_media_registry_identity_drift_is_rejected(tmp_path, field):
+    text = _action_registry()
+    lines = text.splitlines(keepends=True)
+    start = next(i for i, line in enumerate(lines) if gateway.MEDIA_SNAPSHOT_SIGNER_ACTION_ID in line)
+    for i in range(start + 1, len(lines)):
+        if lines[i].strip().startswith(field + ":"):
+            lines[i] = "    " + field + ": unapproved\n"
+    path = tmp_path / "actions.yaml"
+    path.write_text("".join(lines))
+    with pytest.raises(gateway.PrivilegedGatewayError):
+        gateway.load_action_registry(path)

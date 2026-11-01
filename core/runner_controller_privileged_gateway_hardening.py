@@ -21,6 +21,12 @@ from core.home_edge.esp_lab_stage1_signer_install import (
     execute_home_edge_esp_lab_stage1_signer_install,
 )
 
+# No installer authority: the reviewed media revision is pending approval.
+MEDIA_SNAPSHOT_SIGNER_ACTION_ID: Final = "home_edge_media_snapshot_signer_reconcile_v1"
+MEDIA_SNAPSHOT_SIGNER_OPERATOR_APPROVAL: Final = (
+    "alanua/Skeleton#4922:home_edge_media_snapshot_signer_reconcile_v1"
+)
+
 REQUEST_SCHEMA_ID: Final = "skeleton.runner_controller_privileged_request.v1"
 RECEIPT_SCHEMA_ID: Final = "skeleton.runner_controller_privileged_receipt.v1"
 REPOSITORY: Final = "alanua/Skeleton"
@@ -116,6 +122,7 @@ _TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$")
 _ISO_Z_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 _PUBLIC_REASON_RE = re.compile(r"[^A-Z0-9_]+")
 REGISTERED_ACTION_OPERATOR_APPROVALS: Final = {
+    MEDIA_SNAPSHOT_SIGNER_ACTION_ID: MEDIA_SNAPSHOT_SIGNER_OPERATOR_APPROVAL,
     HOME_EDGE_ESP_LAB_STAGE1_SIGNER_INSTALL_TASK_ID: HOME_EDGE_ESP_LAB_STAGE1_SIGNER_OPERATOR_APPROVAL,
     RUNNER_CONTROLLER_REPAIR_CODEX_STATE_MOUNT_TASK_ID: (
         RUNNER_CONTROLLER_REPAIR_CODEX_STATE_MOUNT_OPERATOR_APPROVAL
@@ -182,6 +189,11 @@ actions:
     repository: alanua/Skeleton
     target: runner-controller
     operator_approval: EXACT_HEAD_RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_V1_APPROVED
+  - action_id: home_edge_media_snapshot_signer_reconcile_v1
+    handler: home_edge_media_snapshot_signer_reconcile
+    repository: alanua/Skeleton
+    target: runner-controller
+    operator_approval: alanua/Skeleton#4922:home_edge_media_snapshot_signer_reconcile_v1
 """
 
 REQUIRED_CAPABILITY_REQUIRES: Final = frozenset(
@@ -260,7 +272,14 @@ def _is_production_anchor(path: Path) -> bool:
 
 def verify_action_registry(path: Path = DEFAULT_ACTION_REGISTRY_PATH) -> None:
     text = _verify_anchor_file(path, production=_is_production_anchor(path))
-    legacy_text = EXPECTED_ACTION_REGISTRY.replace(
+    previous_text = EXPECTED_ACTION_REGISTRY.removesuffix(
+        "  - action_id: home_edge_media_snapshot_signer_reconcile_v1\n"
+        "    handler: home_edge_media_snapshot_signer_reconcile\n"
+        "    repository: alanua/Skeleton\n"
+        "    target: runner-controller\n"
+        "    operator_approval: alanua/Skeleton#4922:home_edge_media_snapshot_signer_reconcile_v1\n"
+    )
+    legacy_text = previous_text.replace(
         "  - action_id: runner_controller_refresh_trust_anchor_bundle_v1\n"
         "    handler: runner_controller_refresh_trust_anchor_bundle\n"
         "    repository: alanua/Skeleton\n"
@@ -270,7 +289,7 @@ def verify_action_registry(path: Path = DEFAULT_ACTION_REGISTRY_PATH) -> None:
     )
     if text != EXPECTED_ACTION_REGISTRY and not (
         path == Path(__file__).resolve().parents[1] / "RUNNER_PRIVILEGED_ACTIONS.yaml"
-        and text == legacy_text
+        and text in (legacy_text, previous_text)
     ):
         raise PrivilegedGatewayError("action_registry_drift")
 
@@ -554,7 +573,21 @@ def _root_local_protected_run(argv: list[str], timeout: int | None) -> tuple[int
     return completed.returncode, f"ROOT_CHILD_EXIT_{completed.returncode}"
 
 
+def _execute_media_snapshot_signer_blocked() -> tuple[int, str]:
+    """Return a fixed block without reading sources or executing an installer."""
+    receipt = {
+        "status": "NEEDS_OPERATOR",
+        "reason": "MEDIA_INSTALLER_REVISION_PENDING_APPROVAL",
+        "protected_copy_verified": False,
+        "installed_artifacts_verified": False,
+        "activation_executed": False,
+    }
+    return 0, "RESULT: NEEDS_OPERATOR\nReceipt:\n" + json.dumps(receipt, sort_keys=True)
+
+
 def _run_registered_action(request: Mapping[str, object]) -> tuple[int, str]:
+    if request["action_id"] == MEDIA_SNAPSHOT_SIGNER_ACTION_ID:
+        return _execute_media_snapshot_signer_blocked()
     if request["action_id"] == RUNNER_CONTROLLER_REPAIR_CODEX_STATE_MOUNT_TASK_ID:
         return _execute_runner_controller_repair_codex_state_mount(request)
     if request["action_id"] == SKELETON_CONTROL_MCP_HETZNER_ACTIVATE_TASK_ID:
