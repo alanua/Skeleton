@@ -1,0 +1,44 @@
+{
+  "schema": "skeleton.geo.synthetic_fixture.v1",
+  "privacy_class": "PUBLIC_SAFE_SYNTHETIC",
+  "places": [
+    {
+      "place_id": "place_synthetic_bakery",
+      "canonical_name": "Synthetic Bakery",
+      "normalized_address": "1 Example Street, 00000 Test City",
+      "coordinate": {"lat": 52.520000, "lon": 13.405000},
+      "provider_identities": [{"provider": "fake", "provider_place_id": "fake-bakery-1"}],
+      "categories": ["food"],
+      "tags": ["synthetic"],
+      "domain_refs": ["travel-fixture"],
+      "note": "Synthetic fixture only",
+      "what_to_try": "Example pastry",
+      "reason_saved": "Contract test",
+      "provenance": {"source_kind": "synthetic_fixture", "source_ref": "fixture:geo/synthetic_places", "retrieved_at": "2026-01-01T00:00:00Z", "confidence": 1.0, "evidence_hash": null},
+      "saved_at": "2026-01-01T00:00:00Z",
+      "updated_at": "2026-01-01T00:00:00Z",
+      "status": "want_to_visit",
+      "personal_rating": null,
+      "privacy_class": "PRIVATE_USER_GEO"
+    },
+    {
+      "place_id": "place_synthetic_museum",
+      "canonical_name": "Synthetic Museum",
+      "normalized_address": "2 Example Street, 00000 Test City",
+      "coordinate": {"lat": 52.521000, "lon": 13.406000},
+      "provider_identities": [{"provider": "fake", "provider_place_id": "fake-museum-1"}],
+      "categories": ["travel"],
+      "tags": ["synthetic"],
+      "domain_refs": ["travel-fixture"],
+      "note": "Synthetic fixture only",
+      "what_to_try": null,
+      "reason_saved": "Contract test",
+      "provenance": {"source_kind": "synthetic_fixture", "source_ref": "fixture:geo/synthetic_places", "retrieved_at": "2026-01-01T00:00:00Z", "confidence": 1.0, "evidence_hash": null},
+      "saved_at": "2026-01-01T00:00:00Z",
+      "updated_at": "2026-01-01T00:00:00Z",
+      "status": "want_to_visit",
+      "personal_rating": null,
+      "privacy_class": "PRIVATE_USER_GEO"
+    }
+  ]
+}
