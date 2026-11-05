@@ -62,6 +62,8 @@ def main() -> int:
         archive_sink=VerifiedMemoryGatewayFamilyDocumentArchive(Path(args.archive), _canonical_gateway()),
         outbox=FamilyDocumentReceiptOutbox(Path(args.outbox_db)),
         classifier=_local_classifier(),
+        allowed_subject_aliases=(load_exact_subject_aliases(os.environ["SKELETON_FAMILY_SUBJECT_ALIASES_FILE"])
+                                 if os.environ.get("SKELETON_FAMILY_SUBJECT_ALIASES_FILE") else None),
         calendar=_canonical_calendar(),
     )
     while True:

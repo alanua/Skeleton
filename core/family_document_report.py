@@ -66,6 +66,8 @@ def render_document_section(record: Mapping[str, Any]) -> str:
 
 
 def render_package_report(records: Sequence[Mapping[str, Any]]) -> list[str]:
+    if not records or any(not useful_classification(record.get("classification")) for record in records):
+        raise ValueError("semantic_output_missing")
     sections = [render_document_section(record) for record in records]
     total_pages = sum(int(record.get("page_count") or 0) for record in records)
     header = f"✅ Сканування завершено\nДокументів: {len(records)} · сторінок: {total_pages}"
@@ -81,3 +83,16 @@ def render_package_report(records: Sequence[Mapping[str, Any]]) -> list[str]:
     if current:
         parts.append(current)
     return parts
+
+
+def useful_classification(value: object) -> bool:
+    return isinstance(value, Mapping) and any(
+        isinstance(value.get(key), str) and value[key].strip()
+        for key in ("summary", "document_type", "issuer")
+    )
+
+
+def render_technical_failure(reason: str, documents: int, pages: int) -> str:
+    if reason not in {"INFERENCE_UNAVAILABLE", "INTAKE_FAILED"}:
+        raise ValueError("unsafe_failure_reason")
+    return f"⚠️ Технічна помилка обробки: {reason}\nДокументів: {documents} · сторінок: {pages}"

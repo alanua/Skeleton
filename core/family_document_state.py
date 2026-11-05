@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
+import uuid
 from collections.abc import Callable, Mapping
 from contextlib import closing
 from pathlib import Path
@@ -17,10 +18,14 @@ from core.telegram_notifications import TelegramNotificationError, send_telegram
 class FamilyDocumentState(Protocol):
     """Noncanonical durable work/outbox state used by the document runtime."""
 
+    def claim_work(self, source_id: str, source_sha256: str, **kwargs: Any) -> str | None: ...
+    def begin_archive(self, source_id: str, source_sha256: str, token: str) -> None: ...
     def enqueue(self, receipt: Mapping[str, Any]) -> bool: ...
+    def complete_package(self, receipts: Any, records: Any) -> None: ...
+    def propose_quarantine_reevaluation(self, evaluator: Any, *, limit: int = 20) -> dict[str, int]: ...
     def should_process(self, source_id: str, source_sha256: str, *, now: int | None = None) -> bool: ...
-    def mark_work_done(self, source_id: str, source_sha256: str) -> None: ...
-    def mark_work_failure(self, source_id: str, source_sha256: str, reason: str, *, now: int | None = None, max_attempts: int = 5, base_delay_seconds: int = 30) -> str: ...
+    def mark_work_done(self, source_id: str, source_sha256: str, *, token: str | None = None) -> None: ...
+    def mark_work_failure(self, source_id: str, source_sha256: str, reason: str, *, token: str | None = None, now: int | None = None, max_attempts: int = 5, base_delay_seconds: int = 30) -> str: ...
     def work_state_counts(self) -> dict[str, int]: ...
     def record_lifecycle(self, **kwargs: Any) -> Mapping[str, Any]: ...
     def pending_lifecycle_work(self, *, limit: int = 100) -> list[dict[str, Any]]: ...
@@ -59,12 +64,117 @@ class FamilyDocumentReceiptOutbox:
                 )
         return True
 
+    def complete_package(self, receipts: Any, records: Any) -> None:
+        """Atomically queue a verified package report and mark its work complete."""
+        with closing(sqlite3.connect(str(self.db_path))) as connection:
+            with connection:
+                for receipt in receipts:
+                    key = str(receipt["receipt_key"])
+                    digest = content_hash(receipt)
+                    row = connection.execute(
+                        "SELECT payload_hash FROM family_document_receipts WHERE receipt_key=?",
+                        (key,),
+                    ).fetchone()
+                    if row is not None and row[0] != digest:
+                        raise ValueError("receipt key reused with different payload")
+                    connection.execute(
+                        "INSERT OR IGNORE INTO family_document_receipts(receipt_key,state,payload_hash,payload_json,attempts) VALUES (?,'PENDING',?,?,0)",
+                        (key, digest, canonical_json(receipt)),
+                    )
+                for record in records:
+                    changed = connection.execute(
+                        "UPDATE family_document_work SET state='DONE',next_attempt_at=0,last_error=NULL,claim_token=NULL,lease_until=0 WHERE source_id=? AND source_sha256=? AND state='CLAIMED' AND claim_token=?",
+                        (record["source_id"], record["source_sha256"], record["_claim_token"]),
+                    ).rowcount
+                    if changed != 1:
+                        raise RuntimeError("claim no longer owns package completion")
+
+    def propose_quarantine_reevaluation(self, evaluator: Any, *, limit: int = 20) -> dict[str, int]:
+        """Store bounded proposals only; never release or archive quarantined records."""
+        from core.family_document_local_inference import validate_family_document_output
+
+        if isinstance(limit, bool) or not 1 <= limit <= 100:
+            raise ValueError("reevaluation_limit_invalid")
+        counts = {"evaluated": 0, "acceptance_proposed": 0, "review": 0}
+        with closing(sqlite3.connect(str(self.db_path))) as connection:
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS family_document_reevaluation (source_id TEXT, source_sha256 TEXT, gate TEXT, decision TEXT, PRIMARY KEY(source_id,source_sha256,gate))"
+            )
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                rows = connection.execute(
+                    "SELECT w.source_id,w.source_sha256 FROM family_document_work w WHERE w.state='REVIEW' AND NOT EXISTS (SELECT 1 FROM family_document_reevaluation p WHERE p.source_id=w.source_id AND p.source_sha256=w.source_sha256 AND p.gate='evidence-v1') ORDER BY w.source_id,w.source_sha256 LIMIT ?",
+                    (limit,),
+                ).fetchall()
+                for source_id, sha256 in rows:
+                    decision = "REVIEW"
+                    try:
+                        output, payload = evaluator(source_id, sha256)
+                        validated = validate_family_document_output(output, payload)
+                        if validated["route"] == "ACCEPT":
+                            render_package_report([{"classification": validated, "page_count": payload.get("page_count", 1)}])
+                            decision = "ACCEPTANCE_PROPOSED"
+                    except Exception:
+                        pass
+                    connection.execute(
+                        "INSERT INTO family_document_reevaluation VALUES (?,?,'evidence-v1',?)",
+                        (source_id, sha256, decision),
+                    )
+                    counts["evaluated"] += 1
+                    counts["acceptance_proposed" if decision == "ACCEPTANCE_PROPOSED" else "review"] += 1
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        return counts
+
     def record_lifecycle(self, **kwargs: Any) -> Mapping[str, Any]:
         item = self.lifecycle.record(item_kind="document", **kwargs)
         return item.public_mapping()
 
     def pending_lifecycle_work(self, *, limit: int = 100) -> list[dict[str, Any]]:
         return self.lifecycle.pending_work(item_kind="document", limit=limit)
+
+    def claim_work(self, source_id: str, source_sha256: str, *, now: int | None = None,
+                   lease_seconds: int = 300) -> str | None:
+        current = int(time.time()) if now is None else int(now)
+        token = uuid.uuid4().hex
+        with closing(sqlite3.connect(str(self.db_path))) as connection:
+            with connection:
+                connection.execute("BEGIN IMMEDIATE")
+                row = connection.execute(
+                    "SELECT state, next_attempt_at, lease_until, attempts, archive_started FROM family_document_work WHERE source_id=? AND source_sha256=?",
+                    (source_id, source_sha256),
+                ).fetchone()
+                if row is not None:
+                    state, due, expiry, attempts, archive_started = row
+                    if state == "CLAIMED" and expiry <= current:
+                        attempts += 1
+                        state = "REVIEW" if archive_started or attempts >= 5 else "RETRY"
+                        connection.execute(
+                            "UPDATE family_document_work SET state=?, attempts=?, next_attempt_at=?, claim_token=NULL, last_error='LEASE_EXPIRED' WHERE source_id=? AND source_sha256=?",
+                            (state, attempts, current + min(30 * 2 ** min(attempts - 1, 7), 3600), source_id, source_sha256),
+                        )
+                        return None
+                    if state != "RETRY" or due > current:
+                        return None
+                connection.execute(
+                    """INSERT INTO family_document_work(source_id, source_sha256, state, attempts, claim_token, lease_until)
+                    VALUES (?, ?, 'CLAIMED', 0, ?, ?)
+                    ON CONFLICT(source_id, source_sha256) DO UPDATE SET state='CLAIMED', claim_token=excluded.claim_token, lease_until=excluded.lease_until""",
+                    (source_id, source_sha256, token, current + max(1, lease_seconds)),
+                )
+        return token
+
+    def begin_archive(self, source_id: str, source_sha256: str, token: str) -> None:
+        with closing(sqlite3.connect(str(self.db_path))) as connection:
+            with connection:
+                changed = connection.execute(
+                    "UPDATE family_document_work SET archive_started=1 WHERE source_id=? AND source_sha256=? AND state='CLAIMED' AND claim_token=? AND lease_until>? AND archive_started=0",
+                    (source_id, source_sha256, token, int(time.time())),
+                ).rowcount
+                if changed != 1:
+                    raise RuntimeError("claim no longer owns archive permission")
 
     def should_process(self, source_id: str, source_sha256: str, *, now: int | None = None) -> bool:
         current = int(time.time()) if now is None else int(now)
@@ -78,9 +188,19 @@ class FamilyDocumentReceiptOutbox:
         state, next_attempt_at = str(row[0]), int(row[1] or 0)
         return state == "RETRY" and next_attempt_at <= current
 
-    def mark_work_done(self, source_id: str, source_sha256: str) -> None:
+    def mark_work_done(self, source_id: str, source_sha256: str, *, token: str | None = None) -> None:
         with closing(sqlite3.connect(str(self.db_path))) as connection:
             with connection:
+                connection.execute("BEGIN IMMEDIATE")
+                owner = connection.execute(
+                    "SELECT state, claim_token FROM family_document_work WHERE source_id=? AND source_sha256=?",
+                    (source_id, source_sha256),
+                ).fetchone()
+                if token is not None:
+                    if owner is None or owner != ("CLAIMED", token):
+                        return
+                elif owner and owner[0] in {"CLAIMED", "REVIEW", "DONE"}:
+                    return
                 connection.execute(
                     """
                     INSERT INTO family_document_work(source_id, source_sha256, state, attempts, next_attempt_at, last_error)
@@ -107,6 +227,7 @@ class FamilyDocumentReceiptOutbox:
         reason: str,
         *,
         now: int | None = None,
+        token: str | None = None,
         max_attempts: int = 5,
         base_delay_seconds: int = 30,
     ) -> str:
@@ -114,12 +235,21 @@ class FamilyDocumentReceiptOutbox:
         safe_reason = "".join(character if character.isalnum() or character in "_.:-" else "_" for character in reason)[:96]
         with closing(sqlite3.connect(str(self.db_path))) as connection:
             with connection:
+                connection.execute("BEGIN IMMEDIATE")
+                owner = connection.execute(
+                    "SELECT state, claim_token, archive_started FROM family_document_work WHERE source_id=? AND source_sha256=?",
+                    (source_id, source_sha256),
+                ).fetchone()
+                if token is not None and (owner is None or owner[:2] != ("CLAIMED", token)):
+                    return str(owner[0]) if owner else "RETRY"
+                if owner and (owner[0] in {"DONE", "REVIEW"} or (owner[0] == "CLAIMED" and owner[1] != token)):
+                    return str(owner[0])
                 row = connection.execute(
                     "SELECT attempts FROM family_document_work WHERE source_id = ? AND source_sha256 = ?",
                     (source_id, source_sha256),
                 ).fetchone()
                 attempts = (int(row[0]) if row is not None else 0) + 1
-                state = "REVIEW" if attempts >= max_attempts else "RETRY"
+                state = "REVIEW" if attempts >= max_attempts or (owner and owner[2]) else "RETRY"
                 delay = 0 if state == "REVIEW" else min(base_delay_seconds * (2 ** (attempts - 1)), 3600)
                 connection.execute(
                     """
@@ -175,12 +305,9 @@ class FamilyDocumentReceiptOutbox:
                 payload = json.loads(str(row["payload_json"]))
                 message = payload.get("message")
                 if not isinstance(message, str) or not message.strip():
-                    legacy_messages = render_package_report(payload.get("records", []))
-                    if len(legacy_messages) != 1:
-                        self._mark_retry(connection, str(row["receipt_key"]), "invalid_outbox_payload")
-                        retry += 1
-                        continue
-                    message = legacy_messages[0]
+                    self._mark_retry(connection, str(row["receipt_key"]), "invalid_outbox_payload")
+                    retry += 1
+                    continue
                 try:
                     sender(message)
                 except Exception as exc:
@@ -266,6 +393,15 @@ class FamilyDocumentReceiptOutbox:
                     PRIMARY KEY(source_id, source_sha256)
                 )
                 """
+            )
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(family_document_work)")}
+            for name, definition in (("claim_token", "TEXT"), ("lease_until", "INTEGER NOT NULL DEFAULT 0"), ("archive_started", "INTEGER NOT NULL DEFAULT 0")):
+                if name not in columns:
+                    connection.execute(f"ALTER TABLE family_document_work ADD COLUMN {name} {definition}")
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS family_document_scan_sessions (
+                    session_id TEXT PRIMARY KEY, status TEXT NOT NULL, payload TEXT NOT NULL
+                )"""
             )
             connection.commit()
         self.lifecycle.initialize()

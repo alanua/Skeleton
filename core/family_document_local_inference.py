@@ -14,6 +14,8 @@ from core.local_inference_adapters import (
     validate_json_schema,
 )
 
+from core.family_document_scan_session import PROVENANCE_SCHEMA, validate_scan_provenance
+
 REQUEST_TYPE = "family_document.classify"
 RESPONSE_SCHEMA_ID = "skeleton.family_document_inference.v1"
 TOPIC_ALIASES = (
@@ -44,6 +46,7 @@ _INPUT_SCHEMA: dict[str, Any] = {
     "required": ["ocr_text", "allowed_subject_aliases", "source_kind"],
     "additionalProperties": False,
     "properties": {
+        "scan_provenance": PROVENANCE_SCHEMA,
         "ocr_text": {"type": "string", "minLength": 1, "maxLength": 24000},
         "allowed_subject_aliases": {
             "type": "array",
@@ -167,6 +170,10 @@ _OUTPUT_SCHEMA: dict[str, Any] = {
 
 def build_family_document_prompt(payload: Mapping[str, Any]) -> str:
     validate_json_schema(payload, _INPUT_SCHEMA)
+    if "scan_provenance" in payload:
+        validate_scan_provenance(payload["scan_provenance"], payload.get("page_count", 1))
+    if not payload["ocr_text"].strip():
+        raise InferenceValidationError("ocr_empty")
     aliases = list(payload["allowed_subject_aliases"])
     if len(set(aliases)) != len(aliases):
         raise InferenceValidationError("subject_aliases_not_unique")
@@ -199,6 +206,8 @@ def validate_family_document_output(
 ) -> Mapping[str, Any]:
     validate_json_schema(value, _OUTPUT_SCHEMA)
     validate_json_schema(request_payload, _INPUT_SCHEMA)
+    if len(set(request_payload["allowed_subject_aliases"])) != 3:
+        raise InferenceValidationError("subject_aliases_not_unique")
     normalized = dict(value)
     route = normalized["route"]
     allowed_aliases = set(request_payload["allowed_subject_aliases"])
@@ -234,10 +243,14 @@ def validate_family_document_output(
         normalized["document_type"],
         normalized["issuer"],
     )
-    required_evidence = all(bool(evidence[key]) for key in evidence)
+    required_evidence = all(evidence[key] and all(item.strip() and item in request_payload["ocr_text"] for item in evidence[key]) for key in evidence)
     if route == "ACCEPT" and (
-        any(item is None or item == "" for item in required_values)
+        any(not isinstance(item, str) or not item.strip() for item in required_values)
         or float(confidence["overall"]) < 0.80
+        or normalized["document_date"] is None
+        or not normalized["summary"].strip()
+        or bool(normalized["reason_codes"])
+        or any(float(confidence[key]) < 0.80 for key in confidence)
         or not required_evidence
     ):
         raise InferenceValidationError("acceptance_contract_not_met")
@@ -317,6 +330,7 @@ _HANDOFF_PAYLOAD_SCHEMA: dict[str, Any] = {
     "required": ["ocr_text", "source_kind"],
     "additionalProperties": False,
     "properties": {
+        "scan_provenance": PROVENANCE_SCHEMA,
         "ocr_text": {"type": "string", "minLength": 1, "maxLength": 24000},
         "languages": {
             "type": "array",
@@ -418,16 +432,18 @@ class FamilyDocumentHandoffIngestor:
                         "schema": "skeleton.family_document_inference_handoff_receipt.v1",
                         "status": "QUEUED" if created else "DUPLICATE",
                         "request_id": request_id,
+                        "page_count": payload.get("page_count", 1),
+                        **({"scan_provenance": payload["scan_provenance"]} if "scan_provenance" in payload else {}),
                     },
                 )
                 os.replace(target, self.root / "accepted" / target.name)
-            except (OSError, UnicodeDecodeError, json.JSONDecodeError, InferenceValidationError) as exc:
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError, InferenceValidationError, ValueError) as exc:
                 self._write_receipt(
                     source.stem,
                     {
                         "schema": "skeleton.family_document_inference_handoff_receipt.v1",
                         "status": "REVIEW",
-                        "reason": _safe_handoff_reason(str(exc)),
+                        "reason": "HANDOFF_INVALID",
                     },
                 )
                 os.replace(target, self.root / "review" / target.name)
