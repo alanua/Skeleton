@@ -143,7 +143,7 @@ class TravelMediaSession(
         }
     }
 
-    /** Called by a future Android display adapter. Disconnect never resumes on the phone. */
+    /** Called by the Android display adapter. Disconnect never resumes on the phone. */
     @Synchronized fun updateHdmiAvailability(available: Boolean): TravelCommandResult {
         if (closed) return reject("closed")
         if (available == current.hdmiAvailable) return TravelCommandResult(true, current)
@@ -161,6 +161,11 @@ class TravelMediaSession(
             commit(current.copy(hdmiAvailable = available))
         }
         return TravelCommandResult(true, current)
+    }
+
+    /** Asynchronous decoder failures are sanitized; commands require a reload. */
+    @Synchronized fun rendererFailed() {
+        if (!closed) failPlayer()
     }
 
     @Synchronized fun close() {

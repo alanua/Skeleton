@@ -64,4 +64,22 @@ class TravelMediaSessionTest {
         assertEquals("media_not_ready", session.execute(TravelMediaCommand("synthetic", 2, TravelAction.PLAY)).reason)
         assertEquals("stop", player.calls.last())
     }
+    @Test fun asynchronousRendererFailureStopsAndRequiresReload() {
+        val player = Player()
+        val session = TravelMediaSession("synthetic", player, object : TravelRemoteSessionPort {
+            override fun publish(state: TravelSessionState) {}
+        })
+        session.execute(TravelMediaCommand("synthetic", 0, TravelAction.LOAD,
+            media = TravelMedia("demo", "content://synthetic/demo")))
+        session.rendererFailed()
+        assertEquals(TravelPlayback.ERROR, session.snapshot().playback)
+        assertEquals("stop", player.calls.last())
+        assertEquals("media_not_ready", session.execute(TravelMediaCommand(
+            "synthetic", session.snapshot().revision, TravelAction.PLAY)).reason)
+        session.close()
+        val terminal = session.snapshot()
+        session.rendererFailed()
+        assertEquals(terminal, session.snapshot())
+    }
+
 }
