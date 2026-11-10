@@ -55,7 +55,11 @@ class TravelLanTransport private constructor(private val socket: Socket, private
      * dispatch must synchronously marshal BOTH construction/exchange and cleanup to the session's
      * owning thread. It must be bounded and must never wait for the network worker on that thread.
      */
-    class Host internal constructor(address: InetAddress, private val timeoutMs: Int) : AutoCloseable {
+    class Host internal constructor(
+        address: InetAddress,
+        private val timeoutMs: Int,
+        private val remoteControlOptIn: Boolean,
+    ) : AutoCloseable {
         private val listener = ServerSocket()
         val invite: TravelLanPairing
         @Volatile private var connection: TravelLanTransport? = null
@@ -90,7 +94,11 @@ class TravelLanTransport private constructor(private val socket: Socket, private
                     require(active.open(connection!!.read()).contentEquals(HELLO))
                     connection!!.write(active.seal(HELLO))
                 }
-                dispatch { secure = TravelSecureHost(session, active) }
+                dispatch {
+                    check(remoteControlOptIn)
+                    session.allowRemoteControl(true)
+                    secure = TravelSecureHost(session, active)
+                }
                 connection!!.serve(TravelRecordExchange { request ->
                     var response: ByteArray? = null
                     dispatch { response = secure!!.exchange(request) }
@@ -111,7 +119,7 @@ class TravelLanTransport private constructor(private val socket: Socket, private
         private val HELLO = "s20-lan-v1-ready".toByteArray(Charsets.UTF_8)
         fun host(optIn: Boolean, address: InetAddress, timeoutMs: Int = 10000): Host {
             require(optIn && TravelLanPairing.allowed(address) && timeoutMs in 100..30000)
-            return Host(address, timeoutMs)
+            return Host(address, timeoutMs, optIn)
         }
         fun connect(optIn: Boolean, invite: TravelLanPairing, sessionId: String,
                     timeoutMs: Int = 10000): AutoCloseableClient {

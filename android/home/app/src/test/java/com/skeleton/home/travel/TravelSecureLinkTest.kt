@@ -18,11 +18,25 @@ class TravelSecureLinkTest {
         } catch (_: IllegalArgumentException) {
         } catch (_: java.security.GeneralSecurityException) {}
     }
+    @Test fun secureHostFailsClosedUntilExplicitlyOptedIn() {
+        val session = TravelMediaSession("synthetic", Player(), object : TravelRemoteSessionPort {
+            override fun publish(state: TravelSessionState) {}
+        })
+        val channel = TravelSecureChannel(key, "denied", true)
+        fails { TravelSecureHost(session, channel) }
+        fails { channel.seal(byteArrayOf()) }
+
+        session.allowRemoteControl(true)
+        val host = TravelSecureHost(session, TravelSecureChannel(key, "granted", true))
+        fails { TravelSecureHost(session, TravelSecureChannel(key, "consumed", true)) }
+        host.close()
+    }
     @Test fun encryptedRoundTripUsesAuthoritativePlayerAndRevision() {
         val player = Player()
         val session = TravelMediaSession("synthetic", player, object : TravelRemoteSessionPort {
             override fun publish(state: TravelSessionState) {}
         })
+        session.allowRemoteControl(true)
         val host = TravelSecureHost(session, TravelSecureChannel(key, "link", true))
         val client = TravelSecureClient("synthetic", TravelSecureChannel(key, "link", false), host)
         val load = TravelMediaCommand("synthetic", 0, TravelAction.LOAD,
@@ -60,6 +74,7 @@ class TravelSecureLinkTest {
         val session = TravelMediaSession("synthetic", player, object : TravelRemoteSessionPort {
             override fun publish(state: TravelSessionState) {}
         })
+        session.allowRemoteControl(true)
         val host = TravelSecureHost(session, TravelSecureChannel(key, "link", true))
         val peer = TravelSecureChannel(key, "link", false)
         fails { host.exchange(peer.seal(byteArrayOf(0))) }
@@ -73,10 +88,13 @@ class TravelSecureLinkTest {
         val session = TravelMediaSession("synthetic", Player(), object : TravelRemoteSessionPort {
             override fun publish(state: TravelSessionState) {}
         })
+        session.allowRemoteControl(true)
         val old = TravelSecureHost(session, TravelSecureChannel(key, "old", true))
+        fails { session.allowRemoteControl(true) }
         fails { TravelSecureHost(session, TravelSecureChannel(key, "overlap", true)) }
         old.close()
 
+        session.allowRemoteControl(true)
         val current = TravelSecureHost(session, TravelSecureChannel(key, "current", true))
         old.close()
         fails { old.exchange(ByteArray(28)) }

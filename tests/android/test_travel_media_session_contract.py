@@ -55,7 +55,10 @@ class TravelMediaSessionContract(unittest.TestCase):
     def test_failure_lifecycle_and_transport_isolation(self):
         self.assertIn('private var remoteEnabled = false', self.source)
         self.assertIn('private var remoteOwner: Any? = null', self.source)
-        self.assertIn('if (closed || remoteOwner != null) return false', self.source)
+        self.assertIn('check(!enabled || remoteOwner == null)', self.source)
+        self.assertIn('if (closed || !remoteEnabled || remoteOwner != null) return false', self.source)
+        self.assertLess(self.source.index('remoteEnabled = false\n        remoteOwner = owner'),
+                        self.source.index('return true', self.source.index('fun claimRemoteControl')))
         self.assertIn('if (remoteOwner === owner) remoteOwner = null', self.source)
         self.assertIn('if (remoteOwner !== owner) return reject("remote_disabled")', self.source)
         self.assertIn('closed = true\n        remoteEnabled = false\n        remoteOwner = null', self.source)

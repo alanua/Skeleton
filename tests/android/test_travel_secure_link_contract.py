@@ -32,5 +32,6 @@ class TravelSecureLinkContract(unittest.TestCase):
         for scenario in ('encryptedRoundTripUsesAuthoritativePlayerAndRevision',
                          'authenticationReplayReflectionAndBounds',
                          'malformedAuthenticatedCommandClosesHostBeforePlayerEffects',
+                         'secureHostFailsClosedUntilExplicitlyOptedIn',
                          'overlappingAuthenticatedHostIsRejectedAndStaleCloseCannotRevokeNewOwner'):
             self.assertIn('@Test fun ' + scenario, tests)

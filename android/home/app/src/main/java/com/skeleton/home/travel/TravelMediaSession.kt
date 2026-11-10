@@ -76,12 +76,14 @@ class TravelMediaSession(
 
     @Synchronized fun allowRemoteControl(enabled: Boolean) {
         check(!closed)
+        check(!enabled || remoteOwner == null)
         remoteEnabled = enabled
     }
 
-    /** Secure links use an identity lease, separate from the direct opt-in API above. */
+    /** Secure links atomically consume one explicit opt-in grant into an identity lease. */
     @Synchronized internal fun claimRemoteControl(owner: Any): Boolean {
-        if (closed || remoteOwner != null) return false
+        if (closed || !remoteEnabled || remoteOwner != null) return false
+        remoteEnabled = false
         remoteOwner = owner
         return true
     }

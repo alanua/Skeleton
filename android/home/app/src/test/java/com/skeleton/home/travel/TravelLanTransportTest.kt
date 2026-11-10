@@ -82,6 +82,12 @@ class TravelLanTransportTest {
                 serving.get(3, TimeUnit.SECONDS)
                 assertEquals(0, player.stops)
                 disabled(session)
+                val ungranted = TravelSecureChannel(ByteArray(32) { it.toByte() },
+                    "after-pre-auth-failure-$kind", true)
+                try { TravelSecureHost(session, ungranted); fail("grant leaked") }
+                catch (_: IllegalStateException) {}
+                try { ungranted.seal(byteArrayOf()); fail("channel open") }
+                catch (_: IllegalStateException) {}
             } finally { invite.close(); host.close(); worker.shutdownNow() }
         }
     }

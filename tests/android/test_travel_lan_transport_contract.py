@@ -20,11 +20,15 @@ class TravelLanTransportContract(unittest.TestCase):
     def test_authentication_dispatch_and_cleanup(self):
         source = (MAIN / 'TravelLanTransport.kt').read_text()
         for required in ('active.open(connection!!.read()).contentEquals(HELLO)',
+                         'session.allowRemoteControl(true)',
                          'dispatch { response = secure!!.exchange(request) }',
                          'dispatch { secure?.close() }', 'key?.fill(0)',
                          'channel?.close()', 'timer.shutdownNow()', 'invite.close()'):
             self.assertIn(required, source)
         self.assertLess(source.index('active.open('), source.index('TravelSecureHost(session'))
+        self.assertLess(source.index('active.open('), source.index('session.allowRemoteControl(true)'))
+        self.assertLess(source.index('session.allowRemoteControl(true)'),
+                        source.index('TravelSecureHost(session'))
 
     def test_no_secret_storage_or_automatic_activation(self):
         source = '\n'.join((MAIN / name).read_text() for name in
