@@ -33,5 +33,6 @@ class TravelSecureLinkContract(unittest.TestCase):
                          'authenticationReplayReflectionAndBounds',
                          'malformedAuthenticatedCommandClosesHostBeforePlayerEffects',
                          'secureHostFailsClosedUntilExplicitlyOptedIn',
-                         'overlappingAuthenticatedHostIsRejectedAndStaleCloseCannotRevokeNewOwner'):
+                         'overlappingAuthenticatedHostIsRejectedAndStaleCloseCannotRevokeNewOwner',
+                         'explicitRevokeBlocksStaleLinkAndOldCleanupPreservesFreshOwner'):
             self.assertIn('@Test fun ' + scenario, tests)

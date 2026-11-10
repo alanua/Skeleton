@@ -105,4 +105,27 @@ class TravelSecureLinkTest {
             TravelAction.STOP, TravelOrigin.REMOTE)).reason)
         fails { client.execute(TravelMediaCommand("synthetic", 1, TravelAction.STOP)) }
     }
+
+    @Test fun explicitRevokeBlocksStaleLinkAndOldCleanupPreservesFreshOwner() {
+        val session = TravelMediaSession("synthetic", Player(), object : TravelRemoteSessionPort {
+            override fun publish(state: TravelSessionState) {}
+        })
+        session.allowRemoteControl(true)
+        val oldHost = TravelSecureHost(session, TravelSecureChannel(key, "old-revoked", true))
+        val oldClient = TravelSecureClient("synthetic",
+            TravelSecureChannel(key, "old-revoked", false), oldHost)
+        session.allowRemoteControl(false)
+        assertEquals("remote_disabled", oldClient.execute(TravelMediaCommand(
+            "synthetic", 0, TravelAction.STOP)).reason)
+
+        session.allowRemoteControl(true)
+        val newHost = TravelSecureHost(session, TravelSecureChannel(key, "new-owner", true))
+        val newClient = TravelSecureClient("synthetic",
+            TravelSecureChannel(key, "new-owner", false), newHost)
+        oldHost.close()
+        assertTrue(newClient.execute(TravelMediaCommand("synthetic", 0, TravelAction.STOP)).accepted)
+        newClient.close()
+        newHost.close()
+        oldClient.close()
+    }
 }

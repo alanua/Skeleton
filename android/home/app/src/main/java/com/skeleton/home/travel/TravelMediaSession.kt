@@ -76,8 +76,12 @@ class TravelMediaSession(
 
     @Synchronized fun allowRemoteControl(enabled: Boolean) {
         check(!closed)
-        check(!enabled || remoteOwner == null)
-        remoteEnabled = enabled
+        if (enabled) {
+            check(remoteOwner == null)
+            remoteEnabled = true
+        } else {
+            revokeRemoteControl()
+        }
     }
 
     /** Secure links atomically consume one explicit opt-in grant into an identity lease. */
@@ -175,6 +179,7 @@ class TravelMediaSession(
     /** Called by the Android display adapter. Disconnect never resumes on the phone. */
     @Synchronized fun updateHdmiAvailability(available: Boolean): TravelCommandResult {
         if (closed) return reject("closed")
+        if (!available) revokeRemoteControl()
         if (available == current.hdmiAvailable) return TravelCommandResult(true, current)
         if (!available && current.output == TravelOutput.HDMI) {
             try {
@@ -211,6 +216,11 @@ class TravelMediaSession(
     }
 
     private fun reject(reason: String) = TravelCommandResult(false, current, reason)
+
+    private fun revokeRemoteControl() {
+        remoteEnabled = false
+        remoteOwner = null
+    }
 
     private fun failPlayer() {
         runCatching { player.stop() }

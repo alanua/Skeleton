@@ -132,4 +132,23 @@ class TravelLanTransportTest {
         try { TravelLanTransport.host(true, InetAddress.getByName("0.0.0.0")); fail("wildcard") }
         catch (_: IllegalArgumentException) {}
     }
+
+    @Test fun hdmiDisconnectResetsPermissionAndBlocksStaleLanPacket() {
+        val player = Player()
+        val session = session(player)
+        session.updateHdmiAvailability(true)
+        val worker = Executors.newSingleThreadExecutor()
+        val host = TravelLanTransport.host(true, loopback, 2000)
+        val invite = TravelLanPairing.parse(host.invite.qrPayload())
+        val serving = worker.submit { runCatching { host.serve(session) { it() } } }
+        try {
+            TravelLanTransport.connect(true, invite, "synthetic", 2000).use { client ->
+                session.updateHdmiAvailability(false)
+                assertEquals("remote_disabled", client.execute(TravelMediaCommand(
+                    "synthetic", session.snapshot().revision, TravelAction.STOP)).reason)
+            }
+            serving.get(3, TimeUnit.SECONDS)
+            disabled(session)
+        } finally { host.close(); worker.shutdownNow() }
+    }
 }

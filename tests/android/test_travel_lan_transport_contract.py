@@ -47,7 +47,8 @@ class TravelLanTransportContract(unittest.TestCase):
         for scenario in ('loopbackRoundTripDisconnectRevokesAndInviteIsSingleUse',
                          'malformedLengthsTruncationTamperAndReplayFailBeforePlayerEffects',
                          'stalledPeerAndOwnerCloseUnblockAndRevoke',
-                         'explicitOptInAndBoundedConfigurationRequired'):
+                         'explicitOptInAndBoundedConfigurationRequired',
+                         'hdmiDisconnectResetsPermissionAndBlocksStaleLanPacket'):
             self.assertIn('@Test fun ' + scenario, source)
         for kind in ('negative', 'oversize', 'truncated', 'tamper', 'wrongKey', 'reflection', 'replay'):
             self.assertIn('"' + kind + '"', source)
