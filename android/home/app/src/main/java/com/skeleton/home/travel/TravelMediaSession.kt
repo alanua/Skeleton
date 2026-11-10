@@ -69,6 +69,7 @@ class TravelMediaSession(
 
     private var current = TravelSessionState(sessionId)
     private var remoteEnabled = false
+    private var remoteOwner: Any? = null
     private var closed = false
 
     @Synchronized fun snapshot(): TravelSessionState = current
@@ -78,10 +79,36 @@ class TravelMediaSession(
         remoteEnabled = enabled
     }
 
+    /** Secure links use an identity lease, separate from the direct opt-in API above. */
+    @Synchronized internal fun claimRemoteControl(owner: Any): Boolean {
+        if (closed || remoteOwner != null) return false
+        remoteOwner = owner
+        return true
+    }
+
+    @Synchronized internal fun releaseRemoteControl(owner: Any) {
+        if (remoteOwner === owner) remoteOwner = null
+    }
+
+    /** Owner validation and command execution share this monitor, so ownership cannot change mid-command. */
+    @Synchronized internal fun executeRemote(
+        owner: Any,
+        command: TravelMediaCommand,
+    ): TravelCommandResult {
+        if (remoteOwner !== owner) return reject("remote_disabled")
+        return execute(command, ownerAuthenticated = true)
+    }
+
     @Synchronized fun execute(command: TravelMediaCommand): TravelCommandResult {
+        return execute(command, ownerAuthenticated = false)
+    }
+
+    private fun execute(command: TravelMediaCommand, ownerAuthenticated: Boolean): TravelCommandResult {
         if (closed) return reject("closed")
         if (command.sessionId != current.sessionId) return reject("wrong_session")
-        if (command.origin == TravelOrigin.REMOTE && !remoteEnabled) return reject("remote_disabled")
+        if (command.origin == TravelOrigin.REMOTE && !ownerAuthenticated && !remoteEnabled) {
+            return reject("remote_disabled")
+        }
         if (command.expectedRevision != current.revision) return reject("stale_revision")
         if (command.action != TravelAction.LOAD && command.media != null) return reject("unexpected_media")
         if (command.action != TravelAction.SEEK && command.positionMs != null) return reject("unexpected_position")
@@ -172,6 +199,7 @@ class TravelMediaSession(
         if (closed) return
         closed = true
         remoteEnabled = false
+        remoteOwner = null
         try {
             player.stop()
             commit(current.copy(media = null, playback = TravelPlayback.STOPPED, positionMs = 0, error = null))

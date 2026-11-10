@@ -21,7 +21,7 @@ class TravelLanTransportContract(unittest.TestCase):
         source = (MAIN / 'TravelLanTransport.kt').read_text()
         for required in ('active.open(connection!!.read()).contentEquals(HELLO)',
                          'dispatch { response = secure!!.exchange(request) }',
-                         'session.allowRemoteControl(false)', 'key?.fill(0)',
+                         'dispatch { secure?.close() }', 'key?.fill(0)',
                          'channel?.close()', 'timer.shutdownNow()', 'invite.close()'):
             self.assertIn(required, source)
         self.assertLess(source.index('active.open('), source.index('TravelSecureHost(session'))

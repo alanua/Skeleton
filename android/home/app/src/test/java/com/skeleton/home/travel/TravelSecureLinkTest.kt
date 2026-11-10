@@ -27,9 +27,6 @@ class TravelSecureLinkTest {
         val client = TravelSecureClient("synthetic", TravelSecureChannel(key, "link", false), host)
         val load = TravelMediaCommand("synthetic", 0, TravelAction.LOAD,
             media = TravelMedia("demo", "content://synthetic/demo", 100))
-        assertEquals("remote_disabled", client.execute(load).reason)
-        assertTrue(player.calls.isEmpty())
-        session.allowRemoteControl(true)
         assertEquals(1L, client.execute(load).state.revision)
         assertEquals("stale_revision", client.execute(load).reason)
         assertTrue(client.execute(TravelMediaCommand("synthetic", 1, TravelAction.PLAY)).accepted)
@@ -63,7 +60,6 @@ class TravelSecureLinkTest {
         val session = TravelMediaSession("synthetic", player, object : TravelRemoteSessionPort {
             override fun publish(state: TravelSessionState) {}
         })
-        session.allowRemoteControl(true)
         val host = TravelSecureHost(session, TravelSecureChannel(key, "link", true))
         val peer = TravelSecureChannel(key, "link", false)
         fails { host.exchange(peer.seal(byteArrayOf(0))) }
@@ -71,5 +67,24 @@ class TravelSecureLinkTest {
         assertEquals("remote_disabled", session.execute(TravelMediaCommand("synthetic", 0,
             TravelAction.STOP, TravelOrigin.REMOTE)).reason)
         fails { host.exchange(peer.seal(TravelWire.command(TravelMediaCommand("synthetic", 0, TravelAction.STOP)))) }
+    }
+
+    @Test fun overlappingAuthenticatedHostIsRejectedAndStaleCloseCannotRevokeNewOwner() {
+        val session = TravelMediaSession("synthetic", Player(), object : TravelRemoteSessionPort {
+            override fun publish(state: TravelSessionState) {}
+        })
+        val old = TravelSecureHost(session, TravelSecureChannel(key, "old", true))
+        fails { TravelSecureHost(session, TravelSecureChannel(key, "overlap", true)) }
+        old.close()
+
+        val current = TravelSecureHost(session, TravelSecureChannel(key, "current", true))
+        old.close()
+        fails { old.exchange(ByteArray(28)) }
+        val client = TravelSecureClient("synthetic", TravelSecureChannel(key, "current", false), current)
+        assertTrue(client.execute(TravelMediaCommand("synthetic", 0, TravelAction.STOP)).accepted)
+        current.close()
+        assertEquals("remote_disabled", session.execute(TravelMediaCommand("synthetic", 1,
+            TravelAction.STOP, TravelOrigin.REMOTE)).reason)
+        fails { client.execute(TravelMediaCommand("synthetic", 1, TravelAction.STOP)) }
     }
 }

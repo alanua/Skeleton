@@ -22,7 +22,7 @@ class TravelMediaSessionContract(unittest.TestCase):
         fixtures = {
             'closed': 'if (closed)',
             'wrong_session': 'command.sessionId != current.sessionId',
-            'remote_disabled': 'command.origin == TravelOrigin.REMOTE && !remoteEnabled',
+            'remote_disabled': 'command.origin == TravelOrigin.REMOTE && !ownerAuthenticated && !remoteEnabled',
             'stale_revision': 'command.expectedRevision != current.revision',
             'missing_media': 'command.action == TravelAction.LOAD && command.media == null',
             'invalid_position': 'command.positionMs == null || command.positionMs < 0',
@@ -54,7 +54,11 @@ class TravelMediaSessionContract(unittest.TestCase):
 
     def test_failure_lifecycle_and_transport_isolation(self):
         self.assertIn('private var remoteEnabled = false', self.source)
-        self.assertIn('closed = true\n        remoteEnabled = false', self.source)
+        self.assertIn('private var remoteOwner: Any? = null', self.source)
+        self.assertIn('if (closed || remoteOwner != null) return false', self.source)
+        self.assertIn('if (remoteOwner === owner) remoteOwner = null', self.source)
+        self.assertIn('if (remoteOwner !== owner) return reject("remote_disabled")', self.source)
+        self.assertIn('closed = true\n        remoteEnabled = false\n        remoteOwner = null', self.source)
         self.assertIn('runCatching { player.stop() }', self.source)
         self.assertIn('error = "player_failure"', self.source)
         self.assertIn('revision = current.revision + 1', self.source)

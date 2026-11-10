@@ -30,7 +30,6 @@ class TravelLanTransportTest {
         val worker = Executors.newSingleThreadExecutor()
         val host = TravelLanTransport.host(true, loopback, 2000)
         val invite = TravelLanPairing.parse(host.invite.qrPayload())
-        session.allowRemoteControl(true)
         val serving = worker.submit { runCatching { host.serve(session) { it() } } }
         try {
             TravelLanTransport.connect(true, invite, "synthetic", 2000).use { client ->
@@ -50,7 +49,6 @@ class TravelLanTransportTest {
             val host = TravelLanTransport.host(true, loopback, 500)
             val player = Player()
             val session = session(player)
-            session.allowRemoteControl(true)
             val invite = TravelLanPairing.parse(host.invite.qrPayload())
             val serving = worker.submit { runCatching { host.serve(session) { it() } } }
             try {
@@ -93,7 +91,6 @@ class TravelLanTransportTest {
             val host = TravelLanTransport.host(true, loopback, 200)
             val player = Player()
             val session = session(player)
-            session.allowRemoteControl(true)
             val invite = TravelLanPairing.parse(host.invite.qrPayload())
             val serving = worker.submit { runCatching { host.serve(session) { it() } } }
             try {

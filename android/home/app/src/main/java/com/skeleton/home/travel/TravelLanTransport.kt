@@ -99,7 +99,7 @@ class TravelLanTransport private constructor(private val socket: Socket, private
             } finally {
                 close()
                 key?.fill(0)
-                try { dispatch { secure?.close(); session.allowRemoteControl(false) } }
+                try { dispatch { secure?.close() } }
                 finally { channel?.close() }
             }
         }
