@@ -96,7 +96,6 @@ class TravelLanTransport private constructor(private val socket: Socket, private
                 }
                 dispatch {
                     check(remoteControlOptIn)
-                    session.allowRemoteControl(true)
                     secure = TravelSecureHost(session, active)
                 }
                 connection!!.serve(TravelRecordExchange { request ->
