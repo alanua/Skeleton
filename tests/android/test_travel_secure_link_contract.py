@@ -23,11 +23,16 @@ class TravelSecureLinkContract(unittest.TestCase):
             self.assertIn(required, source)
         self.assertLess(source.index('.doFinal(record,'), source.index('received = sequence'))
         self.assertIn('TravelWire.command(channel.open(request))', source)
-        self.assertIn('session.allowRemoteControl(false)', source)
+        self.assertIn('session.claimRemoteControl(owner)', source)
+        self.assertIn('session.executeRemote(owner, command)', source)
+        self.assertIn('session.releaseRemoteControl(owner)', source)
 
     def test_behavior_scenarios_present(self):
         tests = (ROOT / 'android/home/app/src/test/java/com/skeleton/home/travel/TravelSecureLinkTest.kt').read_text()
         for scenario in ('encryptedRoundTripUsesAuthoritativePlayerAndRevision',
                          'authenticationReplayReflectionAndBounds',
-                         'malformedAuthenticatedCommandClosesHostBeforePlayerEffects'):
+                         'malformedAuthenticatedCommandClosesHostBeforePlayerEffects',
+                         'secureHostFailsClosedUntilExplicitlyOptedIn',
+                         'overlappingAuthenticatedHostIsRejectedAndStaleCloseCannotRevokeNewOwner',
+                         'explicitRevokeBlocksStaleLinkAndOldCleanupPreservesFreshOwner'):
             self.assertIn('@Test fun ' + scenario, tests)

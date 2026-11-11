@@ -50,8 +50,8 @@ class TravelLanTransportTest {
             val host = TravelLanTransport.host(true, loopback, 500)
             val player = Player()
             val session = session(player)
-            session.allowRemoteControl(true)
             val invite = TravelLanPairing.parse(host.invite.qrPayload())
+            if (kind == "replay") session.allowRemoteControl(true)
             val serving = worker.submit { runCatching { host.serve(session) { it() } } }
             try {
                 Socket(loopback, invite.port).use { socket ->
@@ -84,6 +84,12 @@ class TravelLanTransportTest {
                 serving.get(3, TimeUnit.SECONDS)
                 assertEquals(0, player.stops)
                 disabled(session)
+                val ungranted = TravelSecureChannel(ByteArray(32) { it.toByte() },
+                    "after-pre-auth-failure-$kind", true)
+                try { TravelSecureHost(session, ungranted); fail("grant leaked") }
+                catch (_: IllegalStateException) {}
+                try { ungranted.seal(byteArrayOf()); fail("channel open") }
+                catch (_: IllegalStateException) {}
             } finally { invite.close(); host.close(); worker.shutdownNow() }
         }
     }
@@ -93,8 +99,8 @@ class TravelLanTransportTest {
             val host = TravelLanTransport.host(true, loopback, 200)
             val player = Player()
             val session = session(player)
-            session.allowRemoteControl(true)
             val invite = TravelLanPairing.parse(host.invite.qrPayload())
+            if (ownerClose) session.allowRemoteControl(true)
             val serving = worker.submit { runCatching { host.serve(session) { it() } } }
             try {
                 Socket(loopback, invite.port).use { socket ->
@@ -128,5 +134,76 @@ class TravelLanTransportTest {
         try { TravelLanTransport.host(false, loopback); fail("opt in") } catch (_: IllegalArgumentException) {}
         try { TravelLanTransport.host(true, InetAddress.getByName("0.0.0.0")); fail("wildcard") }
         catch (_: IllegalArgumentException) {}
+    }
+
+    @Test fun hdmiDisconnectResetsPermissionAndBlocksStaleLanPacket() {
+        val player = Player()
+        val session = session(player)
+        session.updateHdmiAvailability(true)
+        val worker = Executors.newSingleThreadExecutor()
+        val host = TravelLanTransport.host(true, loopback, 2000)
+        val invite = TravelLanPairing.parse(host.invite.qrPayload())
+        session.allowRemoteControl(true)
+        val serving = worker.submit { runCatching { host.serve(session) { it() } } }
+        try {
+            TravelLanTransport.connect(true, invite, "synthetic", 2000).use { client ->
+                session.updateHdmiAvailability(false)
+                assertEquals("remote_disabled", client.execute(TravelMediaCommand(
+                    "synthetic", session.snapshot().revision, TravelAction.STOP)).reason)
+            }
+            serving.get(3, TimeUnit.SECONDS)
+            disabled(session)
+        } finally { host.close(); worker.shutdownNow() }
+    }
+
+    @Test fun revokedGrantBeforeLateHelloCannotBeRestoredByStaleHost() {
+        val player = Player()
+        val session = session(player)
+        val worker = Executors.newSingleThreadExecutor()
+        val host = TravelLanTransport.host(true, loopback, 2000)
+        val invite = TravelLanPairing.parse(host.invite.qrPayload())
+        session.allowRemoteControl(true)
+        session.allowRemoteControl(false)
+        val serving = worker.submit { runCatching { host.serve(session) { it() } } }
+        try {
+            try {
+                TravelLanTransport.connect(true, invite, "synthetic", 2000).use { client ->
+                    client.execute(TravelMediaCommand("synthetic", 0, TravelAction.STOP))
+                    fail("revoked host connected")
+                }
+            } catch (_: IllegalStateException) {}
+            serving.get(3, TimeUnit.SECONDS)
+            assertEquals(0, player.stops)
+            disabled(session)
+            val denied = TravelSecureChannel(ByteArray(32) { it.toByte() }, "late-revoke", true)
+            try { TravelSecureHost(session, denied); fail("permission restored") }
+            catch (_: IllegalStateException) {}
+        } finally { host.close(); worker.shutdownNow() }
+    }
+
+    @Test fun hdmiLossBeforeLateHelloCannotBeRestoredByStaleHost() {
+        val player = Player()
+        val session = session(player)
+        session.updateHdmiAvailability(true)
+        val worker = Executors.newSingleThreadExecutor()
+        val host = TravelLanTransport.host(true, loopback, 2000)
+        val invite = TravelLanPairing.parse(host.invite.qrPayload())
+        session.allowRemoteControl(true)
+        session.updateHdmiAvailability(false)
+        val serving = worker.submit { runCatching { host.serve(session) { it() } } }
+        try {
+            try {
+                TravelLanTransport.connect(true, invite, "synthetic", 2000).use { client ->
+                    client.execute(TravelMediaCommand("synthetic", 1, TravelAction.STOP))
+                    fail("HDMI-revoked host connected")
+                }
+            } catch (_: IllegalStateException) {}
+            serving.get(3, TimeUnit.SECONDS)
+            assertEquals(0, player.stops)
+            disabled(session)
+            val denied = TravelSecureChannel(ByteArray(32) { it.toByte() }, "late-hdmi", true)
+            try { TravelSecureHost(session, denied); fail("permission restored") }
+            catch (_: IllegalStateException) {}
+        } finally { host.close(); worker.shutdownNow() }
     }
 }

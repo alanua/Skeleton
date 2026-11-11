@@ -20,11 +20,13 @@ class TravelLanTransportContract(unittest.TestCase):
     def test_authentication_dispatch_and_cleanup(self):
         source = (MAIN / 'TravelLanTransport.kt').read_text()
         for required in ('active.open(connection!!.read()).contentEquals(HELLO)',
+                         'check(remoteControlOptIn)', 'TravelSecureHost(session, active)',
                          'dispatch { response = secure!!.exchange(request) }',
-                         'session.allowRemoteControl(false)', 'key?.fill(0)',
+                         'dispatch { secure?.close() }', 'key?.fill(0)',
                          'channel?.close()', 'timer.shutdownNow()', 'invite.close()'):
             self.assertIn(required, source)
         self.assertLess(source.index('active.open('), source.index('TravelSecureHost(session'))
+        self.assertNotIn('session.allowRemoteControl(true)', source)
 
     def test_no_secret_storage_or_automatic_activation(self):
         source = '\n'.join((MAIN / name).read_text() for name in
@@ -43,9 +45,15 @@ class TravelLanTransportContract(unittest.TestCase):
         for scenario in ('loopbackRoundTripDisconnectRevokesAndInviteIsSingleUse',
                          'malformedLengthsTruncationTamperAndReplayFailBeforePlayerEffects',
                          'stalledPeerAndOwnerCloseUnblockAndRevoke',
-                         'explicitOptInAndBoundedConfigurationRequired'):
+                         'explicitOptInAndBoundedConfigurationRequired',
+                         'hdmiDisconnectResetsPermissionAndBlocksStaleLanPacket',
+                         'revokedGrantBeforeLateHelloCannotBeRestoredByStaleHost',
+                         'hdmiLossBeforeLateHelloCannotBeRestoredByStaleHost'):
             self.assertIn('@Test fun ' + scenario, source)
         for kind in ('negative', 'oversize', 'truncated', 'tamper', 'wrongKey', 'reflection', 'replay'):
             self.assertIn('"' + kind + '"', source)
         self.assertIn('127.0.0.1', source)
+        self.assertIn('session.allowRemoteControl(true)\n        session.allowRemoteControl(false)', source)
+        self.assertIn('session.allowRemoteControl(true)\n        session.updateHdmiAvailability(false)', source)
+        self.assertGreaterEqual(source.count('fail("permission restored")'), 2)
         self.assertTrue((TEST / 'TravelLanPairingTest.kt').exists())

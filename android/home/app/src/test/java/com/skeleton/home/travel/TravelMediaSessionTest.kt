@@ -7,11 +7,12 @@ class TravelMediaSessionTest {
     private class Player : TravelLocalPlayer {
         val calls = mutableListOf<String>()
         var fail = false
+        var failStop = false
         override fun load(media: TravelMedia, output: TravelOutput) { calls += "load:$output" }
         override fun play() { if (fail) error("synthetic"); calls += "play" }
         override fun pause() { calls += "pause" }
         override fun seekTo(positionMs: Long) { calls += "seek:$positionMs" }
-        override fun stop() { calls += "stop" }
+        override fun stop() { if (failStop) error("synthetic"); calls += "stop" }
     }
 
     @Test fun localAndRemoteShareRevisionAndPlayer() {
@@ -63,6 +64,46 @@ class TravelMediaSessionTest {
         assertEquals(TravelPlayback.ERROR, session.snapshot().playback)
         assertEquals("media_not_ready", session.execute(TravelMediaCommand("synthetic", 2, TravelAction.PLAY)).reason)
         assertEquals("stop", player.calls.last())
+    }
+
+    @Test fun explicitRevokeCancelsPendingAndActiveRemoteAuthority() {
+        val session = TravelMediaSession("synthetic", Player(), object : TravelRemoteSessionPort {
+            override fun publish(state: TravelSessionState) {}
+        })
+        val owner = Any()
+        session.allowRemoteControl(true)
+        session.allowRemoteControl(false)
+        assertFalse(session.claimRemoteControl(owner))
+
+        session.allowRemoteControl(true)
+        assertTrue(session.claimRemoteControl(owner))
+        session.allowRemoteControl(false)
+        assertEquals("remote_disabled", session.executeRemote(owner, TravelMediaCommand(
+            "synthetic", 0, TravelAction.STOP, TravelOrigin.REMOTE)).reason)
+    }
+
+    @Test fun hdmiDisconnectRevokesRemoteAuthorityEvenWhenPlayerStopFails() {
+        val player = Player()
+        val session = TravelMediaSession("synthetic", player, object : TravelRemoteSessionPort {
+            override fun publish(state: TravelSessionState) {}
+        })
+        session.updateHdmiAvailability(true)
+        session.allowRemoteControl(true)
+        session.updateHdmiAvailability(false)
+        assertFalse(session.claimRemoteControl(Any()))
+
+        session.updateHdmiAvailability(true)
+        session.selectOutput(TravelOutput.HDMI)
+        val owner = Any()
+        session.allowRemoteControl(true)
+        assertTrue(session.claimRemoteControl(owner))
+        player.failStop = true
+
+        assertEquals("player_failure", session.updateHdmiAvailability(false).reason)
+        assertFalse(session.snapshot().hdmiAvailable)
+        assertEquals(TravelOutput.PHONE, session.snapshot().output)
+        assertEquals("remote_disabled", session.executeRemote(owner, TravelMediaCommand(
+            "synthetic", session.snapshot().revision, TravelAction.STOP, TravelOrigin.REMOTE)).reason)
     }
     @Test fun asynchronousRendererFailureStopsAndRequiresReload() {
         val player = Player()

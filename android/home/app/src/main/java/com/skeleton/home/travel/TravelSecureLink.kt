@@ -126,12 +126,19 @@ class TravelSecureHost(
     private val session: TravelMediaSession,
     private val channel: TravelSecureChannel,
 ) : TravelRecordExchange, AutoCloseable {
+    private val owner = Any()
     private var closed = false
+    init {
+        if (!session.claimRemoteControl(owner)) {
+            channel.close()
+            throw IllegalStateException("remote_owner_unavailable")
+        }
+    }
     @Synchronized override fun exchange(request: ByteArray): ByteArray {
         check(!closed)
         try {
             val command = TravelWire.command(channel.open(request))
-            return channel.seal(TravelWire.result(session.execute(command)))
+            return channel.seal(TravelWire.result(session.executeRemote(owner, command)))
         } catch (_: Exception) {
             close()
             throw IllegalStateException("travel_link_failed")
@@ -141,7 +148,7 @@ class TravelSecureHost(
         if (closed) return
         closed = true
         channel.close()
-        runCatching { session.allowRemoteControl(false) }
+        session.releaseRemoteControl(owner)
     }
 }
 
