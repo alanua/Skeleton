@@ -1,0 +1,119 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.operator_attention_request.schema.json",
+  "type": "object",
+  "required": [
+    "schema",
+    "attention_id",
+    "kind",
+    "priority",
+    "subject_ref",
+    "created_at",
+    "resume_token",
+    "public_summary",
+    "private_instruction",
+    "privacy",
+    "channel",
+    "action_class",
+    "idempotency_key",
+    "expires_at"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "skeleton.operator_attention_request.v1"
+    },
+    "attention_id": {
+      "type": "string",
+      "pattern": "^attn:[a-z0-9][a-z0-9_.:-]{2,95}$"
+    },
+    "kind": {
+      "type": "string",
+      "enum": [
+        "captcha",
+        "operator_decision",
+        "review"
+      ]
+    },
+    "priority": {
+      "type": "string",
+      "enum": [
+        "low",
+        "normal",
+        "high"
+      ]
+    },
+    "subject_ref": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_.-]{0,31}:[A-Za-z0-9._~:/?#\\[\\]@!$&'()*+,;=%-]{1,160}$"
+    },
+    "created_at": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$"
+    },
+    "resume_token": {
+      "type": "string",
+      "minLength": 8,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9._:-]{8,128}$"
+    },
+    "public_summary": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 240
+    },
+    "private_instruction": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1000
+    },
+    "privacy": {
+      "type": "string",
+      "enum": [
+        "public_safe",
+        "private_runtime"
+      ]
+    },
+    "channel": {
+      "type": "string",
+      "enum": [
+        "local",
+        "android",
+        "telegram"
+      ]
+    },
+    "action_class": {
+      "type": "string",
+      "enum": [
+        "human_challenge",
+        "approval",
+        "review"
+      ]
+    },
+    "idempotency_key": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9._:-]{8,128}$"
+        }
+      ]
+    },
+    "expires_at": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$"
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "skeleton.operator_attention_resolution.schema.json",
+  "type": "object",
+  "required": [
+    "schema",
+    "attention_id",
+    "status",
+    "actor_reference",
+    "resolved_at",
+    "resume_token",
+    "public_note"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "skeleton.operator_attention_resolution.v1"
+    },
+    "attention_id": {
+      "type": "string",
+      "pattern": "^attn:[a-z0-9][a-z0-9_.:-]{2,95}$"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "resolved",
+        "rejected",
+        "expired",
+        "cancelled"
+      ]
+    },
+    "actor_reference": {
+      "type": "string",
+      "maxLength": 96,
+      "pattern": "^[a-z][a-z0-9_-]{0,31}:[A-Za-z0-9@._/-]{1,63}$"
+    },
+    "resolved_at": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$"
+    },
+    "resume_token": {
+      "type": "string",
+      "minLength": 8,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9._:-]{8,128}$"
+    },
+    "public_note": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 240
+    }
+  }
+}
