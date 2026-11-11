@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://skeleton.invalid/schemas/geo_provenance.schema.json",
+  "title": "Skeleton Geo provenance",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["source_kind", "retrieved_at", "confidence"],
+  "properties": {
+    "source_kind": {"type": "string", "minLength": 1},
+    "source_ref": {"type": ["string", "null"]},
+    "retrieved_at": {"type": "string", "minLength": 1},
+    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+    "evidence_hash": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"}
+  }
+}
