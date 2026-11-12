@@ -1,0 +1,353 @@
+{
+  "type": "object",
+  "properties": {
+    "schema": {
+      "const": "skeleton.home.media_regression_guard.v1"
+    },
+    "baseline": {
+      "$ref": "#/$defs/artifact"
+    },
+    "candidate": {
+      "$ref": "#/$defs/artifact"
+    },
+    "baseline_features": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/feature_spec"
+      },
+      "maxItems": 200
+    },
+    "features": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/feature"
+      },
+      "maxItems": 200
+    },
+    "tools": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/tool"
+      },
+      "maxItems": 200
+    },
+    "required_tools": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "androguard",
+          "bindiff",
+          "diaphora",
+          "diffoscope",
+          "frida",
+          "ghidra",
+          "git",
+          "jadx",
+          "rea"
+        ]
+      },
+      "uniqueItems": true,
+      "maxItems": 9
+    }
+  },
+  "required": [
+    "schema",
+    "baseline",
+    "candidate",
+    "baseline_features",
+    "features",
+    "tools",
+    "required_tools"
+  ],
+  "additionalProperties": false,
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Home media release evidence review",
+  "$defs": {
+    "digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "artifact": {
+      "type": "object",
+      "properties": {
+        "version_name": {
+          "type": "string",
+          "pattern": "^\\d+\\.\\d+\\.\\d+$"
+        },
+        "version_code": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "source_sha256": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/digest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "source_commit": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sha256": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/digest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "signer_sha256": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/digest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "application_id": {
+          "enum": [
+            "com.skeleton.home",
+            "com.skeleton.home.preview"
+          ]
+        },
+        "build_scope": {
+          "enum": [
+            "production",
+            "production_candidate",
+            "debug",
+            "source"
+          ]
+        }
+      },
+      "required": [
+        "version_name",
+        "version_code",
+        "source_sha256",
+        "source_commit",
+        "sha256",
+        "signer_sha256",
+        "application_id",
+        "build_scope"
+      ],
+      "additionalProperties": false
+    },
+    "feature_spec": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,95}$"
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "minimum_evidence": {
+          "enum": [
+            "source",
+            "unit",
+            "android_ui",
+            "device"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "required",
+        "minimum_evidence"
+      ],
+      "additionalProperties": false
+    },
+    "evidence": {
+      "type": "object",
+      "properties": {
+        "report_id": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,95}$"
+        },
+        "report_sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "kind": {
+          "enum": [
+            "source",
+            "unit",
+            "android_ui",
+            "device"
+          ]
+        },
+        "result": {
+          "enum": [
+            "pass",
+            "fail",
+            "unverified"
+          ]
+        },
+        "source_sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "sha256": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/digest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "report_id",
+        "report_sha256",
+        "kind",
+        "result",
+        "source_sha256",
+        "sha256"
+      ],
+      "additionalProperties": false
+    },
+    "feature": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,95}$"
+        },
+        "result": {
+          "enum": [
+            "pass",
+            "fail",
+            "unverified",
+            "not_applicable"
+          ]
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500,
+          "pattern": "\\S"
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/evidence"
+          },
+          "maxItems": 200
+        }
+      },
+      "required": [
+        "id",
+        "result",
+        "reason",
+        "evidence"
+      ],
+      "additionalProperties": false
+    },
+    "tool": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "enum": [
+            "androguard",
+            "bindiff",
+            "diaphora",
+            "diffoscope",
+            "frida",
+            "ghidra",
+            "git",
+            "jadx",
+            "rea"
+          ]
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "state": {
+          "enum": [
+            "currently_verified",
+            "historically_verified",
+            "unavailable",
+            "not_required"
+          ]
+        },
+        "version": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,95}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "provenance": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,95}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "verified_at": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "valid_until": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500,
+          "pattern": "\\S"
+        }
+      },
+      "required": [
+        "name",
+        "required",
+        "state",
+        "version",
+        "provenance",
+        "verified_at",
+        "valid_until",
+        "reason"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "description": "Structural validation only. Run the evaluator for digest bindings, expiry, uniqueness by identity and minimum evidence requirements."
+}
