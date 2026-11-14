@@ -25,6 +25,9 @@ from core.page_publisher_backends import (
     default_fetcher,
     default_runner,
     get_backend,
+    publication_destination,
+    publication_artifact_hash,
+    verify_current_publication,
 )
 from core.page_publisher_profiles import PublicationProfile, get_profile
 from core.page_renderer_registry import resolve_renderer
@@ -424,7 +427,14 @@ def _load_state(path: Path) -> dict[str, Any] | None:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         raise ValueError("publication_state_invalid")
-    return value if isinstance(value, dict) else None
+    if not isinstance(value, dict):
+        raise ValueError("publication_state_invalid")
+    if any(not isinstance(value.get(key), str) or re.fullmatch(r"[a-f0-9]{64}", value[key]) is None
+           for key in ("content_hash", "package_hash", "revision")):
+        raise ValueError("publication_state_invalid")
+    if value.get("revision") != value.get("content_hash"):
+        raise ValueError("publication_state_invalid")
+    return value
 
 
 def _run_actions(manifest: dict[str, Any], private_receipt: dict[str, Any]) -> list[dict[str, Any]]:
@@ -475,28 +485,6 @@ def publish_manifest(
     except Exception as exc:
         return _blocked_receipt(manifest, profile, _safe_reason(exc), phase="build")
     try:
-        if (
-            prior_state
-            and prior_state.get("content_hash") == artifact.content_hash
-            and prior_state.get("verification") in {"LOCAL_VERIFIED", "HTTPS_VERIFIED"}
-            and prior_state.get("stable_url")
-        ):
-            return {
-                "schema": "skeleton.page.publication_receipt.v1",
-                "status": "NO_CHANGE",
-                "owner_module": manifest["owner_module"],
-                "profile_id": profile.profile_id,
-                "page_id": manifest["page_id"],
-                "content_hash": artifact.content_hash,
-                "package_hash": artifact.package_hash,
-                "revision": prior_state.get("revision"),
-                "stable_url": prior_state.get("stable_url"),
-                "verification": prior_state.get("verification"),
-                "rollback_ref": prior_state.get("rollback_ref"),
-                "build_seconds": build_receipt["build_seconds"],
-                "publish_seconds": 0.0,
-                "created_at": _utc_now(),
-            }
         backend = get_backend(profile.backend)
         if backend is None:
             return _blocked_receipt(manifest, profile, "publication_backend_not_registered")
@@ -514,6 +502,20 @@ def publish_manifest(
             command_runner=command_runner or default_runner(),
             url_fetcher=url_fetcher or default_fetcher(),
         )
+        if prior_state and prior_state.get("content_hash") == artifact.content_hash:
+            try:
+                verification = verify_current_publication(context)
+            except Exception as exc:
+                return _blocked_receipt(manifest, profile, _safe_reason(exc), phase="current_verification")
+            return public_publication_receipt({
+                "status": "NO_CHANGE", "verification": verification,
+                "owner_module": manifest["owner_module"], "profile_id": profile.profile_id,
+                "page_id": manifest["page_id"], "content_hash": artifact.content_hash,
+                "package_hash": artifact.package_hash, "revision": revision,
+                "stable_url": prior_state["stable_url"],
+                "build_seconds": build_receipt["build_seconds"], "publish_seconds": 0.0,
+                "created_at": _utc_now(),
+            })
         try:
             result = backend(context)
         except Exception as exc:
@@ -541,6 +543,8 @@ def publish_manifest(
             **private_receipt,
             "private": result.private_state,
             "manifest_path": manifest.get("_manifest_path"),
+            "destination": publication_destination(context, result.stable_url),
+            "artifact_hash": publication_artifact_hash(Path(result.backend_metadata["target"])),
         }
         _atomic_json(state_path, state)
         receipt_path = pipeline_root / "receipts" / profile.profile_id / str(manifest["owner_module"]) / f"{manifest['page_id']}-{result.revision[:16]}.json"
@@ -548,9 +552,9 @@ def publish_manifest(
         actions: list[dict[str, Any]] = []
         if result.verification in {"LOCAL_VERIFIED", "HTTPS_VERIFIED"}:
             actions = _run_actions(manifest, private_receipt)
-        public_receipt = {key: value for key, value in private_receipt.items() if key != "private_url"}
-        public_receipt["private_receipt_path"] = str(receipt_path)
-        public_receipt["downstream_actions"] = actions
+        private_receipt["downstream_actions"] = actions
+        _atomic_json(receipt_path, private_receipt)
+        public_receipt = public_publication_receipt(private_receipt)
         if any(item.get("status") == "ERROR" for item in actions):
             public_receipt["status"] = "PUBLISHED_WITH_ACTION_ERRORS"
         return public_receipt
@@ -587,11 +591,30 @@ def _blocked_receipt(
     }
 
 
-def _public_cli_receipt(receipt: dict[str, Any], show_private_url: bool) -> dict[str, Any]:
-    result = dict(receipt)
-    if not show_private_url:
-        result.pop("private_url", None)
+def public_publication_receipt(receipt: dict[str, Any]) -> dict[str, Any]:
+    """Explicit public projection; operational paths and callback payloads stay private."""
+    fields = {
+        "status", "owner_module", "profile_id", "page_id", "content_hash", "package_hash",
+        "revision", "verification", "phase", "reason", "build_seconds", "publish_seconds",
+        "total_seconds", "created_at", "file_count", "asset_count", "total_bytes",
+        "image_metadata_count",
+    }
+    result = {key: value for key, value in receipt.items() if key in fields}
+    result["schema"] = "skeleton.page.build_receipt.v1" if receipt.get("status") == "BUILT" else "skeleton.page.publication_receipt.v1"
+    # Local URLs encode filesystem paths. Queries/fragments can carry credentials.
+    url = receipt.get("stable_url")
+    if isinstance(url, str):
+        parsed = urllib.parse.urlsplit(url)
+        if parsed.scheme == "https" and parsed.hostname and not parsed.username and not parsed.password:
+            result["stable_url"] = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+    if "downstream_actions" in receipt:
+        result["downstream_actions"] = [{"status": "ERROR" if item.get("status") == "ERROR" else "DONE"}
+                                        for item in receipt["downstream_actions"]]
     return result
+
+
+def _public_cli_receipt(receipt: dict[str, Any], show_private_url: bool) -> dict[str, Any]:
+    return public_publication_receipt(receipt)
 
 
 def main(argv: Iterable[str] | None = None) -> int:

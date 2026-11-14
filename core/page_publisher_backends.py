@@ -194,7 +194,7 @@ def _route_target(root: Path, profile: PublicationProfile, page_id: str) -> Path
     return root.joinpath(*parts)
 
 
-def _resolve_backend_root(ctx: BackendContext) -> Path:
+def _resolve_backend_root(ctx: BackendContext, *, create: bool = True) -> Path:
     options = _backend_options(ctx.manifest)
     raw = options.get("repository_path") or options.get("root")
     if not raw and ctx.profile.publication_root_env:
@@ -202,7 +202,8 @@ def _resolve_backend_root(ctx: BackendContext) -> Path:
     if not raw:
         raise BackendError("publication_root_not_configured")
     root = Path(str(raw)).expanduser().resolve(strict=False)
-    root.mkdir(parents=True, exist_ok=True)
+    if create:
+        root.mkdir(parents=True, exist_ok=True)
     return root
 
 
@@ -227,6 +228,123 @@ def _stable_url(ctx: BackendContext, base_url: str) -> str:
             raise BackendError("stable_url_path_mismatch")
         return normalized
     return _join_url(base_url, route)
+
+
+def publication_destination(ctx: BackendContext, stable_url: str | None = None) -> dict[str, Any]:
+    """Resolve effective destination without creating directories or changing routes."""
+    options = _backend_options(ctx.manifest)
+    if ctx.profile.backend == "tailscale_serve_static_v1":
+        target = ctx.pipeline_root / "sites" / ctx.profile.profile_id / ctx.manifest["owner_module"] / ctx.manifest["page_id"] / "current"
+        if stable_url is None:
+            from core import page_publisher_runtime as legacy
+            dns = legacy._tailscale_magic_dns_name(ctx.command_runner)
+            if dns is None:
+                raise BackendError("publication_backend_identity_unavailable")
+            stable_url = f"https://{dns}{ctx.profile.url_path(ctx.manifest['page_id'])}"
+    elif ctx.profile.backend in {"filesystem_static_v1", "github_pages_encrypted_v1"}:
+        target = _route_target(_resolve_backend_root(ctx, create=False), ctx.profile, ctx.manifest["page_id"])
+        base = str(options.get("base_url") or (os.environ.get(ctx.profile.public_base_url_env or "", "")))
+        stable_url = _stable_url(ctx, base) if base or ctx.manifest.get("stable_url") else target.as_uri()
+    else:
+        raise BackendError("current_verification_not_supported")
+    return {
+        **_owner_payload(ctx), "backend": ctx.profile.backend,
+        "target": str(target), "stable_url": stable_url,
+        "base_url": str(options.get("base_url") or os.environ.get(ctx.profile.public_base_url_env or "", "")),
+        "declared_url": ctx.manifest.get("stable_url"),
+        "root": options.get("root"), "repository_path": options.get("repository_path"),
+        "verification_mode": options.get("verification_mode"),
+    }
+
+
+def publication_artifact_hash(target: Path) -> str:
+    """Hash installed bytes, including the route owner, rejecting symlink evidence."""
+    if not target.is_dir() or target.is_symlink():
+        raise BackendError("current_artifact_missing")
+    digest = hashlib.sha256()
+    for path in sorted(target.rglob("*")):
+        if path.is_symlink():
+            raise BackendError("current_artifact_unsafe")
+        if path.is_file():
+            name = path.relative_to(target).as_posix().encode("utf-8")
+            data = path.read_bytes()
+            digest.update(len(name).to_bytes(4, "big") + name + len(data).to_bytes(8, "big") + data)
+    return digest.hexdigest()
+
+
+def verify_current_publication(ctx: BackendContext) -> str:
+    """Read-only NO_CHANGE boundary. Historical receipts are not current evidence."""
+    prior = ctx.prior_state or {}
+    destination = publication_destination(ctx)
+    if prior.get("destination") != destination or prior.get("revision") != ctx.revision:
+        raise BackendError("publication_destination_or_revision_mismatch")
+    for field, expected in (("owner_module", ctx.manifest["owner_module"]),
+                            ("profile_id", ctx.profile.profile_id), ("page_id", ctx.manifest["page_id"])):
+        if prior.get(field) != expected:
+            raise BackendError("publication_state_identity_mismatch")
+    target = Path(destination["target"])
+    if _read_owner(target) != _owner_payload(ctx):
+        raise BackendError("current_route_not_owned")
+    if not prior.get("artifact_hash") or publication_artifact_hash(target) != prior["artifact_hash"]:
+        raise BackendError("current_artifact_mismatch")
+    stable_url = destination["stable_url"]
+    if stable_url != prior.get("stable_url"):
+        raise BackendError("publication_destination_or_revision_mismatch")
+    verification = prior.get("verification")
+    expected = "HTTPS_VERIFIED" if ctx.profile.backend == "tailscale_serve_static_v1" else "LOCAL_VERIFIED"
+    if ctx.profile.backend == "github_pages_encrypted_v1":
+        options = _backend_options(ctx.manifest)
+        base = destination["base_url"]
+        mode = options.get("verification_mode", "https" if base and options.get("git_mode") == "commit_push" else "local")
+        if mode not in {"https", "local"}:
+            raise BackendError("invalid_verification_mode")
+        expected = "HTTPS_VERIFIED" if mode == "https" else "LOCAL_VERIFIED"
+    if verification != expected:
+        raise BackendError("publication_state_unverified")
+    if ctx.profile.backend == "github_pages_encrypted_v1":
+        _verify_local_encrypted(target, ctx.revision)
+        # The private key is operational evidence too: never declare an unusable link current.
+        try:
+            key = prior["private"]["fragment_key"]
+            decode = lambda value: base64.b64decode(value + "=" * ((4 - len(value) % 4) % 4), altchars=b"-_", validate=True)
+            secret = decode(key)
+            payload = json.loads((target / "payload.json").read_text(encoding="ascii"))
+            salt, iv, cipher, tag = (decode(payload[name]) for name in ("salt", "iv", "ciphertext", "mac"))
+            material = _hkdf(secret, salt, b"skeleton-page-publisher-v1", 64)
+            if len(secret) != 32 or not hmac.compare_digest(tag, hmac.new(material[32:], b"SPP1" + salt + iv + cipher, hashlib.sha256).digest()):
+                raise ValueError("invalid_key")
+        except Exception as exc:
+            raise BackendError("stored_fragment_key_invalid") from exc
+        if verification == "HTTPS_VERIFIED":
+            _verify_https(ctx, stable_url)
+            # Require the actual currently served encrypted artifact, not just a marker.
+            for name in ("index.html", "payload.json"):
+                url = stable_url if name == "index.html" else f"{stable_url.rstrip('/')}/payload.json?rev={ctx.revision}"
+                code, body = ctx.url_fetcher(url, 20)
+                if code != 200 or body != (target / name).read_bytes():
+                    raise BackendError("https_revision_mismatch")
+    elif ctx.profile.backend == "tailscale_serve_static_v1":
+        from core import page_publisher_runtime as legacy
+        status, reason = legacy._tailscale_serve_status(ctx.command_runner)
+        route = ctx.profile.url_path(ctx.manifest["page_id"])
+        configured, bounded = legacy._tailscale_path_configured(status or {}, route)
+        host = urllib.parse.urlparse(stable_url).netloc
+        handlers = (status or {}).get("Web", {}).get(f"{host}:443", {}).get("Handlers", {})
+        if reason or not configured or not bounded or handlers.get(route) != {"Path": str(target)}:
+            raise BackendError("current_route_not_owned")
+        ok, _ = legacy._verify_deployed_site(stable_url, target, ctx.url_fetcher)
+        if not ok:
+            raise BackendError("https_verification_failed")
+        for path in target.rglob("*"):
+            if path.is_file() and path.name != _OWNER_FILE:
+                rel = path.relative_to(target).as_posix()
+                url = stable_url if rel == "index.html" else f"{stable_url.rstrip('/')}/{rel}"
+                code, body = ctx.url_fetcher(url, 20)
+                if code != 200 or body != path.read_bytes():
+                    raise BackendError("https_revision_mismatch")
+    if verification not in {"LOCAL_VERIFIED", "HTTPS_VERIFIED"}:
+        raise BackendError("publication_state_unverified")
+    return verification
 
 
 def _filesystem_backend(ctx: BackendContext) -> BackendResult:
@@ -540,7 +658,7 @@ def _github_pages_encrypted_backend(ctx: BackendContext) -> BackendResult:
     try:
         _verify_local_encrypted(target, ctx.revision)
         commit_sha = _git_publish(ctx, repo_root, target)
-        base_url = str(options.get("base_url") or (os.environ.get(ctx.profile.public_base_url_env or "") if ctx.profile.public_base_url_env else ""))
+        base_url = str(options.get("base_url") or (os.environ.get(ctx.profile.public_base_url_env or "", "") if ctx.profile.public_base_url_env else ""))
         stable_url = _stable_url(ctx, base_url) if base_url or ctx.manifest.get("stable_url") else target.as_uri()
         verification_mode = str(options.get("verification_mode", "https" if base_url and options.get("git_mode") == "commit_push" else "local"))
         if verification_mode == "https":
@@ -593,6 +711,7 @@ def _tailscale_backend(ctx: BackendContext) -> BackendResult:
     publish_dir, previous = legacy._publish_site(ctx.rendered_dir, current)
     route_created = False
     try:
+        (publish_dir / _OWNER_FILE).write_text(json.dumps(_owner_payload(ctx), sort_keys=True), encoding="utf-8")
         if not configured:
             code, _ = legacy._set_tailscale_path(ctx.command_runner, url_path, publish_dir)
             if code != 0:
