@@ -1,162 +1,134 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from enum import Enum
+from dataclasses import dataclass, replace
 from datetime import datetime
+from enum import Enum
 import re
-
 
 ATTENTION_SCHEMA = "skeleton.operator_attention_request.v1"
 RESOLUTION_SCHEMA = "skeleton.operator_attention_resolution.v1"
-
-MAX_PUBLIC_SUMMARY_CHARS = 240
-MAX_PRIVATE_INSTRUCTION_CHARS = 1000
-MAX_TOKEN_CHARS = 128
-
 _ATTENTION_ID_RE = re.compile(r"^attn:[a-z0-9][a-z0-9_.:-]{2,95}$")
-_SUBJECT_REF_RE = re.compile(r"^[a-z][a-z0-9_.-]{0,31}:[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]{1,160}$")
+_SESSION_REF_RE = re.compile(r"^session:[a-f0-9]{64}$")
+_IDENTIFIER_RE = re.compile(r"^[a-z][a-z0-9_.-]{1,63}$")
 _ACTOR_REFERENCE_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}:[A-Za-z0-9@._/-]{1,63}$")
 _UTC_TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 _TOKEN_RE = re.compile(r"^[A-Za-z0-9._:-]{8,128}$")
 
-
-class AttentionKind(str, Enum):
+class AttentionReason(str, Enum):
     CAPTCHA = "captcha"
-    OPERATOR_DECISION = "operator_decision"
-    REVIEW = "review"
-
-
-class AttentionPriority(str, Enum):
-    LOW = "low"
-    NORMAL = "normal"
-    HIGH = "high"
-
-
-class AttentionPrivacy(str, Enum):
-    PUBLIC_SAFE = "public_safe"
-    PRIVATE_RUNTIME = "private_runtime"
-
-
-class AttentionChannel(str, Enum):
-    LOCAL = "local"
-    ANDROID = "android"
-    TELEGRAM = "telegram"
-
-
-class AttentionActionClass(str, Enum):
-    HUMAN_CHALLENGE = "human_challenge"
-    APPROVAL = "approval"
-    REVIEW = "review"
-
+    MFA = "mfa"
+    OAUTH_CONSENT = "oauth_consent"
+    ACCOUNT_SELECTION = "account_selection"
+    SITE_CONSENT = "site_consent"
+    MANUAL_REVIEW = "manual_review"
+    UNKNOWN_INTERACTIVE_CHALLENGE = "unknown_interactive_challenge"
 
 class AttentionStatus(str, Enum):
     PENDING = "pending"
     DELIVERED = "delivered"
-    ACKNOWLEDGED = "acknowledged"
-    RESOLVED = "resolved"
-    REJECTED = "rejected"
+    OPENED = "opened"
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
     EXPIRED = "expired"
     CANCELLED = "cancelled"
 
+class AttentionChannel(str, Enum):
+    ANDROID_HOME = "android_home"
+    TELEGRAM = "telegram"
+
+class WebActionClass(str, Enum):
+    READ_ONLY = "read_only"
+    PRIVATE_SESSION_MUTATION = "private_session_mutation"
+    EXTERNAL_MUTATION = "external_mutation"
+    HIGH_IMPACT = "high_impact"
 
 class AttentionResolutionStatus(str, Enum):
-    RESOLVED = "resolved"
-    REJECTED = "rejected"
-    EXPIRED = "expired"
+    COMPLETED = "completed"
     CANCELLED = "cancelled"
 
+TERMINAL = {AttentionStatus.COMPLETED, AttentionStatus.EXPIRED, AttentionStatus.CANCELLED}
+TRANSITIONS = {
+    AttentionStatus.PENDING: {AttentionStatus.DELIVERED, AttentionStatus.CANCELLED},
+    AttentionStatus.DELIVERED: {AttentionStatus.OPENED, AttentionStatus.CANCELLED},
+    AttentionStatus.OPENED: {AttentionStatus.IN_PROGRESS, AttentionStatus.CANCELLED},
+    AttentionStatus.IN_PROGRESS: {AttentionStatus.COMPLETED, AttentionStatus.CANCELLED},
+}
+
+def _display(reason):
+    return ("Operator attention required", f"Private session requires {reason.value.replace('_', ' ')}.")
 
 @dataclass(frozen=True)
 class OperatorAttentionRequest:
-    """Typed public-safe envelope for work that must pause for an operator."""
-
+    """Private runtime record. Public output must use public_receipt()."""
     attention_id: str
-    kind: AttentionKind
-    priority: AttentionPriority
-    subject_ref: str
+    reason: AttentionReason
+    source_capability: str
+    source_operation: str
+    browser_session_ref: str
     created_at: str
+    expires_at: str
+    idempotency_key: str
     resume_token: str
-    public_summary: str
-    private_instruction: str
-    privacy: AttentionPrivacy = AttentionPrivacy.PRIVATE_RUNTIME
+    display_title: str
+    display_message: str
+    delivery_channels: tuple[AttentionChannel, ...] = tuple(AttentionChannel)
+    status: AttentionStatus = AttentionStatus.PENDING
 
-    channel: AttentionChannel = AttentionChannel.LOCAL
-    action_class: AttentionActionClass = AttentionActionClass.HUMAN_CHALLENGE
-    idempotency_key: str | None = None
-    expires_at: str | None = None
+    def __post_init__(self):
+        for field, pattern in (("attention_id", _ATTENTION_ID_RE), ("source_capability", _IDENTIFIER_RE),
+                               ("source_operation", _IDENTIFIER_RE), ("browser_session_ref", _SESSION_REF_RE),
+                               ("idempotency_key", _TOKEN_RE), ("resume_token", _TOKEN_RE)):
+            _validated_match(getattr(self, field), pattern, field)
+        for field, enum in (("reason", AttentionReason), ("status", AttentionStatus)):
+            object.__setattr__(self, field, _coerce_enum(getattr(self, field), enum, field))
+        _validated_timestamp(self.created_at)
+        _validated_timestamp(self.expires_at)
+        if self.expires_at <= self.created_at:
+            raise ValueError("expires_at must follow created_at")
+        channels = tuple(_coerce_enum(c, AttentionChannel, "delivery_channels") for c in self.delivery_channels)
+        if not 1 <= len(channels) <= 2 or len(set(channels)) != len(channels):
+            raise ValueError("delivery_channels must be a bounded unique subset")
+        object.__setattr__(self, "delivery_channels", channels)
+        # Fixed templates prevent URL, page text and credentials entering public output.
+        title, message = _display(self.reason)
+        if (self.display_title, self.display_message) != (title, message):
+            raise ValueError("display fields must use sanitized reason templates")
 
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "attention_id", _validated_match(self.attention_id, _ATTENTION_ID_RE, "attention_id"))
-        object.__setattr__(self, "kind", _coerce_enum(self.kind, AttentionKind, "kind"))
-        object.__setattr__(self, "priority", _coerce_enum(self.priority, AttentionPriority, "priority"))
-        object.__setattr__(self, "subject_ref", _validated_match(self.subject_ref, _SUBJECT_REF_RE, "subject_ref"))
-        object.__setattr__(self, "created_at", _validated_timestamp(self.created_at))
-        object.__setattr__(self, "resume_token", _validated_match(self.resume_token, _TOKEN_RE, "resume_token"))
-        object.__setattr__(self, "public_summary", _validated_text(self.public_summary, MAX_PUBLIC_SUMMARY_CHARS, "public_summary"))
-        object.__setattr__(
-            self,
-            "private_instruction",
-            _validated_text(self.private_instruction, MAX_PRIVATE_INSTRUCTION_CHARS, "private_instruction"),
-        )
-        object.__setattr__(self, "privacy", _coerce_enum(self.privacy, AttentionPrivacy, "privacy"))
-        object.__setattr__(self, "channel", _coerce_enum(self.channel, AttentionChannel, "channel"))
-        object.__setattr__(self, "action_class", _coerce_enum(self.action_class, AttentionActionClass, "action_class"))
-        if self.idempotency_key is not None:
-            _validated_match(self.idempotency_key, _TOKEN_RE, "idempotency_key")
-        if self.expires_at is not None:
-            _validated_timestamp(self.expires_at)
-            if self.expires_at <= self.created_at:
-                raise ValueError("expires_at must follow created_at.")
+    @property
+    def request_id(self):
+        return self.attention_id
 
-    def to_dict(self) -> dict[str, object]:
-        return {
-            "schema": ATTENTION_SCHEMA,
-            "attention_id": self.attention_id,
-            "kind": self.kind.value,
-            "priority": self.priority.value,
-            "subject_ref": self.subject_ref,
-            "created_at": self.created_at,
-            "resume_token": self.resume_token,
-            "public_summary": self.public_summary,
-            "private_instruction": self.private_instruction,
-            "privacy": self.privacy.value,
-            "channel": self.channel.value,
-            "action_class": self.action_class.value,
-            "idempotency_key": self.idempotency_key,
-            "expires_at": self.expires_at,
-        }
+    def public_receipt(self):
+        return {"attention_id": self.attention_id, "reason": self.reason.value,
+                "status": self.status.value, "source_capability": self.source_capability,
+                "source_operation": self.source_operation, "created_at": self.created_at,
+                "expires_at": self.expires_at, "delivery_channels": [c.value for c in self.delivery_channels],
+                "display_title": self.display_title, "display_message": self.display_message,
+                "reason_code": self.reason.name + "_OPERATOR_HANDOFF_REQUIRED"}
 
+    def to_private_dict(self):
+        return dict(self.public_receipt(), schema=ATTENTION_SCHEMA,
+                    browser_session_ref=self.browser_session_ref, idempotency_key=self.idempotency_key,
+                    resume_token=self.resume_token)
 
 @dataclass(frozen=True)
 class OperatorAttentionResolution:
-    """Typed resolution returned by the operator without executing side effects."""
-
     attention_id: str
     status: AttentionResolutionStatus
     actor_reference: str
     resolved_at: str
     resume_token: str
-    public_note: str
 
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "attention_id", _validated_match(self.attention_id, _ATTENTION_ID_RE, "attention_id"))
+    def __post_init__(self):
+        _validated_match(self.attention_id, _ATTENTION_ID_RE, "attention_id")
+        _validated_match(self.actor_reference, _ACTOR_REFERENCE_RE, "actor_reference")
+        _validated_match(self.resume_token, _TOKEN_RE, "resume_token")
+        _validated_timestamp(self.resolved_at)
         object.__setattr__(self, "status", _coerce_enum(self.status, AttentionResolutionStatus, "status"))
-        object.__setattr__(self, "actor_reference", _validated_match(self.actor_reference, _ACTOR_REFERENCE_RE, "actor_reference"))
-        object.__setattr__(self, "resolved_at", _validated_timestamp(self.resolved_at))
-        object.__setattr__(self, "resume_token", _validated_match(self.resume_token, _TOKEN_RE, "resume_token"))
-        object.__setattr__(self, "public_note", _validated_text(self.public_note, MAX_PUBLIC_SUMMARY_CHARS, "public_note"))
 
-    def to_dict(self) -> dict[str, object]:
-        return {
-            "schema": RESOLUTION_SCHEMA,
-            "attention_id": self.attention_id,
-            "status": self.status.value,
-            "actor_reference": self.actor_reference,
-            "resolved_at": self.resolved_at,
-            "resume_token": self.resume_token,
-            "public_note": self.public_note,
-        }
-
+    def to_private_dict(self):
+        return dict(schema=RESOLUTION_SCHEMA, attention_id=self.attention_id, status=self.status.value,
+                    actor_reference=self.actor_reference, resolved_at=self.resolved_at, resume_token=self.resume_token)
 
 def _coerce_enum(value: object, enum_type: type[Enum], field_name: str) -> Enum:
     if isinstance(value, enum_type):
@@ -194,97 +166,75 @@ def _validated_text(value: object, max_chars: int, field_name: str) -> str:
     return normalized
 
 
-@dataclass(frozen=True)
-class OperatorAttentionReceipt:
-    """Allowlisted public output: never includes caller text or runtime references."""
-
-    attention_id: str
-    status: AttentionStatus
-
-    def __post_init__(self) -> None:
-        _validated_match(self.attention_id, _ATTENTION_ID_RE, "attention_id")
-        object.__setattr__(self, "status", _coerce_enum(self.status, AttentionStatus, "status"))
-
-    def to_dict(self) -> dict[str, str]:
-        return {"attention_id": self.attention_id, "status": self.status.value}
-
 
 class OperatorAttentionLifecycle:
-    """In-memory contract model; channels are labels and never send notifications."""
+    """Canonical in-memory state; projections never send notifications."""
+    def __init__(self):
+        self._requests = {}
+        self._keys = {}
+        self._resolutions = {}
 
-    def __init__(self) -> None:
-        self._requests: dict[str, OperatorAttentionRequest] = {}
-        self._statuses: dict[str, AttentionStatus] = {}
-        self._keys: dict[str, str] = {}
-        self._resolutions: dict[str, OperatorAttentionResolution] = {}
-
-    def submit(self, request: OperatorAttentionRequest) -> OperatorAttentionReceipt:
-        if not isinstance(request, OperatorAttentionRequest):
-            raise ValueError("request must be an OperatorAttentionRequest.")
-        key = request.idempotency_key or request.attention_id
-        previous = self._keys.get(key, request.attention_id)
-        if previous != request.attention_id:
-            raise ValueError("IDEMPOTENCY_CONFLICT")
-        if request.attention_id in self._requests:
-            if self._requests[request.attention_id] != request:
+    def submit(self, request):
+        if not isinstance(request, OperatorAttentionRequest) or request.status is not AttentionStatus.PENDING:
+            raise ValueError("INVALID_REQUEST")
+        previous = self._keys.get(request.idempotency_key)
+        if previous is not None:
+            canonical = self._requests[previous]
+            if replace(canonical, attention_id=request.attention_id, status=request.status) != request:
                 raise ValueError("IDEMPOTENCY_CONFLICT")
-            return self.receipt(request.attention_id)
+            return canonical
+        if request.attention_id in self._requests:
+            raise ValueError("IDEMPOTENCY_CONFLICT")
         self._requests[request.attention_id] = request
-        self._keys[key] = request.attention_id
-        self._statuses[request.attention_id] = AttentionStatus.PENDING
-        return self.receipt(request.attention_id)
+        self._keys[request.idempotency_key] = request.attention_id
+        return request
 
-    def receipt(self, attention_id: str) -> OperatorAttentionReceipt:
+    def request(self, attention_id):
         if attention_id not in self._requests:
             raise ValueError("ATTENTION_NOT_FOUND")
-        return OperatorAttentionReceipt(attention_id, self._statuses[attention_id])
+        return self._requests[attention_id]
 
-    def advance(self, attention_id: str, status: AttentionStatus, *, now: str) -> OperatorAttentionReceipt:
+    def receipt(self, attention_id):
+        return self.request(attention_id).public_receipt()
+
+    def projections(self, attention_id):
+        request = self.request(attention_id)
+        return {c.value: request.public_receipt() for c in request.delivery_channels}
+
+    def expire(self, attention_id, *, now):
+        request = self.request(attention_id)
+        _validated_timestamp(now)
+        if now < request.created_at:
+            raise ValueError("timestamp precedes request")
+        if now >= request.expires_at and request.status not in TERMINAL:
+            self._requests[attention_id] = replace(request, status=AttentionStatus.EXPIRED)
+        return self.receipt(attention_id)
+
+    def advance(self, attention_id, status, *, now):
         self.expire(attention_id, now=now)
         status = _coerce_enum(status, AttentionStatus, "status")
-        current = self._statuses[attention_id]
-        if current == status:
-            return self.receipt(attention_id)
-        allowed = {
-            AttentionStatus.PENDING: {AttentionStatus.DELIVERED, AttentionStatus.CANCELLED},
-            AttentionStatus.DELIVERED: {AttentionStatus.ACKNOWLEDGED, AttentionStatus.CANCELLED},
-            AttentionStatus.ACKNOWLEDGED: {AttentionStatus.CANCELLED},
-        }
-        if status not in allowed.get(current, set()):
+        request = self.request(attention_id)
+        # Completion requires the private resolution token.
+        if status is AttentionStatus.COMPLETED or status not in TRANSITIONS.get(request.status, set()):
             raise ValueError("INVALID_ATTENTION_TRANSITION")
-        self._statuses[attention_id] = status
+        self._requests[attention_id] = replace(request, status=status)
         return self.receipt(attention_id)
 
-    def expire(self, attention_id: str, *, now: str) -> OperatorAttentionReceipt:
-        self.receipt(attention_id)
-        _validated_timestamp(now)
-        request = self._requests[attention_id]
-        if now < request.created_at:
-            raise ValueError("timestamp precedes request.")
-        if (request.expires_at is not None and now >= request.expires_at
-                and self._statuses[attention_id] in {
-                    AttentionStatus.PENDING, AttentionStatus.DELIVERED, AttentionStatus.ACKNOWLEDGED}):
-            self._statuses[attention_id] = AttentionStatus.EXPIRED
-        return self.receipt(attention_id)
-
-    def resolve(self, resolution: OperatorAttentionResolution) -> OperatorAttentionReceipt:
+    def resolve(self, resolution):
         if not isinstance(resolution, OperatorAttentionResolution):
-            raise ValueError("resolution must be an OperatorAttentionResolution.")
-        attention_id = resolution.attention_id
-        self.receipt(attention_id)
-        request = self._requests[attention_id]
-        if resolution.resume_token != request.resume_token:
+            raise ValueError("INVALID_RESOLUTION")
+        request = self.request(resolution.attention_id)
+        if request.resume_token != resolution.resume_token:
             raise ValueError("ATTENTION_TOKEN_MISMATCH")
-        self.expire(attention_id, now=resolution.resolved_at)
-        if attention_id in self._resolutions:
-            if self._resolutions[attention_id] != resolution:
+        self.expire(request.attention_id, now=resolution.resolved_at)
+        if request.attention_id in self._resolutions:
+            if self._resolutions[request.attention_id] != resolution:
                 raise ValueError("RESOLUTION_CONFLICT")
-            return self.receipt(attention_id)
-        current = self._statuses[attention_id]
-        if current not in {AttentionStatus.PENDING, AttentionStatus.DELIVERED, AttentionStatus.ACKNOWLEDGED}:
-            raise ValueError("ATTENTION_ALREADY_TERMINAL")
-        if resolution.status is AttentionResolutionStatus.EXPIRED:
-            raise ValueError("EXPIRY_REQUIRES_DEADLINE")
-        self._statuses[attention_id] = AttentionStatus(resolution.status.value)
-        self._resolutions[attention_id] = resolution
-        return self.receipt(attention_id)
+            return self.receipt(request.attention_id)
+        request = self.request(request.attention_id)
+        target = AttentionStatus(resolution.status.value)
+        if target not in TRANSITIONS.get(request.status, set()):
+            raise ValueError("INVALID_ATTENTION_TRANSITION")
+        self._requests[request.attention_id] = replace(request, status=target)
+        self._resolutions[request.attention_id] = resolution
+        return self.receipt(request.attention_id)

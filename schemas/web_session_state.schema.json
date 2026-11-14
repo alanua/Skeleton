@@ -2,6 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "skeleton.web_session_state.schema.json",
   "type": "object",
+  "additionalProperties": false,
   "required": [
     "schema",
     "binding",
@@ -9,21 +10,19 @@
     "status",
     "pending_challenge"
   ],
-  "additionalProperties": false,
   "properties": {
     "schema": {
-      "type": "string",
       "const": "skeleton.web_session_state.v1"
     },
     "binding": {
       "type": "object",
+      "additionalProperties": false,
       "required": [
         "provider_id",
         "session_id",
         "session_epoch",
         "origin"
       ],
-      "additionalProperties": false,
       "properties": {
         "provider_id": {
           "type": "string",
@@ -39,13 +38,14 @@
         },
         "origin": {
           "type": "string",
-          "pattern": "^https://[A-Za-z0-9.-]{1,120}(:[0-9]{2,5})?$"
+          "pattern": "^https://[A-Za-z0-9.-]{1,120}(?::[0-9]{2,5})?$"
         }
       }
     },
     "current_url": {
       "type": "string",
-      "pattern": "^https://[A-Za-z0-9._~:/?#\\[\\]@!$&'()*+,;=%-]{1,220}$"
+      "pattern": "^https://[A-Za-z0-9.-]+(?::[0-9]{2,5})?(?:[/?#][A-Za-z0-9._~:/?#\\[\\]@!$&\\x27()*+,;=%-]*)?$",
+      "maxLength": 228
     },
     "status": {
       "type": "string",
@@ -63,30 +63,49 @@
         },
         {
           "type": "object",
+          "additionalProperties": false,
           "required": [
             "challenge_id",
+            "reason",
             "page_url",
             "reason_code",
             "resume_token"
           ],
-          "additionalProperties": false,
           "properties": {
             "challenge_id": {
               "type": "string",
-              "pattern": "^captcha:[a-z0-9][a-z0-9_.:-]{2,95}$"
+              "pattern": "^(?:captcha|challenge):[a-z0-9][a-z0-9_.:-]{2,95}$"
+            },
+            "reason": {
+              "type": "string",
+              "enum": [
+                "captcha",
+                "mfa",
+                "oauth_consent",
+                "account_selection",
+                "site_consent",
+                "manual_review",
+                "unknown_interactive_challenge"
+              ]
             },
             "page_url": {
               "type": "string",
-              "pattern": "^https://[A-Za-z0-9._~:/?#\\[\\]@!$&'()*+,;=%-]{1,220}$"
+              "pattern": "^https://[A-Za-z0-9.-]+(?::[0-9]{2,5})?(?:[/?#][A-Za-z0-9._~:/?#\\[\\]@!$&\\x27()*+,;=%-]*)?$",
+              "maxLength": 228
             },
             "reason_code": {
-              "type": "string",
-              "pattern": "^[A-Z0-9_]{3,80}$"
+              "enum": [
+                "CAPTCHA_OPERATOR_HANDOFF_REQUIRED",
+                "MFA_OPERATOR_HANDOFF_REQUIRED",
+                "OAUTH_CONSENT_OPERATOR_HANDOFF_REQUIRED",
+                "ACCOUNT_SELECTION_OPERATOR_HANDOFF_REQUIRED",
+                "SITE_CONSENT_OPERATOR_HANDOFF_REQUIRED",
+                "MANUAL_REVIEW_OPERATOR_HANDOFF_REQUIRED",
+                "UNKNOWN_INTERACTIVE_CHALLENGE_OPERATOR_HANDOFF_REQUIRED"
+              ]
             },
             "resume_token": {
               "type": "string",
-              "minLength": 8,
-              "maxLength": 128,
               "pattern": "^[A-Za-z0-9._:-]{8,128}$"
             }
           }

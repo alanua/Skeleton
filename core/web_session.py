@@ -2,15 +2,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from enum import Enum
+from datetime import datetime, timedelta
 import hashlib
 import json
 import re
 from urllib.parse import urlparse
 
 from core.operator_attention import (
-    AttentionKind,
+    AttentionReason,
+    AttentionChannel,
+    AttentionStatus,
+    WebActionClass,
+    _display,
     OperatorAttentionLifecycle,
-    AttentionPriority,
     OperatorAttentionRequest,
     OperatorAttentionResolution,
 )
@@ -20,7 +24,7 @@ WEB_SESSION_SCHEMA = "skeleton.web_session_state.v1"
 
 _ID_RE = re.compile(r"^[a-z][a-z0-9_.-]{1,63}$")
 _SESSION_ID_RE = re.compile(r"^sess:[a-z0-9][a-z0-9_.:-]{2,95}$")
-_CHALLENGE_ID_RE = re.compile(r"^captcha:[a-z0-9][a-z0-9_.:-]{2,95}$")
+_CHALLENGE_ID_RE = re.compile(r"^(?:captcha|challenge):[a-z0-9][a-z0-9_.:-]{2,95}$")
 _ORIGIN_RE = re.compile(r"^https://[A-Za-z0-9.-]{1,120}(?::[0-9]{2,5})?$")
 _URL_RE = re.compile(r"^https://[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]{1,220}$")
 
@@ -47,7 +51,7 @@ class WebSessionBinding:
         object.__setattr__(self, "session_epoch", _validated_positive_int(self.session_epoch, "session_epoch"))
         object.__setattr__(self, "origin", _validated_match(self.origin, _ORIGIN_RE, "origin"))
 
-    def to_dict(self) -> dict[str, object]:
+    def to_private_dict(self) -> dict[str, object]:
         return {
             "provider_id": self.provider_id,
             "session_id": self.session_id,
@@ -57,18 +61,26 @@ class WebSessionBinding:
 
 
 @dataclass(frozen=True)
-class WebCaptchaChallenge:
+class WebInteractiveChallenge:
     challenge_id: str
     binding: WebSessionBinding
     page_url: str
-    reason_code: str = "CAPTCHA_OPERATOR_HANDOFF_REQUIRED"
+    reason: AttentionReason = AttentionReason.CAPTCHA
+
+    @property
+    def reason_code(self):
+        return self.reason.name + "_OPERATOR_HANDOFF_REQUIRED"
+
+    @property
+    def attention_id(self):
+        return "attn:" + hashlib.sha256(("attention-id:" + self.resume_token()).encode()).hexdigest()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "challenge_id", _validated_match(self.challenge_id, _CHALLENGE_ID_RE, "challenge_id"))
         if not isinstance(self.binding, WebSessionBinding):
             raise ValueError("binding must be a WebSessionBinding.")
         object.__setattr__(self, "page_url", _validated_match(self.page_url, _URL_RE, "page_url"))
-        object.__setattr__(self, "reason_code", _validated_reason_code(self.reason_code))
+        object.__setattr__(self, "reason", AttentionReason(self.reason))
         if _origin_for_url(self.page_url) != self.binding.origin:
             raise ValueError("challenge origin differs from binding.")
 
@@ -76,28 +88,29 @@ class WebCaptchaChallenge:
         return _stable_token(
             {
                 "challenge_id": self.challenge_id,
-                "binding": self.binding.to_dict(),
+                "binding": self.binding.to_private_dict(),
                 "page_url": self.page_url,
                 "reason_code": self.reason_code,
             }
         )
 
-    def to_attention_request(self, *, created_at: str, expires_at: str | None = None) -> OperatorAttentionRequest:
+    def to_attention_request(self, *, created_at: str, expires_at: str | None = None,
+                             delivery_channels=tuple(AttentionChannel)) -> OperatorAttentionRequest:
+        if expires_at is None:
+            expires_at = (datetime.strptime(created_at, "%Y-%m-%dT%H:%M:%SZ") + timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        title, message = _display(self.reason)
         return OperatorAttentionRequest(
-            attention_id=f"attn:{self.challenge_id.removeprefix('captcha:')}",
-            kind=AttentionKind.CAPTCHA,
-            priority=AttentionPriority.HIGH,
-            subject_ref=f"web-session:{self.binding.session_id}",
-            created_at=created_at,
-            expires_at=expires_at,
-            idempotency_key=self.resume_token(),
-            resume_token=self.resume_token(),
-            public_summary="CAPTCHA requires operator attention for a private web session.",
-            private_instruction=(
-                "Solve the CAPTCHA in the existing private browser session only; "
-                "do not create a new session, export cookies, or send credentials."
-            ),
+            attention_id=self.attention_id, reason=self.reason,
+            source_capability="web", source_operation="interactive_challenge",
+            browser_session_ref="session:" + _stable_token(self.binding.to_private_dict()).split(":")[1],
+            created_at=created_at, expires_at=expires_at, idempotency_key=self.resume_token(),
+            resume_token=self.resume_token(), display_title=title, display_message=message,
+            delivery_channels=delivery_channels,
         )
+
+
+# CAPTCHA is one typed reason; it has no provider-specific bypass behavior.
+WebCaptchaChallenge = WebInteractiveChallenge
 
 
 @dataclass(frozen=True)
@@ -105,15 +118,15 @@ class WebSessionState:
     binding: WebSessionBinding
     current_url: str
     status: WebSessionStatus
-    pending_challenge: WebCaptchaChallenge | None = None
+    pending_challenge: WebInteractiveChallenge | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.binding, WebSessionBinding):
             raise ValueError("binding must be a WebSessionBinding.")
         object.__setattr__(self, "current_url", _validated_match(self.current_url, _URL_RE, "current_url"))
         object.__setattr__(self, "status", _coerce_status(self.status))
-        if self.pending_challenge is not None and not isinstance(self.pending_challenge, WebCaptchaChallenge):
-            raise ValueError("pending_challenge must be a WebCaptchaChallenge.")
+        if self.pending_challenge is not None and not isinstance(self.pending_challenge, WebInteractiveChallenge):
+            raise ValueError("pending_challenge must be a WebInteractiveChallenge.")
         if _origin_for_url(self.current_url) != self.binding.origin:
             raise ValueError("current URL origin differs from binding.")
         if (self.status is WebSessionStatus.WAITING_FOR_OPERATOR) != (self.pending_challenge is not None):
@@ -123,16 +136,17 @@ class WebSessionState:
         ):
             raise ValueError("pending challenge differs from exact session.")
 
-    def to_dict(self) -> dict[str, object]:
+    def to_private_dict(self) -> dict[str, object]:
         return {
             "schema": WEB_SESSION_SCHEMA,
-            "binding": self.binding.to_dict(),
+            "binding": self.binding.to_private_dict(),
             "current_url": self.current_url,
             "status": self.status.value,
             "pending_challenge": None
             if self.pending_challenge is None
             else {
                 "challenge_id": self.pending_challenge.challenge_id,
+                "reason": self.pending_challenge.reason.value,
                 "page_url": self.pending_challenge.page_url,
                 "reason_code": self.pending_challenge.reason_code,
                 "resume_token": self.pending_challenge.resume_token(),
@@ -164,25 +178,28 @@ class SyntheticWebSessionAdapter:
         self._sessions[session_id] = state
         return state
 
-    def require_captcha(
-        self, *, session_id: str, challenge_id: str,
+    def require_captcha(self, **kwargs) -> OperatorAttentionRequest:
+        return self.require_challenge(reason=AttentionReason.CAPTCHA, **kwargs)
+
+    def require_challenge(
+        self, *, session_id: str, challenge_id: str, reason: AttentionReason,
         created_at: str = "2026-10-03T00:00:00Z", expires_at: str | None = None,
+        delivery_channels=tuple(AttentionChannel),
     ) -> OperatorAttentionRequest:
         state = self._existing(session_id)
-        challenge = WebCaptchaChallenge(challenge_id=challenge_id, binding=state.binding, page_url=state.current_url)
-        if state.status is WebSessionStatus.CLOSED:
-            raise ValueError("WEB_SESSION_CLOSED")
+        challenge = WebInteractiveChallenge(challenge_id=challenge_id, binding=state.binding,
+                                            page_url=state.current_url, reason=reason)
+        if state.status not in {WebSessionStatus.OPEN, WebSessionStatus.WAITING_FOR_OPERATOR}:
+            raise ValueError("WEB_SESSION_NOT_OPEN")
         if state.pending_challenge is not None and state.pending_challenge != challenge:
             raise ValueError("WEB_SESSION_ALREADY_WAITING")
-        request = challenge.to_attention_request(created_at=created_at, expires_at=expires_at)
-        self.attention.submit(request)
-        self._attention_bindings[request.attention_id] = state.binding
-        self._sessions[session_id] = replace(
-            state,
-            status=WebSessionStatus.WAITING_FOR_OPERATOR,
-            pending_challenge=challenge,
-        )
-        return request
+        request = challenge.to_attention_request(created_at=created_at, expires_at=expires_at,
+                                                 delivery_channels=delivery_channels)
+        canonical = self.attention.submit(request)
+        self._attention_bindings[canonical.attention_id] = state.binding
+        self._sessions[session_id] = replace(state, status=WebSessionStatus.WAITING_FOR_OPERATOR,
+                                              pending_challenge=challenge)
+        return canonical
 
     def resume_after_attention(self, *, binding: WebSessionBinding, resolution: OperatorAttentionResolution) -> WebSessionState:
         state = self._existing(binding.session_id)
@@ -190,13 +207,15 @@ class SyntheticWebSessionAdapter:
             raise ValueError("RESUME_REJECTED_SESSION_BINDING_MISMATCH")
         if state.status is not WebSessionStatus.WAITING_FOR_OPERATOR or state.pending_challenge is None:
             raise ValueError("RESUME_REJECTED_NO_PENDING_CHALLENGE")
-        if resolution.attention_id != f"attn:{state.pending_challenge.challenge_id.removeprefix('captcha:')}":
+        if resolution.attention_id != state.pending_challenge.attention_id:
             raise ValueError("RESUME_REJECTED_ATTENTION_MISMATCH")
         if resolution.resume_token != state.pending_challenge.resume_token():
             raise ValueError("RESUME_REJECTED_TOKEN_MISMATCH")
-        if resolution.status.value != "resolved":
+        if resolution.status.value != "completed":
             raise ValueError("RESUME_REJECTED_UNRESOLVED_ATTENTION")
-        self.attention.resolve(resolution)
+        receipt = self.attention.resolve(resolution)
+        if receipt["status"] != AttentionStatus.COMPLETED.value:
+            raise ValueError("RESUME_REJECTED_UNRESOLVED_ATTENTION")
         resumed = replace(state, status=WebSessionStatus.RESUMED, pending_challenge=None)
         self._sessions[binding.session_id] = resumed
         return resumed
@@ -245,10 +264,4 @@ def _validated_match(value: object, pattern: re.Pattern[str], field_name: str) -
 def _validated_positive_int(value: object, field_name: str) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or value < 1:
         raise ValueError(f"{field_name} must be a positive integer.")
-    return value
-
-
-def _validated_reason_code(value: object) -> str:
-    if not isinstance(value, str) or re.fullmatch(r"^[A-Z0-9_]{3,80}$", value) is None:
-        raise ValueError("reason_code is malformed.")
     return value
