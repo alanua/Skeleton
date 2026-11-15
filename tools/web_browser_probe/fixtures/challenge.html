@@ -1,0 +1,17 @@
+<!doctype html><html lang="en"><meta charset="utf-8"><title>Synthetic lab</title>
+<h1>Disposable synthetic challenge</h1><p id="rendered">waiting</p>
+<label>Draft <input id="draft"></label><button id="save">Save marker</button>
+<section data-reason="manual_review"><label>Synthetic manual challenge
+<input id="answer"></label><button id="resume">Continue once</button></section>
+<output id="counter">0</output>
+<script>
+setTimeout(() => document.querySelector('#rendered').textContent='JS_READY', 150);
+document.querySelector('#save').onclick=()=>{
+ localStorage.setItem('marker','synthetic-only'); document.cookie='marker=synthetic-only; SameSite=Strict; path=/';
+};
+let continued=false;
+document.querySelector('#resume').onclick=()=>{
+ if(continued || document.querySelector('#answer').value!=='synthetic-approved') return;
+ continued=true; document.querySelector('#counter').textContent='1';
+};
+</script></html>

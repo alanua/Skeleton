@@ -1,0 +1,9 @@
+ARG CLIENT_DIGEST
+FROM mcr.microsoft.com/playwright/python@${CLIENT_DIGEST}
+WORKDIR /lab
+COPY requirements.lock .
+RUN python -m pip install --no-cache-dir -r requirements.lock
+COPY probe.py fixture_server.py ./
+COPY fixtures ./fixtures
+USER pwuser
+CMD ["python", "probe.py", "client"]
