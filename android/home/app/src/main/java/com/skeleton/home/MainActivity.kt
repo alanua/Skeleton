@@ -96,6 +96,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
 import androidx.core.content.ContextCompat
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -530,44 +531,17 @@ private suspend fun fetchHomeUpdate(api:HomeApi):HomeUpdateInfo? {
     if(api.server==null)return null
     return runCatching{parseHomeUpdate(api.get("/api/native/app-update"))}.getOrNull()?.takeIf{it.versionCode>0&&it.versionName.isNotBlank()&&it.sha256.length==64&&it.apkPath.isNotBlank()}
 }
-private suspend fun downloadHomeUpdate(context:Context,api:HomeApi,info:HomeUpdateInfo,onProgress:suspend(Int)->Unit):Uri=withContext(Dispatchers.IO){
+private suspend fun downloadHomeUpdate(context:Context,api:HomeApi,info:HomeUpdateInfo,onProgress:suspend(Int)->Unit):Uri{
     val base=api.server?:throw IllegalStateException("Home Edge недоступний")
     val url=if(info.apkPath.startsWith("http://")||info.apkPath.startsWith("https://"))info.apkPath else base+info.apkPath
-    val dm=context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
-    val request=DownloadManager.Request(Uri.parse(url))
-        .setTitle("Home ${info.versionName}")
-        .setDescription("Оновлення Skeleton Home")
-        .setMimeType("application/vnd.android.package-archive")
-        .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-    val id=dm.enqueue(request)
-    var result:Uri?=null
-    while(result==null){
-        val q=DownloadManager.Query().setFilterById(id)
-        dm.query(q).use{c->
-            if(!c.moveToFirst())throw IllegalStateException("Android не знайшов завантаження")
-            val status=c.getInt(c.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS))
-            val total=c.getLong(c.getColumnIndexOrThrow(DownloadManager.COLUMN_TOTAL_SIZE_BYTES))
-            val done=c.getLong(c.getColumnIndexOrThrow(DownloadManager.COLUMN_BYTES_DOWNLOADED_SO_FAR))
-            if(total>0&&done>=0){val pct=((done*100L)/total).coerceIn(0,100);withContext(Dispatchers.Main){onProgress(pct.toInt())}}
-            when(status){
-                DownloadManager.STATUS_SUCCESSFUL->{
-                    val uri=dm.getUriForDownloadedFile(id)?:throw IllegalStateException("Android не повернув APK")
-                    val digest=MessageDigest.getInstance("SHA-256")
-                    context.contentResolver.openInputStream(uri)?.use{input->val buf=ByteArray(64*1024);while(true){val n=input.read(buf);if(n<=0)break;digest.update(buf,0,n)}}?:throw IllegalStateException("Не вдалося прочитати APK")
-                    val actual=digest.digest().joinToString(""){"%02x".format(it.toInt() and 0xff)}
-                    if(actual!=info.sha256)throw IllegalStateException("SHA-256 оновлення не збігається")
-                    result=uri
-                }
-                DownloadManager.STATUS_FAILED->{
-                    val reason=c.getInt(c.getColumnIndexOrThrow(DownloadManager.COLUMN_REASON))
-                    throw IllegalStateException("Завантаження не вдалося ($reason)")
-                }
-                else->Unit
-            }
-        }
-        if(result==null)delay(350)
-    }
-    result!!
+    val apk=downloadVerifiedHomeUpdate(
+        url=url,
+        outputDir=File(context.cacheDir,"app-updates"),
+        expectedSha256=info.sha256,
+        expectedBytes=info.bytes,
+        onProgress={pct->withContext(Dispatchers.Main){onProgress(pct)}}
+    )
+    return FileProvider.getUriForFile(context,context.packageName+".files",apk)
 }
 
 private fun mdi(name: String): Int = when(name) {
@@ -1097,14 +1071,18 @@ private fun HomeComposeApp(sharedUrl:String?, consumeShare:()->Unit) {
                 onStart={
                     if(!updateBusy) scope.launch {
                         updateBusy=true;updateProgress=0
-                        runCatching{downloadHomeUpdate(context,api,pendingUpdate){pct->updateProgress=pct}}.onSuccess{uri->
-                            updateProgress=100
+                        try{
+                            val uri=downloadHomeUpdate(context,api,pendingUpdate){pct->updateProgress=pct}
                             val activity=context as? MainActivity ?: throw IllegalStateException("Home Activity недоступна для системного оновлення")
                             activity.requestPackageUpdateInstall(uri)
                             updateInfo=null
-                        }.onFailure{e->
-                            updateBusy=false;updateProgress=0
-                            Toast.makeText(context,e.message?:"Оновлення не вдалося",Toast.LENGTH_LONG).show()
+                        }catch(e:CancellationException){
+                            throw e
+                        }catch(e:Exception){
+                            updateProgress=0
+                            Toast.makeText(context,e.message?:"Оновлення не вдалося. Спробуйте ще раз",Toast.LENGTH_LONG).show()
+                        }finally{
+                            updateBusy=false
                         }
                     }
                 }

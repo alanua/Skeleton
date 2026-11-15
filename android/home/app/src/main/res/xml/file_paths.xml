@@ -2,4 +2,5 @@
 <paths xmlns:android="http://schemas.android.com/apk/res/android">
     <cache-path name="shared_pdfs" path="shared-pdfs/" />
     <cache-path name="camera_scan" path="camera-scan/" />
+    <cache-path name="app_updates" path="app-updates/" />
 </paths>
