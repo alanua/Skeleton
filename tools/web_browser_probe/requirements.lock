@@ -1,0 +1,5 @@
+# Exact versions; wheel hash/provenance verification remains blocked by DNS.
+playwright==1.56.0
+pyee==13.0.0
+greenlet==3.4.0
+typing-extensions==4.15.0
