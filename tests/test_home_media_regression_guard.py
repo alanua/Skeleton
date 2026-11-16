@@ -42,6 +42,27 @@ class GuardTests(unittest.TestCase):
     def cast(self):
         return next(f for f in self.doc["features"] if f["id"] == "incoming_youtube_cast")
 
+
+    def test_all_accumulated_regression_contracts_are_mandatory(self):
+        cases=['youtube_current_metadata','games_controls','foreground_handoff','hls_recovery',
+               'boot_state_recovery','responsive_remote_geometry','provider_release_monitor',
+               'display_cadence','hyperhdr_stability','provider_source_identity']
+        for feature_id in cases:
+            with self.subTest(feature=feature_id):
+                doc=manifest()
+                doc['baseline_features']=[s for s in doc['baseline_features'] if s['id']!=feature_id]
+                self.assertIn('required_baseline_feature_missing:'+feature_id,evaluate(doc,now=NOW)['blockers'])
+
+    def test_atomic_writer_unit_tests_are_not_a_boot_acceptance_pass(self):
+        f=next(f for f in self.doc['features'] if f['id']=='boot_state_recovery')
+        f['evidence'][0]['kind']='unit'
+        self.assertIn('insufficient_evidence:boot_state_recovery',self.review()['blockers'])
+
+    def test_title_source_checks_are_not_real_current_metadata_acceptance(self):
+        f=next(f for f in self.doc['features'] if f['id']=='youtube_current_metadata')
+        f['evidence'][0]['kind']='unit'
+        self.assertIn('insufficient_evidence:youtube_current_metadata',self.review()['blockers'])
+
     def test_complete_evidence_grants_no_authority_or_input_mutation(self):
         before = copy.deepcopy(self.doc)
         result = self.review()

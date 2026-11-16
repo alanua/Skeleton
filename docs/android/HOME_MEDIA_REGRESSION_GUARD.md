@@ -84,3 +84,11 @@ Validation uses only synthetic manifests and CLI inputs in temporary test
 directories. Real DE-PC inventory, binary release comparison, receiver-event
 repair, Android UI tests and device acceptance remain separate work. The guard
 is not integrated into a release pipeline by this source-only patch.
+
+## Complete Home stabilization scope (2026-11-16)
+
+The mandatory floor now also covers every applicable R01-R28/U01 behavior from Skeleton#4928: Games controls, real foreground handoff, software remote latency, current YouTube metadata, poster geometry/continuity, deletion identity, history opening/overlay isolation, job ordering, source selection, provider monitoring, HLS recovery, boot state recovery, real decoded-frame health, display cadence, HyperHDR, responsive geometry, real download/install, cross-device isolation, native lifecycle, provider identity and Ukrainian language. These checks cannot disappear or be lowered to unit evidence by editing an input manifest. Boot/metadata unit tests alone cannot establish actual boot/current-playback acceptance.
+
+For a coordinated Home release, source_sha256 must be a documented digest of the complete reviewed Android and relevant backend source snapshot. A MainActivity-only digest or APK identity alone cannot bind backend behavior. Changing any included backend component invalidates prior feature evidence for the coordinated snapshot. Keep the exact file/digest list private, retain its report hash, and never publish compiled private configuration or APK analysis contents.
+
+Actual DE-PC tool smoke on2026-11-16 through the pinned Home Edge SSH route confirmed Git2.43.0,diffoscope336,Androguard4.1.4,JADX1.5.6.24 retained APKs cover15 declared versions1.4.44–1.4.58. Their identities and hashes were read from artifacts, not filenames; signed samples report the same certificate. This is not itself cryptographic signature verification or behavior acceptance. JADX emitted class output but exited3 for Compose decompilation errors on both baseline/candidate; treat that output as partial auxiliary analysis, never as replacement source. Private exact-source Git comparison remains authoritative. No media control or APK installation was performed by this comparison.
