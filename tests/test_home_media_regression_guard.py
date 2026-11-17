@@ -10,7 +10,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from core.home_media_regression_guard import FEATURE_MINIMUM, SCHEMA, evaluate
+from core.home_media_regression_guard import FEATURE_MINIMUM, SCHEMA, evaluate, evaluate_bound_candidate
 
 NOW = datetime(2026, 11, 12, 12, tzinfo=timezone.utc)
 
@@ -62,6 +62,45 @@ class GuardTests(unittest.TestCase):
         f=next(f for f in self.doc['features'] if f['id']=='youtube_current_metadata')
         f['evidence'][0]['kind']='unit'
         self.assertIn('insufficient_evidence:youtube_current_metadata',self.review()['blockers'])
+
+
+    def test_current_artifact_bindings_are_required(self):
+        report=evaluate_bound_candidate(self.doc, observed_baseline=copy.deepcopy(self.doc["baseline"]),
+                                        observed_candidate=copy.deepcopy(self.doc["candidate"]),now=NOW)
+        self.assertEqual(report["status"],"READY_FOR_RELEASE")
+        self.assertEqual(report["authorization"],"none")
+
+    def test_actual_backend_or_apk_drift_blocks_a_self_consistent_old_manifest(self):
+        for key in ["source_sha256","sha256","signer_sha256"]:
+            with self.subTest(field=key):
+                observed=copy.deepcopy(self.doc["candidate"]);observed[key]="0"*64
+                report=evaluate_bound_candidate(self.doc,observed_baseline=self.doc["baseline"],
+                                                observed_candidate=observed,now=NOW)
+                self.assertIn("observed_candidate_"+key+"_mismatch",report["blockers"])
+
+    def test_wrong_observed_baseline_is_not_accepted(self):
+        observed=copy.deepcopy(self.doc["baseline"]);observed["sha256"]="0"*64
+        result=evaluate_bound_candidate(self.doc,observed_baseline=observed,
+                                        observed_candidate=self.doc["candidate"],now=NOW)
+        self.assertIn("observed_baseline_sha256_mismatch",result["blockers"])
+
+    def test_unknown_observed_provenance_cannot_be_ready(self):
+        observed=copy.deepcopy(self.doc["candidate"]);observed["source_sha256"]=None
+        result=evaluate_bound_candidate(self.doc,observed_baseline=self.doc["baseline"],
+                                        observed_candidate=observed,now=NOW)
+        self.assertIn("observed_candidate_source_sha256_unknown",result["blockers"])
+
+    def test_invalid_observed_input_is_sanitized(self):
+        result=evaluate_bound_candidate(self.doc,observed_baseline={"PRIVATE_SENTINEL":"value"},
+                                        observed_candidate=self.doc["candidate"],now=NOW)
+        self.assertEqual(result["status"],"INVALID_INPUT")
+        self.assertNotIn("PRIVATE_SENTINEL",json.dumps(result))
+
+    def test_new_version_claim_must_match_actual_artifact(self):
+        observed=copy.deepcopy(self.doc["candidate"]);observed["version_code"]+=1
+        result=evaluate_bound_candidate(self.doc,observed_baseline=self.doc["baseline"],
+                                        observed_candidate=observed,now=NOW)
+        self.assertIn("observed_candidate_version_code_mismatch",result["blockers"])
 
     def test_complete_evidence_grants_no_authority_or_input_mutation(self):
         before = copy.deepcopy(self.doc)

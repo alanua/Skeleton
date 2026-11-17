@@ -210,6 +210,29 @@ def evaluate(doc: Any, *, now: datetime | None = None) -> dict[str, Any]:
             "blockers": sorted(set(blockers)), "warnings": sorted(set(warnings))}
 
 
+def evaluate_bound_candidate(doc: Any, *, observed_baseline: Any, observed_candidate: Any, now: datetime | None = None) -> dict[str, Any]:
+    """Require supplied evidence to match independently collected artifact identities."""
+    report = evaluate(doc, now=now)
+    if report["status"] == "INVALID_INPUT":
+        return report
+    try:
+        actual = {"baseline": _artifact(observed_baseline), "candidate": _artifact(observed_candidate)}
+    except (InvalidManifest, TypeError):
+        return {"schema": SCHEMA, "status": "INVALID_INPUT", "authorization": "none",
+                "blockers": ["observed_artifact_invalid"], "warnings": []}
+    blockers = list(report["blockers"])
+    for label, artifact in actual.items():
+        for key in ("version_name", "version_code", "source_sha256", "sha256", "signer_sha256",
+                    "application_id", "build_scope"):
+            if artifact[key] is None:
+                blockers.append(f"observed_{label}_{key}_unknown")
+            elif artifact[key] != doc[label][key]:
+                blockers.append(f"observed_{label}_{key}_mismatch")
+        if artifact["source_commit"] is not None and artifact["source_commit"] != doc[label]["source_commit"]:
+            blockers.append(f"observed_{label}_source_commit_mismatch")
+    report.update(status="BLOCKED" if blockers else "READY_FOR_RELEASE", blockers=sorted(set(blockers)))
+    return report
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("manifest", type=Path)
