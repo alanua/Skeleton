@@ -2,15 +2,58 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "skeleton.family_document_receipt.schema.json",
   "type": "object",
-  "required": ["schema", "receipt_key", "receipt_type", "record_id"],
-  "additionalProperties": true,
+  "required": ["schema", "receipt_key", "receipt_type", "status"],
+  "additionalProperties": false,
   "properties": {
     "schema": {"const": "skeleton.family_document_receipt.v1"},
-    "receipt_key": {"type": "string"},
-    "receipt_type": {"enum": ["intake", "terminal"]},
-    "intake_id": {"type": "string"},
-    "record_id": {"type": "string"},
-    "record_hash": {"type": "string"},
-    "status": {"type": "string"}
+    "receipt_key": {"type": "string", "minLength": 1, "maxLength": 240},
+    "receipt_type": {"enum": ["intake", "terminal", "package_part", "technical_failure"]},
+    "intake_id": {"type": "string", "maxLength": 120},
+    "record_id": {"type": "string", "maxLength": 120},
+    "status": {"type": "string", "enum": ["DONE", "REVIEW", "PENDING", "RETRY"]},
+    "reason_code": {"enum": ["INTAKE_FAILED", "INFERENCE_UNAVAILABLE"]},
+    "document_count": {"type": "integer", "minimum": 0},
+    "page_count": {"type": "integer", "minimum": 0},
+    "package_key": {"type": "string", "maxLength": 80},
+    "part_index": {"type": "integer", "minimum": 1},
+    "part_count": {"type": "integer", "minimum": 1},
+    "message": {"type": "string", "minLength": 1, "maxLength": 4096},
+    "scan_provenance": {
+      "type": "array",
+      "maxItems": 500,
+      "items": {"$ref": "#/$defs/scan_provenance"}
+    }
+  },
+  "$defs": {
+    "scan_provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["session_id", "scanner_id", "profile_id", "pages"],
+      "properties": {
+        "session_id": {"$ref": "#/$defs/safe_token"},
+        "scanner_id": {"$ref": "#/$defs/safe_token"},
+        "profile_id": {"$ref": "#/$defs/safe_token"},
+        "pages": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 500,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["pass_id", "sheet", "side", "page"],
+            "properties": {
+              "pass_id": {"$ref": "#/$defs/safe_token"},
+              "sheet": {"type": "integer", "minimum": 1, "maximum": 500},
+              "side": {"enum": ["front", "back"]},
+              "page": {"type": "integer", "minimum": 1, "maximum": 500}
+            }
+          }
+        }
+      }
+    },
+    "safe_token": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$"
+    }
   }
 }

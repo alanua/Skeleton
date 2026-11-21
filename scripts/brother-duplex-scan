@@ -1,0 +1,4 @@
+set -euo pipefail
+# Submit explicit producer events only. This command does not access hardware.
+cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
+exec python3 -m scripts.brother_scan_session_assembler "$@"

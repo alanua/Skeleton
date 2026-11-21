@@ -66,3 +66,10 @@ def test_report_parts_respect_telegram_limit() -> None:
     messages = render_package_report(records)
     assert len(messages) > 1
     assert all(len(message) <= MAX_TELEGRAM_MESSAGE for message in messages)
+
+
+def test_empty_and_missing_semantics_never_render_success():
+    import pytest
+    for records in ([], [{}], [{"classification": {}}], [{"classification": {"summary": "  "}}]):
+        with pytest.raises(ValueError):
+            render_package_report(records)

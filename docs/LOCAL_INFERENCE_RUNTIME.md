@@ -35,7 +35,16 @@ Packet contract:
     "languages": ["de"],
     "source_kind": "mfp",
     "page_count": 2,
-    "mime_type": "application/pdf"
+    "mime_type": "application/pdf",
+    "scan_provenance": {
+      "session_id": "session-1",
+      "scanner_id": "scanner-1",
+      "profile_id": "profile-1",
+      "pages": [
+        {"pass_id": "pass-front", "sheet": 1, "side": "front", "page": 1},
+        {"pass_id": "pass-back", "sheet": 1, "side": "back", "page": 2}
+      ]
+    }
   }
 }
 ```
@@ -81,3 +90,17 @@ No private paths, OCR, document names, aliases, identifiers or result values are
 ## Future consumers
 
 A new consumer registers an `AdapterSpec` with a request type, prompt builder and strict output validator. The queue, retries, Ollama client, service and security boundary remain unchanged.
+
+
+MFP handoffs may include `payload.scan_provenance`: safe `session_id`, `scanner_id`,
+`profile_id` tokens and up to 500 page entries containing `pass_id`, one-based `sheet`,
+`side` (`front`/`back`), and one-based `page`. Tokens are restricted to ASCII letters,
+digits, underscores and hyphens. Coverage must exactly match `page_count`; duplicate
+pass/sheet/side entries are rejected. Unknown fields, paths, and OCR text cannot be
+embedded in provenance. Validation establishes structural consistency; upstream
+scanner verification remains responsible for the accuracy of supplied metadata.
+
+Validated provenance survives alias binding and inference queue submission. The durable
+handoff receipt retains only this safe provenance, aggregate page count, request ID,
+and status. Private OCR remains in the private request packet, never the receipt.
+Invalid packets receive the fixed `HANDOFF_INVALID` reason without exception text.
