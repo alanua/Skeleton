@@ -41,6 +41,7 @@ android {
         buildConfigField("String", "HOME_EDGE_BASE_URLS", "\"$escapedHomeEdgeBaseUrls\"")
         buildConfigField("String", "HOME_EDGE_SECRET_BASE_URL", "\"$escapedHomeEdgeSecretBaseUrl\"")
     }
+    testOptions { unitTests.isIncludeAndroidResources = true }
     buildFeatures { compose = true; buildConfig = true }
     composeOptions { kotlinCompilerExtensionVersion = "1.5.14" }
     kotlinOptions { jvmTarget = "17" }
@@ -60,5 +61,6 @@ dependencies {
     implementation("androidx.health.connect:connect-client:1.1.0-alpha08")
     debugImplementation("androidx.compose.ui:ui-tooling")
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.robolectric:robolectric:4.13")
     testImplementation("org.json:json:20240303")
 }
