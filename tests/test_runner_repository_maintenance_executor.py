@@ -1579,3 +1579,11 @@ def test_lavalamp_verified_completion_does_not_reflash(
     assert action.executions == 0
     assert action.postflights == 1
     assert not any(call[0] == [sys.executable, "-m", "platformio", "run", "-e", LAVALAMP_PLATFORMIO_ENV] for call in fake.calls)
+
+
+def test_media_signer_preflight_is_not_registered_write_action():
+    from core.runner_media_snapshot_signer_install import ACTION_ID
+
+    assert callable(maintenance.preflight_media_snapshot_signer_reconcile)
+    with pytest.raises(RegisteredMaintenanceActionError):
+        registered_maintenance_task_id(ACTION_ID)
