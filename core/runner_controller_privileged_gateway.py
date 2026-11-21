@@ -46,6 +46,12 @@ except ModuleNotFoundError:
     )
 
 
+# No installer authority: the reviewed media revision is pending approval.
+MEDIA_SNAPSHOT_SIGNER_ACTION_ID: Final = "home_edge_media_snapshot_signer_reconcile_v1"
+MEDIA_SNAPSHOT_SIGNER_OPERATOR_APPROVAL: Final = (
+    "alanua/Skeleton#4922:home_edge_media_snapshot_signer_reconcile_v1"
+)
+
 REQUEST_SCHEMA_ID: Final = "skeleton.runner_controller_privileged_request.v1"
 RECEIPT_SCHEMA_ID: Final = "skeleton.runner_controller_privileged_receipt.v1"
 REPOSITORY: Final = "alanua/Skeleton"
@@ -235,6 +241,13 @@ def _embedded_action_registry() -> Mapping[str, object]:
                 "repository": REPOSITORY,
                 "target": TARGET,
                 "operator_approval": RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_OPERATOR_APPROVAL,
+            },
+            {
+                "action_id": MEDIA_SNAPSHOT_SIGNER_ACTION_ID,
+                "handler": "home_edge_media_snapshot_signer_reconcile",
+                "repository": REPOSITORY,
+                "target": TARGET,
+                "operator_approval": MEDIA_SNAPSHOT_SIGNER_OPERATOR_APPROVAL,
             },
         ],
     }
@@ -500,11 +513,11 @@ def load_action_registry(path: Path = DEFAULT_ACTION_REGISTRY_PATH) -> dict[str,
         raise PrivilegedGatewayError("action_registry_action_set_mismatch")
     if (
         path == ROOT / "RUNNER_PRIVILEGED_ACTIONS.yaml"
-        and len(actions) == 3
+        and len(actions) in (3, 4)
     ):
         legacy_root_registry = True
-        actions = [*actions, _embedded_action_registry()["actions"][3]]
-    if len(actions) != 4:
+        actions = [*actions, *_embedded_action_registry()["actions"][len(actions):]]
+    if len(actions) != 5:
         raise PrivilegedGatewayError("action_registry_action_set_mismatch")
     parsed = [_action_from_mapping(action) for action in actions]
     if [action.action_id for action in parsed] != [
@@ -512,12 +525,15 @@ def load_action_registry(path: Path = DEFAULT_ACTION_REGISTRY_PATH) -> dict[str,
         RUNNER_CONTROLLER_REPAIR_CODEX_STATE_MOUNT_TASK_ID,
         SKELETON_CONTROL_MCP_HETZNER_ACTIVATE_TASK_ID,
         RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_TASK_ID,
+        MEDIA_SNAPSHOT_SIGNER_ACTION_ID,
     ]:
         raise PrivilegedGatewayError("action_registry_action_set_mismatch")
     _assert_initial_esp_signer_action(parsed[0])
     _assert_codex_state_mount_action(parsed[1])
     _assert_skeleton_control_mcp_hetzner_action(parsed[2])
     _assert_runner_controller_refresh_trust_anchor_bundle_action(parsed[3])
+    if parsed[4] != _action_from_mapping(_embedded_action_registry()["actions"][4]):
+        raise PrivilegedGatewayError("action_registry_drift")
     if legacy_root_registry and path != ROOT / "RUNNER_PRIVILEGED_ACTIONS.yaml":
         raise PrivilegedGatewayError("action_registry_action_set_mismatch")
     return {action.action_id: action for action in parsed}
@@ -529,6 +545,7 @@ def _action_from_mapping(raw: object) -> GatewayAction:
     if raw.get("action_id") in {
         RUNNER_CONTROLLER_REPAIR_CODEX_STATE_MOUNT_TASK_ID,
         RUNNER_CONTROLLER_REFRESH_TRUST_ANCHOR_BUNDLE_TASK_ID,
+        MEDIA_SNAPSHOT_SIGNER_ACTION_ID,
     }:
         required = {
             "action_id",
@@ -1027,10 +1044,24 @@ def execute_gateway_request(
         )
 
 
+def _execute_media_snapshot_signer_blocked() -> tuple[int, str]:
+    """Return a fixed block without reading sources or executing an installer."""
+    receipt = {
+        "status": "NEEDS_OPERATOR",
+        "reason": "MEDIA_INSTALLER_REVISION_PENDING_APPROVAL",
+        "protected_copy_verified": False,
+        "installed_artifacts_verified": False,
+        "activation_executed": False,
+    }
+    return 0, "RESULT: NEEDS_OPERATOR\nReceipt:\n" + json.dumps(receipt, sort_keys=True)
+
+
 def _run_registered_action(
     request: Mapping[str, object],
     action: GatewayAction,
 ) -> tuple[int, str]:
+    if action.action_id == MEDIA_SNAPSHOT_SIGNER_ACTION_ID:
+        return _execute_media_snapshot_signer_blocked()
     if action.action_id == RUNNER_CONTROLLER_REPAIR_CODEX_STATE_MOUNT_TASK_ID:
         return _execute_runner_controller_repair_codex_state_mount(request, action)
     if action.action_id == SKELETON_CONTROL_MCP_HETZNER_ACTIVATE_TASK_ID:
