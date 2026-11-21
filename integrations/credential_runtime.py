@@ -103,6 +103,20 @@ _GMAIL_PRIMARY = RegisteredMaterialCredential(
     bootstrap_required=True,
 )
 
+_BROTHER_WBM_ADMIN = RegisteredMaterialCredential(
+    service_id="brother-mfc-j4540dw",
+    alias="wbm-admin",
+    reference_credential_name="brother-mfc-j4540dw-password-secret-ref",
+    context=SecretResolutionContext(
+        machine_identity="home-edge-01",
+        audience="brother-mfc-j4540dw-wbm",
+        task_kind="bounded_maintenance_status",
+    ),
+    action_id="read-authenticated-status",
+    target_id="brother-mfc-j4540dw-wbm-status-consumer",
+    bootstrap_required=True,
+)
+
 _GMAIL_SECONDARY = RegisteredMaterialCredential(
     service_id="mail-gmail",
     alias="acct:gmail-secondary",
@@ -121,6 +135,7 @@ _REGISTERED_ENVIRONMENT_CREDENTIALS = {
     (_RUNNER_CODEX_OPENAI.service_id, _RUNNER_CODEX_OPENAI.alias): _RUNNER_CODEX_OPENAI,
 }
 _REGISTERED_MATERIAL_CREDENTIALS = {
+    (_BROTHER_WBM_ADMIN.service_id, _BROTHER_WBM_ADMIN.alias): _BROTHER_WBM_ADMIN,
     (_GMAIL_PRIMARY.service_id, _GMAIL_PRIMARY.alias): _GMAIL_PRIMARY,
     (_GMAIL_SECONDARY.service_id, _GMAIL_SECONDARY.alias): _GMAIL_SECONDARY,
 }
