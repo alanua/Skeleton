@@ -3618,6 +3618,98 @@ def test_cross_project_changed_worktree_publishes_before_cleanup(tmp_path: Path)
     notify.assert_called_once_with(13, "DONE", mock.ANY)
 
 
+@pytest.mark.parametrize("published", [True, False])
+def test_target_publication_issue_31_same_source_target_requires_verified_output(
+    tmp_path: Path, published: bool,
+) -> None:
+    issue_path = tmp_path / "lavalamp" / "issue-alanua-Lavalamp-31"
+    issue = {
+        "number": 31,
+        "title": "Lavalamp delivery",
+        "body": _lavalamp_codegen_issue_body(
+            "focused pytest PASS; exact SHA and checks",
+            extra_metadata=("Selected Project: lavalamp",),
+        ).replace(
+            "Make the target repository change and leave it for Runner publication.",
+            "Required durable output: Draft PR / existing PR. Source-only change.",
+        ),
+        "comments": [],
+    }
+    publish_reports: list[str] = []
+
+    def publish(body: str) -> str:
+        publish_reports.append(body)
+        assert "Target Project: lavalamp" in body
+        assert "Target Repository: alanua/Lavalamp" in body
+        assert "Source Repository: alanua/Lavalamp" in body
+        assert "Source Issue: 31" in body
+        assert "Base SHA: " + "a" * 40 in body
+        assert "Output Branch: runner/alanua-Lavalamp-issue-31" in body
+        assert "- README.md" in body
+        if not published:
+            return (
+                "BLOCKED: Target publication was not verified.\n"
+                "reason=post_push_pr_head_sha_mismatch\n"
+                "success_criteria=not_met"
+            )
+        return (
+            "DONE: Runner host maintenance task completed.\n"
+            "maintenance_task_id=publish_target_project_issue_worktree_pr\n"
+            "repository=alanua/Lavalamp\n"
+            "draft_pr_url=https://github.com/alanua/Lavalamp/pull/44\n"
+            "pushed_head_sha=" + "b" * 40 + "\n"
+            "step=post_push_read_pr_metadata status=done\n"
+            "success_criteria=met"
+        )
+
+    with mock.patch.object(runner, "set_issue_label") as labels, mock.patch.object(
+        runner, "verify_target_repository_checkout", return_value=None
+    ), mock.patch.object(
+        runner,
+        "prepare_target_repository_issue_worktree",
+        return_value=(0, "ready", issue_path),
+    ), mock.patch.object(
+        runner, "cleanup_runtime_artifacts"
+    ), mock.patch.object(
+        runner, "run_codex_task", return_value=(0, "RESULT: DONE\nChanged files:\n- README.md")
+    ), mock.patch.object(
+        runner, "changed_files", return_value=["README.md"]
+    ), mock.patch.object(
+        runner, "local_worktree_recovery_diff", return_value="Local worktree git diff: none"
+    ), mock.patch.object(
+        runner, "publish_target_project_issue_worktree_pr", side_effect=publish
+    ), mock.patch.object(
+        runner, "cleanup_target_repository_issue_worktree", return_value=(0, "")
+    ) as cleanup, mock.patch.object(
+        runner, "post_issue_comment"
+    ) as post, mock.patch.object(
+        runner, "notify_task_finished"
+    ) as notify, mock.patch.object(
+        runner, "record_runner_task_picked_up", return_value=None
+    ), mock.patch.object(
+        runner, "record_runner_executor_result", return_value=None
+    ), mock.patch.object(
+        runner, "maybe_replenish_runner_queue_after_completion", return_value=True
+    ):
+        runner.process_issue(issue, workdir=str(tmp_path), source_repository="alanua/Lavalamp")
+
+    report = post.call_args.args[1]
+    assert len(publish_reports) == 1
+    if published:
+        assert report.startswith(runner._LOCAL_WORKTREE_DONE_PREFIX)
+        assert "target_publication=done" in report
+        cleanup.assert_called_once_with("alanua/Lavalamp", 31, "alanua/Lavalamp")
+        labels.assert_any_call(31, runner.LABEL_RUNNING, runner.LABEL_DONE)
+        notify.assert_called_once_with(31, "DONE", mock.ANY)
+    else:
+        assert report.startswith("BLOCKED:")
+        assert "target_publication=not_done" in report
+        assert "post_push_pr_head_sha_mismatch" in report
+        cleanup.assert_not_called()
+        labels.assert_any_call(31, runner.LABEL_RUNNING, runner.LABEL_BLOCKED)
+        notify.assert_called_once_with(31, "BLOCKED", mock.ANY)
+
+
 def test_retained_dirty_wrong_base_recovery_cleanup_uses_path_after_publication(
     tmp_path: Path,
 ) -> None:
@@ -30823,3 +30915,20 @@ def test_head_repository_gh245_identity_fail_closed(repository, owner, expected)
         assert result == (None, 14, "a" * 40, "runner/issue-13")
     else:
         assert result == ("existing_pr_head_repository_mismatch", None, None, None)
+
+
+@pytest.mark.parametrize(
+    ("contract", "required"),
+    [
+        ("Draft PR: true", True),
+        ("Existing PR: 44", True),
+        ("", False),
+    ],
+)
+def test_codegen_requires_target_publication_explicit_contract(
+    contract: str, required: bool,
+) -> None:
+    body = _lavalamp_codegen_issue_body(
+        "focused pytest PASS", extra_metadata=(contract,)
+    )
+    assert runner._codegen_requires_target_publication(body) is required
