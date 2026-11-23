@@ -74,7 +74,7 @@ def _trusted_scope(scope: RequestScope) -> bool:
 
 def _same(left: object, right: str) -> bool:
     """Compare bounded operator/session claims without echoing either claim."""
-    if not isinstance(left, str) or len(left) > 160:
+    if not isinstance(left, str) or len(left) > 160 or not left.isascii():
         return False
     return hmac.compare_digest(left, right)
 
