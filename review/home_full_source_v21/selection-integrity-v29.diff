@@ -1,0 +1,66 @@
+--- app.py.before
++++ app.py.after
+@@ -8472,6 +8472,7 @@
+ 
+ 
+ _ENDPOINT_VIDEO_SELECTIONS = STATE / 'endpoint-video-selections.json'
++_ENDPOINT_VIDEO_SELECTION_LOCK = threading.RLock()
+ 
+ 
+ def _endpoint_video_selections_read() -> dict:
+@@ -8513,29 +8514,36 @@
+     if clean.get('source_id'):
+         _,source=_media_job_source(clean.get('job_id'),clean['source_id'])
+         if _home_full_source_blocked(source):raise ValueError('Трейлер не є повним твором.')
++        for field in ('season','episode'):
++            if str(clean.get(field) or '') and str(clean[field])!=str(source.get(field) or ''):
++                raise ValueError('Обраний потік не відповідає сезону або серії.')
++        if str(clean.get('voice') or '') and str(clean['voice']) not in {str(source.get('group') or ''),str(source.get('translation') or '')}:
++            raise ValueError('Обраний потік не відповідає озвученню.')
+     endpoint_id = _media_target_endpoint_id(alias)
+-    root = _endpoint_video_selections_read()
+-    root[endpoint_id] = clean
+-    _atomic(_ENDPOINT_VIDEO_SELECTIONS, root)
+-    try:
+-        os.chmod(_ENDPOINT_VIDEO_SELECTIONS, 0o600)
+-    except OSError:
+-        pass
+-    # Legacy Home Edge internals still use the historical TV selection file.
+-    # Keep only the TV endpoint mirrored there; Samsung must never overwrite it.
+-    if alias == 'tv':
+-        _video_selection_write(clean)
+-    return {'endpoint_id': endpoint_id, **clean}
++    with _ENDPOINT_VIDEO_SELECTION_LOCK:
++        root = _endpoint_video_selections_read()
++        root[endpoint_id] = clean
++        _atomic(_ENDPOINT_VIDEO_SELECTIONS, root)
++        try:
++            os.chmod(_ENDPOINT_VIDEO_SELECTIONS, 0o600)
++        except OSError:
++            pass
++        # Legacy Home Edge internals still use the historical TV selection file.
++        # Keep only the TV endpoint mirrored there; Samsung must never overwrite it.
++        if alias == 'tv':
++            _video_selection_write(clean)
++        return {'endpoint_id': endpoint_id, **clean}
+ 
+ 
+ def _endpoint_video_selection_delete(alias: str) -> dict:
+     endpoint_id = _media_target_endpoint_id(alias)
+-    root = _endpoint_video_selections_read()
+-    root.pop(endpoint_id, None)
+-    _atomic(_ENDPOINT_VIDEO_SELECTIONS, root)
+-    if alias == 'tv':
+-        VIDEO_SELECTION.unlink(missing_ok=True)
+-    return {'status':'ok','endpoint_id':endpoint_id}
++    with _ENDPOINT_VIDEO_SELECTION_LOCK:
++        root = _endpoint_video_selections_read()
++        root.pop(endpoint_id, None)
++        _atomic(_ENDPOINT_VIDEO_SELECTIONS, root)
++        if alias == 'tv':
++            VIDEO_SELECTION.unlink(missing_ok=True)
++        return {'status':'ok','endpoint_id':endpoint_id}
+ 
+ 
+ def _home_full_source_blocked(source: dict) -> bool:
+
