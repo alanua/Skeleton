@@ -1,0 +1,33 @@
+--- history_preference.before
++++ history_preference.after
+@@ -41,11 +41,11 @@
+         if episode:
+             candidates = [(job, source) for job, source in candidates if _history_source_episode(job, source) == episode]
+         if voice:
+-            voice_matches = [(job, source) for job, source in candidates if str(source.get('group') or source.get('translation') or '') == voice]
+-            if voice_matches:
+-                candidates = voice_matches
++            candidates = [(job, source) for job, source in candidates if voice in {str(source.get('group') or ''),str(source.get('translation') or '')}]
+         if not candidates:
+             return None
++        if not voice and not source_id:
++            candidates=sorted(candidates,key=lambda row:-_home_implicit_audio_rank(row[1]))
+         selected_source = candidates[0][1]
+         return {
+             'season': season or _history_source_season(candidates[0][0], selected_source),
+@@ -103,11 +103,13 @@
+     default_candidates = [(job, source) for job, source in source_rows if not default_season or _history_source_season(job, source) == default_season]
+     regular_candidates = [(job, source) for job, source in default_candidates if (_autoplay_pair({'season': _history_source_season(job, source), 'episode': _history_source_episode(job, source)}) or (0, 0))[1] > 0]
+     if regular_candidates:
+-        default_candidates = sorted(regular_candidates, key=lambda row: (_autoplay_pair({'season': _history_source_season(row[0], row[1]), 'episode': _history_source_episode(row[0], row[1])}) or (9999, 9999), -int(row[1].get('height') or 0)))
++        default_candidates = sorted(regular_candidates, key=lambda row: (_autoplay_pair({'season': _history_source_season(row[0], row[1]), 'episode': _history_source_episode(row[0], row[1])}) or (9999, 9999), -_home_implicit_audio_rank(row[1]), -int(row[1].get('height') or 0)))
++    else:
++        default_candidates=sorted(default_candidates,key=lambda row:(-_home_implicit_audio_rank(row[1]),-int(row[1].get('height') or 0)))
+     default_source = default_candidates[0][1] if default_candidates else {}
+     return {
+         'season': default_season,
+         'episode': _history_source_episode(default_candidates[0][0], default_source) if default_candidates else '',
+-        'voice': str(default_source.get('group') or default_source.get('translation') or ''),
++        'voice': str(default_source.get('translation') or default_source.get('group') or ''),
+         'source_id': str(default_source.get('source_id') or ''),
+     }
