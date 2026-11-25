@@ -1,0 +1,19 @@
+--- player.py.before
++++ player.py.after
+@@ -1039,6 +1039,15 @@
+     if requested_audio is False:
+         requested['has_audio'] = False
+ 
++    # History and explicit VOD selection bind source_id, episode and voice.
++    # Do not substitute a different source behind the caller's acknowledgement.
++    # A failed sound check goes to the existing exact-source refresh path.
++    catalog = job.get('catalog') if isinstance(job.get('catalog'), dict) else {}
++    media_type = str(job.get('history_media_type') or catalog.get('media_type') or '').lower()
++    library_vod = bool(job.get('history_id') or media_type in {'movie','tv'})
++    if library_vod and _is_vod(job, requested) and requested.get('kind') != 'youtube':
++        raise RuntimeError('Не вдалося підтвердити звук обраного потоку. Потрібне оновлення цього джерела.')
++
+     candidates = [
+         item for item in job.get('sources', [])
+         if isinstance(item, dict)
+
