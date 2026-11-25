@@ -1,0 +1,67 @@
+--- app.py.before
++++ app.py.after
+@@ -5550,6 +5550,35 @@
+     return filtered
+ 
+ 
++def _history_partition_conflicting_groups(groups: dict) -> dict:
++    result = {}
++    for key, group in groups.items():
++        rows = group.get('jobs') or []
++        buckets = {}
++        for stamp, job in rows:
++            identity = _history_stable_identity(job)
++            buckets.setdefault(identity, []).append((stamp, job))
++        known = {identity for identity in buckets if identity}
++        if len(known) <= 1:
++            result[key] = group
++            continue
++        for identity, members in sorted(buckets.items()):
++            # Unknown identity is isolated, never assigned to a known work.
++            suffix = hashlib.sha256((identity or 'unresolved').encode()).hexdigest()[:16]
++            split_key = key + '|identity:' + suffix
++            if split_key in groups or split_key in result:
++                raise RuntimeError('HISTORY_IDENTITY_KEY_COLLISION')
++            result[split_key] = {
++                **group, 'key': split_key, 'jobs': members,
++                'legacy_collision_key': key, 'stable_identity': identity,
++                'years': {int((j.get('catalog') or {}).get('year') or 0)
++                          for _, j in members
++                          if str((j.get('catalog') or {}).get('year') or '').isdigit()
++                          and int((j.get('catalog') or {}).get('year') or 0)>0},
++            }
++    return result
++
++
+ def _video_history_groups() -> dict[str, dict]:
+     signature = _history_groups_signature()
+     with _HISTORY_GROUPS_CACHE_LOCK:
+@@ -5619,9 +5648,11 @@
+         if year:
+             group.setdefault('years', set()).add(year)
+         group['jobs'].append((path.stat().st_mtime, job))
++    groups = _history_partition_conflicting_groups(groups)
+     deleted = _history_deletions_read()
+     for key in list(groups):
+-        deleted_at = int(deleted.get(key) or 0)
++        legacy = groups[key].get('legacy_collision_key') or ''
++        deleted_at = max(int(deleted.get(key) or 0), int(deleted.get(legacy) or 0))
+         newest_user_at = max((float(item[1].get('user_requested_at') or 0) for item in groups[key].get('jobs') or []), default=0.0)
+         if deleted_at and newest_user_at <= deleted_at:
+             groups.pop(key, None)
+@@ -5956,7 +5987,13 @@
+     except Exception:
+         runtime_meta = {}
+     group_id = _history_group_id(group['key'])
+-    stored_preference = _history_preferences_read().get(group_id)
++    all_preferences = _history_preferences_read()
++    stored_preference = all_preferences.get(group_id)
++    legacy_key = str(group.get('legacy_collision_key') or '')
++    if not isinstance(stored_preference, dict) and legacy_key:
++        legacy_pref = all_preferences.get(_history_group_id(legacy_key))
++        if isinstance(legacy_pref, dict) and legacy_pref.get('hidden'):
++            stored_preference = {'hidden': True}
+     last_viewed_at = int(stored_preference.get('updated_at') or 0) if isinstance(stored_preference, dict) else 0
+     preferred = _history_preference(group)
+     preferred_season = str(preferred.get('season') or '')
+
