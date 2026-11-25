@@ -1,0 +1,71 @@
+--- app.py.before
++++ app.py.after
+@@ -8701,6 +8701,7 @@
+ def _media_endpoint_resume_payload(alias: str, data: dict) -> dict:
+     job_id = str(data.get('job_id') or '').strip()
+     history_id = str(data.get('history_id') or '').strip()
++    explicit_job_id = job_id
+ 
+     if not history_id and job_id:
+         try:
+@@ -8723,6 +8724,18 @@
+     if not history_id:
+         raise LookupError('Для цього твору ще немає збереженого перегляду.')
+ 
++    group = _history_group_by_id(history_id)
++    if group is None:
++        raise LookupError('Збережений твір більше не знайдено.')
++    owned_job_ids = {str(j.get('job_id') or '') for _, j in group.get('jobs') or []}
++    owned_job_ids.discard('')
++    if explicit_job_id and explicit_job_id not in owned_job_ids:
++        try:
++            requested = _load(explicit_job_id)
++            if _history_id_for_job(requested) != history_id:
++                raise LookupError('Ідентифікатори твору не збігаються.')
++        except Exception as exc:
++            raise LookupError('Ідентифікатори твору не збігаються.') from exc
+     endpoint_id = _media_target_endpoint_id(alias)
+     item = next(
+         (x for x in _media_history_payload(endpoint_id).get('items', [])
+@@ -8738,7 +8751,13 @@
+     wanted_episode = str(item.get('episode') or '')
+     wanted_voice = str(item.get('last_translation') or item.get('voice') or '').casefold()
+     def matches(job, source):
+-        if _home_full_source_blocked(source) or source.get('backend') == 'chrome-browser':
++        if (str(job.get('job_id') or '') not in owned_job_ids
++                or _home_full_source_blocked(source)
++                or source.get('backend') == 'chrome-browser'
++                or not source.get('source_id') or not str(source.get('url') or '').strip()
++                or source.get('drm') or source.get('has_drm')):
++            return False
++        if str(item.get('media_type') or '').lower() == 'tv' and not (wanted_season and wanted_episode):
+             return False
+         if wanted_season and _history_source_season(job, source) != wanted_season:
+             return False
+@@ -8760,9 +8779,6 @@
+         if not matches(job, source):
+             raise LookupError('Збережене джерело змінилося.')
+     except Exception:
+-        group = _history_group_by_id(history_id)
+-        if group is None:
+-            raise LookupError('Збережений твір більше не знайдено.')
+         # Resolve only a concrete stored source belonging to this same work.
+         # No new provider search and no substitution across saved identities.
+         candidates = [
+@@ -8772,9 +8788,14 @@
+         ]
+         if not candidates:
+             raise LookupError('Збережене джерело більше недоступне.')
++        def height(src):
++            try:
++                return int(src.get('height') or 0)
++            except (TypeError, ValueError, OverflowError):
++                return 0
+         job, source = max(candidates, key=lambda pair: (
+             _home_implicit_audio_rank(pair[1]) if not wanted_voice else 0,
+-            int(pair[1].get('height') or 0)))
++            height(pair[1])))
+ 
+     if not isinstance(job, dict) or not isinstance(source, dict):
+         raise LookupError('Збережене джерело більше недоступне.')
+
