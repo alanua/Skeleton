@@ -1,0 +1,32 @@
+--- MainActivity.kt.before
++++ MainActivity.kt.after
+@@ -627,7 +627,7 @@
+     fun matchesIntent(source:JSONObject):Boolean=
+         (season.isBlank()||source.cleanText("season")==season)&&
+             (episode.isBlank()||source.cleanText("episode")==episode)&&
+-            (voice.isBlank()||sourceVoice(source)==voice)
++            (voice.isBlank()||voice==source.cleanText("group")||voice==source.cleanText("translation"))
+     if(sourceId.isNotBlank())playable.firstOrNull{it.cleanText("source_id")==sourceId&&matchesIntent(it)}?.let{return it}
+     if(season.isBlank()&&episode.isBlank()&&voice.isBlank())return null
+     return playable.firstOrNull(::matchesIntent)
+@@ -1245,6 +1245,7 @@
+             api.discover()
+             if(api.server!=null){
+                 runCatching{parseHomeProfile(api.get("/api/native/profile"))}.onSuccess{latest->
++                    if(!latest.hasSk && profile?.hasSk!=false) tab=homeTabOnForeground(false,tab)
+                     profile=latest
+                     if(!latest.hasSk && tab>2) tab=0
+                     discovered=true
+@@ -1892,7 +1893,11 @@
+             var lastVideoId=""
+             var fastUntil=0L
+             while(true){
++                val observation=requestEpoch.snapshot()
++                val observationServer=api.server
+                 runCatching{api.get(endpointPath(endpoint.endpointId,"/remote/status"))}.onSuccess{status->
++                    currentCoroutineContext().ensureActive()
++                    if(api.server!=observationServer||!requestEpoch.accepts(observation)||mode!="kiosk"||pendingMode!=null)return@onSuccess
+                     youtubeRemoteStatus=status
+                     val yp=status.optJSONObject("youtube_player")?:JSONObject()
+                     val currentVideoId=yp.optString("video_id","")
+
