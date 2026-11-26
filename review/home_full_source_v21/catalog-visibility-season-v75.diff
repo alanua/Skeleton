@@ -1,0 +1,203 @@
+--- a/app.py
++++ b/app.py
+@@ -5795,18 +5795,19 @@
+         'poster': str(source.get('season_poster') or (source.get('poster') if source.get('poster_scope') == 'season' else '') or ''),
+         'updated_at': int(time.time()),
+     }
+-    data = _history_preferences_read()
+-    # Playback must not discard a manual visibility setting.
+-    existing = data.get(history_id)
+     owner = _history_group_for_job(job)
+-    if isinstance(existing, dict) and 'hidden' in existing:
+-        value['hidden'] = bool(existing['hidden'])
+-    elif owner and owner.get('legacy_collision_key'):
+-        legacy = data.get(_history_group_id(owner['legacy_collision_key']))
+-        if isinstance(legacy, dict) and legacy.get('hidden'):
+-            value['hidden'] = True
+-    data[history_id] = value
+-    _history_preferences_write(data)
++    with _HISTORY_PREF_CACHE_LOCK:
++        data = _history_preferences_read()
++        # Playback must not discard a manual visibility setting.
++        existing = data.get(history_id)
++        if isinstance(existing, dict) and 'hidden' in existing:
++            value['hidden'] = bool(existing['hidden'])
++        elif owner and owner.get('legacy_collision_key'):
++            legacy = data.get(_history_group_id(owner['legacy_collision_key']))
++            if isinstance(legacy, dict) and legacy.get('hidden'):
++                value['hidden'] = True
++        data[history_id] = value
++        _history_preferences_write(data)
+     return value
+ 
+ 
+@@ -6018,6 +6019,17 @@
+     ordered_seasons = sorted(seasons, key=lambda value: int(value) if value.isdigit() else 9999)
+     year = int(catalog.get('year') or 0) if catalog else 0
+     media_type = str(catalog.get('media_type') or ('tv' if len(ordered_seasons) > 1 or any('серіал' in str(j.get('title') or '').casefold() for _, j in jobs) else 'movie'))
++    if media_type == 'tv' and catalog:
++        try:
++            series_id = int(catalog.get('tmdb_id') or 0)
++            if series_id > 0:
++                for record in media_discovery.tmdb_series_season_catalog(series_id, ordered_seasons, allow_network=False):
++                    key = str(record.get('season_number') or '')
++                    artwork = str(record.get('poster') or '').strip()
++                    if key.isdigit() and int(key) > 0 and artwork:
++                        season_posters[key] = artwork
++        except (TypeError, ValueError, OSError):
++            pass
+     content_type = _infer_content_type(catalog_job or newest, media_type)
+     runtime_meta = {}
+     try:
+@@ -6770,19 +6782,8 @@
+ _HISTORY_RESPONSE_CACHE: dict[str, object] = {'signature': None, 'payload': None, 'at': 0.0}
+ 
+ 
+-def _history_response_signature() -> tuple[tuple[int, int], ...]:
+-    # Job writes are atomic os.replace operations, so the jobs directory mtime
+-    # changes whenever a job is added/replaced. Preference/selection/current
+-    # files can change the visible history choice without changing a job.
+-    paths = (JOBS, VIDEO_HISTORY_DELETIONS, VIDEO_HISTORY_PREFERENCES, STATE / 'media-catalog.sqlite3', STATE / 'media-catalog.sqlite3-wal', STATE / 'tmdb-work-details.json')
+-    result: list[tuple[int, int]] = []
+-    for path in paths:
+-        try:
+-            st = path.stat()
+-            result.append((int(st.st_mtime_ns), int(st.st_size)))
+-        except OSError:
+-            result.append((0, 0))
+-    return tuple(result)
++def _history_response_signature():
++    return _media_history_read_index_signature()
+ 
+ 
+ def _library_update_projection(items):
+@@ -6852,41 +6853,32 @@
+ @app.get('/api/video/history')
+ def video_history_get() -> Response:
+     _require()
+-    signature = _history_response_signature()
+-    now_mono = time.monotonic()
+     with _HISTORY_RESPONSE_CACHE_LOCK:
+-        cached_payload = _HISTORY_RESPONSE_CACHE.get('payload')
+-        cached_at = float(_HISTORY_RESPONSE_CACHE.get('at') or 0.0)
+-        # A 3 s hot cache keeps tab/app refresh instant while preserving near-live history.
+-        if isinstance(cached_payload, dict) and now_mono - cached_at < 3.0 and _HISTORY_RESPONSE_CACHE.get('signature') == signature:
+-            return jsonify(_history_page_payload(cached_payload))
+-        if _HISTORY_RESPONSE_CACHE.get('signature') == signature and isinstance(cached_payload, dict):
+-            _HISTORY_RESPONSE_CACHE['at'] = now_mono
+-            return jsonify(_history_page_payload(cached_payload))
+-    items = [_history_item(group) for group in _video_history_groups().values()]
+-    # User-visible history order follows meaningful activity only: initial add or
+-    # real playback. Source refreshes/poster repairs may change updated_at but must
+-    # never move an old work to the top of the list.
+-    items.sort(key=lambda item: (
+-        -max(int(item.get('last_viewed_at') or 0), int(item.get('added_at') or 0)),
+-        -int(item.get('last_viewed_at') or 0),
+-        -int(item.get('added_at') or 0),
+-        str(item.get('title') or '').casefold(),
+-    ))
+-    _library_update_projection(items)
+-    payload = {'items': items, 'sort': 'added_or_viewed_desc',
+-               '_catalog_revision': hashlib.sha256(json.dumps(items, sort_keys=True, ensure_ascii=False, separators=(',', ':')).encode('utf-8')).hexdigest(),
+-               '_visible_count': sum(not bool(item.get('hidden')) for item in items)}
+-    with _HISTORY_RESPONSE_CACHE_LOCK:
+-        _HISTORY_RESPONSE_CACHE['signature'] = signature
+-        _HISTORY_RESPONSE_CACHE['payload'] = payload
+-        _HISTORY_RESPONSE_CACHE['at'] = time.monotonic()
+-    response = jsonify(_history_page_payload(payload))
+-    # At this point the large temporary history graph is no longer needed.
+-    # Return freed glibc arenas to the OS so the long-lived control plane stays
+-    # comfortably below MemoryHigh instead of retaining a transient high-water mark.
+-    _history_trim_heap()
+-    return response
++        signature = _history_response_signature()
++        now_mono = time.monotonic()
++        cached = _HISTORY_RESPONSE_CACHE.get('payload')
++        if (signature is not None and isinstance(cached, dict)
++                and _HISTORY_RESPONSE_CACHE.get('signature') == signature
++                and now_mono - float(_HISTORY_RESPONSE_CACHE.get('at') or 0.0) < 15.0):
++            payload = cached
++        else:
++            _, _, canonical = _media_history_read_indexes()
++            items = [dict(item) for item in canonical.values()]
++            items.sort(key=lambda item: (
++                -max(int(item.get('last_viewed_at') or 0), int(item.get('added_at') or 0)),
++                -int(item.get('last_viewed_at') or 0),
++                -int(item.get('added_at') or 0),
++                str(item.get('title') or '').casefold(),
++            ))
++            _library_update_projection(items)
++            payload = {'items': items, 'sort': 'added_or_viewed_desc',
++                       '_catalog_revision': hashlib.sha256(json.dumps(items, sort_keys=True, ensure_ascii=False, separators=(',', ':')).encode('utf-8')).hexdigest(),
++                       '_visible_count': sum(not bool(item.get('hidden')) for item in items)}
++            if signature is not None and signature == _history_response_signature():
++                _HISTORY_RESPONSE_CACHE.update(signature=signature, payload=payload, at=time.monotonic())
++            else:
++                _HISTORY_RESPONSE_CACHE.update(signature=None, payload=None, at=0.0)
++    return jsonify(_history_page_payload(payload))
+ 
+ 
+ def _history_refresh_monitored_season_if_due(group: dict) -> dict:
+@@ -6982,17 +6974,28 @@
+     group = _history_group_by_id(history_id)
+     if group is None:
+         return jsonify({'error': 'history item not found'}), 404
+-    preferences = _history_preferences_read()
+-    entry = preferences.get(history_id)
+-    entry = dict(entry) if isinstance(entry, dict) else {}
+-    entry['hidden'] = data['hidden']
+-    preferences[history_id] = entry
+-    _history_preferences_write(preferences)
++    with _HISTORY_PREF_CACHE_LOCK:
++        preferences = _history_preferences_read()
++        entry = preferences.get(history_id)
++        entry = dict(entry) if isinstance(entry, dict) else {}
++        entry['hidden'] = data['hidden']
++        preferences[history_id] = entry
++        _history_preferences_write(preferences)
+     with _HISTORY_RESPONSE_CACHE_LOCK:
+         _HISTORY_RESPONSE_CACHE['signature'] = None
+         _HISTORY_RESPONSE_CACHE['payload'] = None
+         _HISTORY_RESPONSE_CACHE['at'] = 0.0
+-    return jsonify({'status': 'updated', 'history_id': history_id, 'hidden': data['hidden']})
++    quarantine = any(j.get('atlas_intake') for _, j in group.get('jobs') or [])
++    if quarantine and not data['hidden']:
++        effective_hidden = not any(
++            isinstance(src, dict) and not _home_full_source_blocked(src)
++            and src.get('has_audio') is True and src.get('video_codec')
++            and str(src.get('video_codec')).lower() not in {'none','unknown','null'}
++            and src.get('width') and src.get('height') and not src.get('has_drm')
++            for _, j in group.get('jobs') or [] for src in j.get('sources') or [])
++    else:
++        effective_hidden = data['hidden']
++    return jsonify({'status': 'updated', 'history_id': history_id, 'hidden': data['hidden'], 'effective_hidden': effective_hidden})
+ 
+ 
+ @app.post('/api/video/history/open')
+@@ -7393,7 +7396,16 @@
+                 item['load_status'] = 'available'
+             else:
+                 item['load_status'] = 'unknown' if item.get('released', True) else 'upcoming'
+-        if season_catalog: catalog['seasons'] = season_catalog
++        if season_catalog:
++            catalog['seasons'] = season_catalog
++            mapped = dict(posters)
++            for item in season_catalog:
++                skey = str(item.get('season_number') or '')
++                artwork = str(item.get('poster') or '').strip()
++                if skey.isdigit() and int(skey) > 0 and artwork:
++                    mapped[skey] = artwork
++            catalog['season_posters'] = mapped
++            safe['season_posters'] = dict(mapped)
+     if int(catalog.get('tmdb_id') or 0) > 0:
+         ui_meta = media_discovery.tmdb_ui_metadata(int(catalog.get('tmdb_id')), str(catalog.get('media_type') or 'tv'), allow_network=False)
+         ratings_meta = media_discovery.media_ratings_metadata(int(catalog.get('tmdb_id')), str(catalog.get('media_type') or 'tv'), allow_network=False)
+@@ -9890,7 +9902,7 @@
+ def _media_history_read_index_signature():
+     paths = (JOBS, HISTORY_RUNTIME_JOBS, VIDEO_HISTORY_DELETIONS,
+              VIDEO_HISTORY_PREFERENCES, VIDEO_SELECTION, STATE / 'current.json',
+-             STATE / 'last-vod.json', STATE / 'tmdb-work-details.json',
++             STATE / 'last-vod.json', STATE / 'tmdb-work-details.json', STATE / 'tmdb-season-metadata.json',
+              STATE / 'media-catalog.sqlite3', STATE / 'media-catalog.sqlite3-wal')
+     result = []
+     for path in paths:
