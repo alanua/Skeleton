@@ -1,0 +1,76 @@
+--- a/app.py
++++ b/app.py
+@@ -9816,12 +9816,9 @@
+     sid = str(item.get('last_source_id') or item.get('source_id') or '')
+     projection = group.get('_media_canonical_projection') or _history_item(group)
+     media_type = str(projection.get('media_type') or '')
+-    episode_key = str(item.get('episode_key') or '')
+-    target = re.fullmatch(r'(?i)s(\d{1,3})e(\d{1,4})', episode_key)
+-    if media_type == 'tv' and target is None:
++    need_season, need_ep, _ = _media_saved_episode_identity(item)
++    if media_type == 'tv' and not (need_season and need_ep):
+         return item, False
+-    need_season = str(int(target.group(1))) if target else ''
+-    need_ep = 'Пілот / спецсерія' if target and int(target.group(2)) == 0 else ('Серія ' + str(int(target.group(2))) if target else '')
+     old_voice = str(item.get('last_translation') or item.get('voice') or '').casefold()
+     def matches(job, source):
+         return (not _home_full_source_blocked(source)
+@@ -9863,33 +9860,34 @@
+     return restored, True
+ 
+ 
++def _media_saved_episode_identity(item: dict) -> tuple[str, str, str]:
++    # Preserve exact compound episode identity; never truncate a range.
++    key = str(item.get('episode_key') or '').strip()
++    if not key:
++        season = str(item.get('season') or '').strip()
++        episode = str(item.get('episode') or '').strip()
++        m = re.fullmatch(r'(?i)(?:сер(?:ія|ия)|episode)?\s*(\d{1,4})', episode)
++        if not re.fullmatch(r'\d{1,3}', season) or not m:
++            return '', '', ''
++        key = f's{season}e{m.group(1)}'
++    m = re.fullmatch(r'(?i)s(\d{1,3})e(\d{1,4})(?:-(\d{1,4}))?', key)
++    if not m:
++        return '', '', ''
++    season, first = str(int(m.group(1))), int(m.group(2))
++    if int(season) <= 0:
++        return '', '', ''
++    if m.group(3) is not None:
++        last = int(m.group(3))
++        if first <= 0 or last <= first:
++            return '', '', ''
++        return season, f'Серія {first}-{last}', f's{season}e{first}-{last}'
++    return season, ('Пілот / спецсерія' if first == 0 else f'Серія {first}'), f's{season}e{first}'
++
++
+ def _media_history_source_selection(item: dict, media_type: str) -> tuple[str, str, str]:
+     if media_type != 'tv':
+         return '', '', ''
+-    # The watch ledger's episode key is the identity of the saved position.
+-    # An obsolete source reference must not change that identity.
+-    stored = re.fullmatch(r'(?i)s(\d{1,3})e(\d{1,4})', str(item.get('episode_key') or ''))
+-    if stored:
+-        season, episode = str(int(stored.group(1))), int(stored.group(2))
+-        return season, ('Пілот / спецсерія' if episode == 0 else f'Серія {episode}'), f's{season}e{episode}'
+-    job_id = str(item.get('last_job_id') or item.get('job_id') or '').strip()
+-    source_id = str(item.get('last_source_id') or item.get('source_id') or '').strip()
+-    if job_id and source_id:
+-        try:
+-            job, source = _media_job_source(job_id, source_id)
+-            season = _history_source_season(job, source)
+-            episode = _history_source_episode(job, source)
+-            if season or episode:
+-                m = re.search(r'(?i)s(\d{1,3})e(\d{1,4})', str(item.get('episode_key') or ''))
+-                episode_key = str(item.get('episode_key') or (f's{season}e{m.group(2)}' if season and m else ''))
+-                return season, episode, episode_key
+-        except Exception:
+-            pass
+-    m = re.search(r'(?i)s(\d{1,3})e(\d{1,4})', str(item.get('episode_key') or ''))
+-    if not m:
+-        return '', '', ''
+-    season, episode = str(int(m.group(1))), int(m.group(2))
+-    return season, ('Пілот / спецсерія' if episode == 0 else f'Серія {episode}'), f's{season}e{episode}'
++    return _media_saved_episode_identity(item)
+ 
+ 
+ # Read-only endpoint views reuse one canonical projection snapshot. Watch
