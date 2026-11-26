@@ -1,0 +1,31 @@
+--- app.py.before
++++ app.py.after
+@@ -10026,19 +10026,15 @@
+     endpoint=data.get('endpoint') or data.get('history_id') or request.args.get('endpoint')
+     history_id=_media_history_namespace(endpoint)
+     key=history_key or str(data.get('history_key') or data.get('key') or '')
+-    item=_media_history_find(history_id,key)
+-    if item is None:
++    if history_id not in {'home_edge_tv','samsung_kiosk'}:
++        return jsonify({'error':'Невідомий media endpoint.','history_id':history_id}),400
++    if not key or _media_history_find(history_id,key) is None:
+         return jsonify({'error':'Запис історії не знайдено.','history_id':history_id}),404
+-    try:
+-        job,source=_media_job_source(item.get('job_id') or item.get('last_job_id'),item.get('source_id') or item.get('last_source_id'))
+-        pos=max(0.0,float(item.get('position_seconds') or 0.0))
+-        if history_id=='samsung_kiosk':
+-            started=_samsung_start_source(job,source,'video',position_seconds=pos)
+-            return jsonify({'status':'ok','history_id':history_id,'endpoint_id':'samsung_tv','started':started})
+-        started=player.play(job,resolver.materialize_source(source),'off')
+-        if pos>0:
+-            player.seek_absolute(pos)
+-        return jsonify({'status':'ok','history_id':history_id,'endpoint_id':'home_edge_tv','started':started})
++    alias='samsung' if history_id=='samsung_kiosk' else 'tv'
++    try:
++        started=_media_endpoint_resume_payload(alias,{'history_id':key})
++        return jsonify({'status':'ok','history_id':history_id,
++                        'endpoint_id':_media_target_endpoint_id(alias),'started':started})
+     except Exception as exc:
+         return jsonify({'error':str(exc),'history_id':history_id}),409
+ 
+
