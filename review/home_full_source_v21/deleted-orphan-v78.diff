@@ -1,0 +1,43 @@
+--- a/app.py
++++ b/app.py
+@@ -9935,6 +9935,26 @@
+         return value
+ 
+ 
++def _media_orphan_is_deleted(item: dict, deleted: dict) -> bool:
++    # Only an exact retained job can prove a tombstone. Never infer deletion
++    # from a watch-row title, or remove the underlying watch ledger.
++    for field in ('last_job_id', 'job_id'):
++        jid = str(item.get(field) or '').strip()
++        if not re.fullmatch(r'[A-Za-z0-9_-]+', jid):
++            continue
++        try:
++            job = _load(jid)
++        except Exception:
++            continue
++        if not isinstance(job, dict) or str(job.get('job_id') or '') != jid:
++            continue
++        key = _history_job_key(job)
++        deleted_at = int(deleted.get(key) or 0)
++        if deleted_at and float(job.get('user_requested_at') or 0) <= deleted_at:
++            return True
++    return False
++
++
+ def _media_history_payload(endpoint: object = None) -> dict:
+     history_id = _media_history_namespace(endpoint)
+     store = player._load_endpoint_watch_history()
+@@ -9946,10 +9966,13 @@
+     grouped: dict[str, list[dict]] = {}
+     unmatched: list[dict] = []
+     group_refs: dict[str, dict] = {}
++    deleted = _history_deletions_read()
+ 
+     for item in raw_items:
+         match = _media_history_match_group(item, by_job, by_title_year, canonical)
+         if match is None:
++            if _media_orphan_is_deleted(item, deleted):
++                continue
+             row = dict(item)
+             row['history_key'] = str(row.get('history_key') or row.get('content_key') or '')
+             unmatched.append(row)
