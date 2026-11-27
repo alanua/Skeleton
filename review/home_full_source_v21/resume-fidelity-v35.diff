@@ -1,0 +1,115 @@
+--- app.py.before
++++ app.py.after
+@@ -1043,34 +1043,31 @@
+         job = _load(job_id)
+     except Exception:
+         return None, None
+-    sources = [x for x in (job.get('sources') or []) if not _home_full_source_blocked(x)]
+-    if source_id:
+-        source = next((x for x in sources if str(x.get('source_id') or '') == source_id), None)
+-        if source is not None:
+-            return job, source
+-    # A newly shared/resolved work can be ready before the phone has persisted a
+-    # concrete source_id. Recover deterministically instead of reusing stale TV URL.
+     season = str(selection.get('season') or job.get('season') or '')
+     episode = str(selection.get('episode') or '')
+     voice = str(selection.get('voice') or '')
+-    candidates = sources
+-    if season:
+-        same = [x for x in candidates if str(x.get('season') or '') == season]
+-        if same: candidates = same
+-    if episode:
+-        same = [x for x in candidates if str(x.get('episode') or '') == episode]
+-        if same: candidates = same
+-    if voice:
+-        same = [x for x in candidates if str(x.get('group') or x.get('translation') or '') == voice]
+-        if same: candidates = same
++    candidates = [
++        x for x in job.get('sources') or []
++        if not _home_full_source_blocked(x)
++        and (not season or str(x.get('season') or '') == season)
++        and (not episode or str(x.get('episode') or '') == episode)
++        and (not voice or voice in {str(x.get('group') or ''), str(x.get('translation') or '')})
++    ]
++    if source_id:
++        exact = next((x for x in candidates if str(x.get('source_id') or '') == source_id), None)
++        if exact is not None:
++            return job, exact
++        # A stale explicit ID without enough identity cannot authorize a different work/voice.
++        if not voice:
++            return job, None
+     if not candidates:
+         return job, None
+-    # Prefer the best <=720p rendition for Samsung; otherwise _samsung_start_source
+-    # will adapt the chosen episode/voice to a compatible rendition when possible.
++    if not voice:
++        best_language = max(_home_implicit_audio_rank(x) for x in candidates)
++        candidates = [x for x in candidates if _home_implicit_audio_rank(x) == best_language]
+     compatible = [x for x in candidates if 0 < int(x.get('height') or 0) <= 720]
+     pool = compatible or candidates
+-    source = max(pool, key=lambda x: (int(x.get('height') or 0), float(x.get('tbr') or 0)))
+-    return job, source
++    return job, max(pool, key=lambda x: (int(x.get('height') or 0), float(x.get('tbr') or 0)))
+ 
+ 
+ def _youtube_video_meta(video_id: str) -> dict:
+@@ -9687,12 +9684,6 @@
+     """
+     jid = str(item.get('last_job_id') or item.get('job_id') or '')
+     sid = str(item.get('last_source_id') or item.get('source_id') or '')
+-    if jid and sid:
+-        try:
+-            _media_job_source(jid, sid)
+-            return item, True
+-        except Exception:
+-            pass
+     media_type = str(_history_item(group).get('media_type') or '')
+     episode_key = str(item.get('episode_key') or '')
+     target = re.fullmatch(r'(?i)s(\d{1,3})e(\d{1,4})', episode_key)
+@@ -9701,26 +9692,33 @@
+     need_season = str(int(target.group(1))) if target else ''
+     need_ep = 'Пілот / спецсерія' if target and int(target.group(2)) == 0 else ('Серія ' + str(int(target.group(2))) if target else '')
+     old_voice = str(item.get('last_translation') or item.get('voice') or '').casefold()
++    def matches(job, source):
++        return (not _home_full_source_blocked(source)
++                and str(source.get('backend') or '') != 'chrome-browser'
++                and bool(str(source.get('url') or ''))
++                and (media_type != 'tv' or (
++                    _history_source_season(job, source) == need_season
++                    and _history_source_episode(job, source) == need_ep))
++                and (not old_voice or old_voice in {
++                    str(source.get('group') or '').casefold(),
++                    str(source.get('translation') or '').casefold()}))
++    if jid and sid:
++        try:
++            job, source = _media_job_source(jid, sid)
++            if any(str(j.get('job_id') or '') == jid for _, j in group.get('jobs') or []) and matches(job, source):
++                return item, True
++        except Exception:
++            pass
+     candidates = []
+     for mtime, job in sorted(group.get('jobs') or [], key=lambda item: item[0], reverse=True):
+         for source in job.get('sources') or []:
+-            if not isinstance(source, dict) or _home_full_source_blocked(source):
+-                continue
+-            if str(source.get('backend') or '') == 'chrome-browser':
+-                continue
+-            if not str(source.get('url') or ''):
+-                continue
+-            if media_type == 'tv' and (
+-                _history_source_season(job, source) != need_season
+-                or _history_source_episode(job, source) != need_ep
+-            ):
++            if not matches(job, source):
+                 continue
+             jid_new = str(job.get('job_id') or '')
+             sid_new = str(source.get('source_id') or '')
+             if not jid_new or not sid_new:
+                 continue
+-            voice = str(source.get('group') or source.get('translation') or '').casefold()
+-            rank = (voice == old_voice and bool(old_voice), int(source.get('height') or 0), float(mtime))
++            rank = (_home_implicit_audio_rank(source) if not old_voice else 0, int(source.get('height') or 0), float(mtime))
+             candidates.append((rank, jid_new, sid_new, source))
+     if not candidates:
+         return item, False
+

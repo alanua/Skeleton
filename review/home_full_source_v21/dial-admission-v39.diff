@@ -1,0 +1,39 @@
+--- app.py.before
++++ app.py.after
+@@ -135,7 +135,7 @@
+     return {
+         'ready': bool(data.get('dial_ready') and dial.get('screen_id')),
+         'screen_id': str(dial.get('screen_id') or ''),
+-        'name': str(dial.get('name') or 'YouTube TV'),
++        'name': 'YouTube TV',
+         'device_uuid': str(dial.get('device_uuid') or uuid.uuid5(uuid.NAMESPACE_DNS, 'skeleton:home-edge-01:youtube-tv')),
+     }
+ 
+@@ -8206,7 +8206,7 @@
+                 'app': 'ytcr',
+                 'pairing_code': pairing_code,
+                 'screen_id': screen_id,
+-                'screen_name': f'YouTube on {str(live.get("name") or st.get("name") or "Home Edge")}',
++                'screen_name': st['name'],
+                 'device_id': st['device_uuid'],
+             }).encode('utf-8')
+             req = _urlrequest.Request(
+@@ -8229,12 +8229,13 @@
+             app.logger.exception('YouTube DIAL pairing registration failed')
+             return Response('Pairing failed', status=500)
+     elif theme == 'cl':
++        # Failed launch must not mark a client paired. The next retry must
++        # observe the same stopped state until valid pairing data exists.
++        if not str(live.get('loungeToken') or ''):
++            return Response('Missing pairing data', status=400)
+         with _YOUTUBE_DIAL_CLIENT_LOCK:
+             _YOUTUBE_DIAL_PAIRED_CLIENTS.add(str(request.remote_addr or ''))
+-        # Smooth pairing can use the loungeToken already returned by GET
+-        # /apps/YouTube. No second identity is created.
+-        if not str(live.get('loungeToken') or ''):
+-            return Response('Missing pairing data', status=400)
++        # Preserve the same screen and UUID; no second receiver identity.
+     else:
+         return Response('Bad Request', status=400)
+ 
+

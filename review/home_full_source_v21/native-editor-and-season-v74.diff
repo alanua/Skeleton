@@ -1,0 +1,95 @@
+--- a/app/src/main/java/com/skeleton/home/MainActivity.kt
++++ b/app/src/main/java/com/skeleton/home/MainActivity.kt
+@@ -1492,17 +1492,50 @@
+ 
+ @Composable private fun HistoryEditorDialog(api:HomeApi,endpointId:String,onDismiss:()->Unit){
+     val scope=rememberCoroutineScope();var items by remember{mutableStateOf(emptyList<JSONObject>())};var query by remember{mutableStateOf("")};var busy by remember{mutableStateOf(false)};var error by remember{mutableStateOf("")};var visibilityFilter by remember{mutableStateOf("all")};var filters by remember{mutableStateOf(HomeLibraryFilters())};var expanded by remember{mutableStateOf(false)};val focusRequester=remember{FocusRequester()};val keyboard=LocalSoftwareKeyboardController.current
++    var pending by remember(api.server,endpointId){mutableStateOf(emptySet<String>())}
++    var editGeneration by remember(api.server,endpointId){mutableIntStateOf(0)}
++    val currentServer by rememberUpdatedState(api.server)
++    val currentEndpoint by rememberUpdatedState(endpointId)
+     suspend fun reload(){
+         if(api.server==null)return
++        val generation=editGeneration
++        val server=api.server;val targetEndpoint=endpointId
+         busy=true
+         try{
+             val catalog=canonicalHistoryItems(savedVideoHistoryItemsWithRetry(api))
+             val watched=try{homeCompleteWatchResponse(api.get(mediaHistoryPath(endpointId)))}catch(cancelled:CancellationException){throw cancelled}catch(_:Exception){null}
+-            items=homeLibraryWithWatch(catalog,watched);error=""
++            if(generation==editGeneration && currentServer==server && currentEndpoint==targetEndpoint){items=homeLibraryWithWatch(catalog,watched);error=""}
+         }
+         catch(cancelled:CancellationException){throw cancelled}
+         catch(e:Exception){error=e.message?:"Спільний каталог недоступний"}
+         finally{busy=false}
++    }
++    fun edit(item:JSONObject,remove:Boolean){
++        val key=historyKey(item)
++        if(key.isBlank()||key in pending||busy||api.server==null)return
++        val server=api.server;val targetEndpoint=endpointId
++        val requested=!item.optBoolean("hidden",false)
++        pending=pending+key;editGeneration++
++        scope.launch{
++            try{
++                val ack=if(remove)api.delete(canonicalVideoHistoryDeletePath(item))
++                    else api.patch("/api/video/history/${Uri.encode(key)}/visibility",JSONObject().put("hidden",requested))
++                if(currentServer!=server||currentEndpoint!=targetEndpoint)return@launch
++                if(ack.optString("history_id")!=key)throw IllegalStateException("Сервер повернув інший твір")
++                if(remove){
++                    if(ack.optString("status") !in setOf("deleted","absent"))throw IllegalStateException("Видалення не підтверджено")
++                    items=items.filterNot{historyKey(it)==key}
++                }else{
++                    if(ack.optString("status")!="updated"||!ack.has("hidden")||ack.optBoolean("hidden")!=requested)throw IllegalStateException("Зміна видимості не підтверджена")
++                    val effective=ack.optBoolean("effective_hidden",requested)
++                    items=items.map{row->if(historyKey(row)==key)JSONObject(row.toString()).put("hidden",effective) else row}
++                    if(effective!=requested){error="Твір поки не має підтвердженого повного джерела";return@launch}
++                }
++                error=""
++            }catch(cancelled:CancellationException){throw cancelled}
++            catch(e:Exception){if(currentServer==server&&currentEndpoint==targetEndpoint)error=e.message?:"Не вдалося зберегти зміни"}
++            finally{if(currentServer==server&&currentEndpoint==targetEndpoint)pending=pending-key}
++        }
+     }
+     LaunchedEffect(api.server,endpointId){reload()}
+     val q=query.trim().lowercase(Locale.ROOT)
+@@ -1528,20 +1561,20 @@
+                 }
+                 if(busy&&items.isEmpty()) Box(Modifier.fillMaxSize(),contentAlignment=Alignment.Center){CircularProgressIndicator(color=Accent,strokeWidth=2.dp,modifier=Modifier.size(28.dp))}
+                 else LazyColumn(Modifier.weight(1f).fillMaxWidth().padding(horizontal=10.dp),contentPadding=PaddingValues(bottom=18.dp)){
+-                    items(visible,key={historyKey(it).ifBlank{it.optString("title")}}){item->HistoryEditorRow(api,item,{scope.launch{runCatching{api.delete(canonicalVideoHistoryDeletePath(item))}.onSuccess{reload()}.onFailure{error=it.message?:"Не вдалося видалити твір"}} },{scope.launch{runCatching{api.patch("/api/video/history/${Uri.encode(historyKey(item))}/visibility",JSONObject().put("hidden",!item.optBoolean("hidden",false)))}.onSuccess{reload()}.onFailure{error=it.message?:"Не вдалося змінити видимість"}} })}
+-                }
+-            }
+-        }
+-    }
+-}
+-
+-@Composable private fun HistoryEditorRow(api:HomeApi,item:JSONObject,onDelete:()->Unit,onVisibility:()->Unit){
++                    items(visible,key={historyKey(it).ifBlank{it.optString("title")}}){item->HistoryEditorRow(api,item,{edit(item,true)},{edit(item,false)},enabled=!busy&&historyKey(item) !in pending,pending=historyKey(item) in pending)}
++                }
++            }
++        }
++    }
++}
++
++@Composable private fun HistoryEditorRow(api:HomeApi,item:JSONObject,onDelete:()->Unit,onVisibility:()->Unit,enabled:Boolean=true,pending:Boolean=false){
+     val poster=item.optString("poster");val bm=remoteBitmap(if(poster.isBlank())null else if(poster.startsWith("http"))poster else api.server+poster,192,288)
+     Column{
+     Row(Modifier.fillMaxWidth().heightIn(min=112.dp).border(width=0.dp,color=Color.Transparent).padding(horizontal=3.dp,vertical=9.dp),verticalAlignment=Alignment.CenterVertically){
+         Box(Modifier.width(64.dp).height(96.dp).clip(RoundedCornerShape(8.dp)).background(Bg),contentAlignment=Alignment.Center){if(bm!=null)Image(bm,null,Modifier.fillMaxSize(),contentScale=ContentScale.Fit)else Mdi("movie-open",30.dp,Muted)}
+         Column(Modifier.weight(1f).padding(start=11.dp,end=6.dp)){Text(item.optString("title","Твір"),fontSize=15.sp,lineHeight=19.sp,fontWeight=FontWeight.SemiBold,color=Text,maxLines=2,overflow=TextOverflow.Ellipsis);val meta=listOf(historyKindLabel(item),historyEpisodeLabel(item),item.optString("year"),historyRuntimeLabel(item)).filter{it.isNotBlank()}.joinToString(" · ");if(meta.isNotBlank())Text(meta,fontSize=10.sp,fontWeight=FontWeight.Bold,color=Accent,modifier=Modifier.padding(top=4.dp));val ov=item.optString("overview");if(ov.isNotBlank())Text(ov,fontSize=11.sp,lineHeight=15.sp,color=Muted,maxLines=3,overflow=TextOverflow.Ellipsis,modifier=Modifier.padding(top=7.dp))}
+-        Column(verticalArrangement=Arrangement.spacedBy(8.dp),horizontalAlignment=Alignment.CenterHorizontally){Box(Modifier.size(32.dp).clip(CircleShape).background(Color(0xFF241A1A)).border(1.dp,Color(0xFF4A3434),CircleShape).clickable(onClick=onDelete),contentAlignment=Alignment.Center){Text("×",fontSize=24.sp,color=Color(0xFFFFB8B8),modifier=Modifier.offset(y=(-1).dp))};Mdi(if(item.optBoolean("hidden",false))"eye-off-outline" else "eye-outline",26.dp,if(item.optBoolean("hidden",false))Muted else Accent,Modifier.clickable(onClick=onVisibility))}
++        Column(verticalArrangement=Arrangement.spacedBy(8.dp),horizontalAlignment=Alignment.CenterHorizontally){if(pending)CircularProgressIndicator(color=Accent,strokeWidth=2.dp,modifier=Modifier.size(18.dp));Box(Modifier.size(32.dp).clip(CircleShape).background(Color(0xFF241A1A)).border(1.dp,Color(0xFF4A3434),CircleShape).clickable(enabled=enabled,onClick=onDelete),contentAlignment=Alignment.Center){Text("×",fontSize=24.sp,color=Color(0xFFFFB8B8),modifier=Modifier.offset(y=(-1).dp))};Mdi(if(item.optBoolean("hidden",false))"eye-off-outline" else "eye-outline",26.dp,if(item.optBoolean("hidden",false))Muted else Accent,Modifier.clickable(enabled=enabled,onClick=onVisibility))}
+     }
+     }
+ }
+@@ -2916,8 +2949,8 @@
+     if(quality !in qualities)quality=qualities.firstOrNull().orEmpty()
+     val voices=if(isSeries)sourceValues(sources,"voice",season,episode,quality,excludeTrailers=true) else sourceValues(sources,"voice",quality=quality,excludeTrailers=true)
+     if(voice !in voices)voice=voices.firstOrNull().orEmpty()
+-    val poster=if(isSeries)cat.optJSONObject("season_posters")?.optString(season,cat.optString("poster",""))?:cat.optString("poster","") else cat.optString("poster","")
+-    val bm=remoteBitmap(if(poster.isNotBlank()&&api.server!=null)api.server+poster else null,256,384)
++    val poster=if(isSeries)seasonPosterPath(seasonItems.firstOrNull{it.optInt("season_number").toString()==season}?:JSONObject().put("season_number",season.toIntOrNull()?:0),cat) else cat.optString("poster","")
++    val bm=remoteBitmap(if(poster.isBlank())null else if(poster.startsWith("http"))poster else api.server?.let{it+poster},256,384)
+     val fullSources=sources.filterNot(::isTrailerSource)
+     val selectedCandidate=if(isSeries)
+         fullSources.firstOrNull{it.optString("season")==season&&it.optString("episode")==episode&&it.optString("quality")==quality&&sourceVoice(it)==voice}

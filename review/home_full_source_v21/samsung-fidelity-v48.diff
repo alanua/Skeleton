@@ -1,0 +1,62 @@
+--- app.py.before
++++ app.py.after
+@@ -971,33 +971,36 @@
+ 
+ 
+ def _samsung_compatible_source(job: dict, source: dict) -> dict:
+-    """Prefer the same episode/voice at <=720p for the old SM-T561."""
+-    try:
+-        height = int(source.get('height') or 0)
+-    except Exception:
+-        height = 0
+-    if 0 < height <= 720:
++    """Prefer a compatible resolution without changing the selected episode or voice."""
++    def height(item):
++        try:
++            return int(item.get('height') or 0)
++        except (TypeError, ValueError, OverflowError):
++            return 0
++    if _home_full_source_blocked(source) or 0 < height(source) <= 720:
+         return source
+-    season = str(source.get('season') or '')
+-    episode = str(source.get('episode') or '')
+-    voice = str(source.get('group') or source.get('translation') or '')
++    season = _history_source_season(job, source)
++    episode = _history_source_episode(job, source)
++    # A group can contain several languages. Both stored voice fields must
++    # agree before a resolution-only adaptation is permitted.
++    def voice(item):
++        return tuple(str(item.get(key) or '').strip().casefold()
++                     for key in ('group', 'translation'))
++    original_voice = voice(source)
+     candidates = []
+     for item in job.get('sources') or []:
+-        if _home_full_source_blocked(item) != _home_full_source_blocked(source):
++        if (_home_full_source_blocked(item)
++                or item.get('backend') == 'chrome-browser'
++                or item.get('has_drm') or item.get('drm')
++                or not item.get('source_id') or not item.get('url')
++                or bool(item.get('live')) != bool(source.get('live'))
++                or _history_source_season(job, item) != season
++                or _history_source_episode(job, item) != episode
++                or voice(item) != original_voice):
+             continue
+-        if season and str(item.get('season') or '') != season:
+-            continue
+-        if episode and str(item.get('episode') or '') != episode:
+-            continue
+-        if voice and str(item.get('group') or item.get('translation') or '') != voice:
+-            continue
+-        try:
+-            h = int(item.get('height') or 0)
+-        except Exception:
+-            h = 0
+-        if 0 < h <= 720:
++        if 0 < height(item) <= 720:
+             candidates.append(item)
+-    return max(candidates, key=lambda x: int(x.get('height') or 0), default=source)
++    return max(candidates, key=height, default=source)
+ 
+ 
+ def _samsung_start_source(job: dict, source: dict, mode: str = 'video', position_seconds: float | None = None) -> dict:
+

@@ -1,0 +1,63 @@
+--- a/app.py
++++ b/app.py
+@@ -9880,6 +9880,51 @@
+     return season, ('Пілот / спецсерія' if episode == 0 else f'Серія {episode}'), f's{season}e{episode}'
+ 
+ 
++# Read-only endpoint views reuse one canonical projection snapshot. Watch
++# rows and resume validation are not cached. Atomic file replacements and
++# current/last-VOD preference changes invalidate the snapshot.
++_MEDIA_HISTORY_READ_INDEX_LOCK = threading.Lock()
++_MEDIA_HISTORY_READ_INDEX = {'signature': None, 'at': 0.0, 'value': None}
++
++
++def _media_history_read_index_signature():
++    paths = (JOBS, HISTORY_RUNTIME_JOBS, VIDEO_HISTORY_DELETIONS,
++             VIDEO_HISTORY_PREFERENCES, VIDEO_SELECTION, STATE / 'current.json',
++             STATE / 'last-vod.json', STATE / 'tmdb-work-details.json',
++             STATE / 'media-catalog.sqlite3', STATE / 'media-catalog.sqlite3-wal')
++    result = []
++    for path in paths:
++        try:
++            st = path.stat()
++            result.append((st.st_dev, st.st_ino, st.st_mtime_ns, st.st_size))
++        except FileNotFoundError:
++            result.append(None)
++        except OSError:
++            return None
++    return tuple(result)
++
++
++def _media_history_read_indexes():
++    from flask import has_request_context
++    # Mutations and non-HTTP callers must always compute fresh indexes.
++    if not has_request_context() or request.method != 'GET':
++        return _media_history_group_indexes()
++    with _MEDIA_HISTORY_READ_INDEX_LOCK:
++        signature = _media_history_read_index_signature()
++        now = time.monotonic()
++        value = _MEDIA_HISTORY_READ_INDEX['value']
++        if (signature is not None and value is not None
++                and signature == _MEDIA_HISTORY_READ_INDEX['signature']
++                and now - _MEDIA_HISTORY_READ_INDEX['at'] < 15.0):
++            return value
++        value = _media_history_group_indexes()
++        if signature is not None and signature == _media_history_read_index_signature():
++            _MEDIA_HISTORY_READ_INDEX.update(signature=signature, at=time.monotonic(), value=value)
++        else:
++            _MEDIA_HISTORY_READ_INDEX.update(signature=None, at=0.0, value=None)
++        return value
++
++
+ def _media_history_payload(endpoint: object = None) -> dict:
+     history_id = _media_history_namespace(endpoint)
+     store = player._load_endpoint_watch_history()
+@@ -9887,7 +9932,7 @@
+         dict(item) for item in player._endpoint_history_items(store, history_id)
+         if isinstance(item, dict)
+     ]
+-    by_job, by_title_year, canonical = _media_history_group_indexes()
++    by_job, by_title_year, canonical = _media_history_read_indexes()
+     grouped: dict[str, list[dict]] = {}
+     unmatched: list[dict] = []
+     group_refs: dict[str, dict] = {}
