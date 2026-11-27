@@ -1,0 +1,18 @@
+--- a/player.py
++++ b/player.py
+@@ -1712,11 +1712,11 @@
+     elif action == 'forward':
+         result = command(['seek', 15, 'relative'])
+     elif action == 'stop':
++        # Explicit Stop is not a request to resume an unrelated YouTube
++        # session. Preserve canonical video mode and saved progress.
+         stop()
+-        try:
+-            _start_user_unit(TV_MODE_UNIT_TEMPLATE.format('kiosk'))
+-        except Exception:
+-            pass
++        if _player_active() or _named_process_running('mpv'):
++            raise RuntimeError('Плеєр не підтвердив зупинку.')
+         result = {'error': 'success'}
+     else:
+         raise ValueError('Невідома команда')
