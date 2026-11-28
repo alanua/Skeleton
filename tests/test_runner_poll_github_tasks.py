@@ -3940,6 +3940,70 @@ def test_cross_project_publication_failure_keeps_changed_worktree(
     notify.assert_called_once_with(13, "BLOCKED", mock.ANY)
 
 
+def test_source_only_done_publication_without_pr_keeps_changed_worktree(
+    tmp_path: Path,
+) -> None:
+    issue_path = tmp_path / "lavalamp" / "issue-alanua-Lavalamp-13"
+    issue_body = _lavalamp_codegen_issue_body().replace(
+        "Selected Repository: alanua/Lavalamp\n", ""
+    )
+    issue = {
+        "number": 13,
+        "title": "Source-only Lavalamp delivery",
+        "body": issue_body,
+        "comments": [],
+    }
+
+    with mock.patch.object(runner, "set_issue_label") as labels, mock.patch.object(
+        runner, "verify_target_repository_checkout", return_value=None
+    ), mock.patch.object(
+        runner,
+        "prepare_target_repository_issue_worktree",
+        return_value=(0, "ready", issue_path),
+    ), mock.patch.object(
+        runner, "cleanup_runtime_artifacts"
+    ), mock.patch.object(
+        runner, "run_codex_task", return_value=(0, "RESULT: DONE")
+    ), mock.patch.object(
+        runner, "changed_files", return_value=["README.md"]
+    ), mock.patch.object(
+        runner, "local_worktree_recovery_diff", return_value="Local worktree git diff: none"
+    ), mock.patch.object(
+        runner,
+        "publish_target_project_issue_worktree_pr",
+        return_value=(
+            "DONE: Runner host maintenance task completed.\n"
+            "maintenance_task_id=publish_target_project_issue_worktree_pr\n"
+            "repository=alanua/Lavalamp\n"
+            "pushed_head_sha=" + "b" * 40 + "\n"
+            "success_criteria=met"
+        ),
+    ), mock.patch.object(
+        runner, "cleanup_target_repository_issue_worktree"
+    ) as cleanup, mock.patch.object(
+        runner, "post_issue_comment"
+    ) as post, mock.patch.object(
+        runner, "notify_task_finished"
+    ) as notify, mock.patch.object(
+        runner, "record_runner_task_picked_up", return_value=None
+    ), mock.patch.object(
+        runner, "record_runner_executor_result", return_value=None
+    ), mock.patch.object(
+        runner, "maybe_replenish_runner_queue_after_completion", return_value=True
+    ):
+        runner.process_issue(
+            issue, workdir=str(tmp_path), source_repository="alanua/Lavalamp"
+        )
+
+    report = post.call_args.args[1]
+    assert report.startswith("BLOCKED:")
+    assert "reason=publication_report_missing_target_pr" in report
+    assert "Issue workspace kept for review" in report
+    cleanup.assert_not_called()
+    labels.assert_any_call(13, runner.LABEL_RUNNING, runner.LABEL_BLOCKED)
+    notify.assert_called_once_with(13, "BLOCKED", mock.ANY)
+
+
 def test_codegen_blocked_completion_invokes_replenishment_after_terminal_label(
     tmp_path: Path,
 ) -> None:

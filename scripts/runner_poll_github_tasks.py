@@ -7839,12 +7839,27 @@ def publish_local_target_worktree_result(
         )
 
     publish_report = publish_target_project_issue_worktree_pr(publish_body)
-    if maintenance_report_status(publish_report) != "DONE":
+    published_pr_url = _produced_pr_url_from_report(publish_report)
+    published_pr_repository = (
+        extract_pr_repository(published_pr_url)
+        if published_pr_url is not None
+        else None
+    )
+    if (
+        maintenance_report_status(publish_report) != "DONE"
+        or published_pr_repository != runner_task.target_repository
+    ):
+        delivery_reason = (
+            "publication_report_missing_target_pr"
+            if maintenance_report_status(publish_report) == "DONE"
+            else "publication_not_done"
+        )
         return (
             "BLOCKED: Target-project publication is pending or failed.\n\n"
             f"source_repository={source_repository}\n"
             f"source_issue={issue_number}\n"
             f"target_repository={runner_task.target_repository}\n"
+            f"reason={delivery_reason}\n"
             "target_publication=not_done\n"
             "issue_state=publication_not_terminal\n\n"
             "Target publication report:\n"
